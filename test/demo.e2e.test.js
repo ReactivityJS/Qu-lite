@@ -77,6 +77,13 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await send(alice, 'Hallo Bob');
     await chatHas(bob, 'Hallo Bob');
 
+    step('status: online dot, read receipt, typing');
+    await alice.waitForFunction(() => document.querySelectorAll('#members .dot.on').length === 2, null, { timeout: 15_000 });
+    await alice.waitForFunction(() => document.getElementById('chat').textContent.includes('gelesen 1/1'), null, { timeout: 15_000 });
+    await bob.type('#msg', 'tippe');
+    await alice.waitForFunction(() => document.getElementById('typing').textContent.includes('tippt'), null, { timeout: 15_000 });
+    await bob.fill('#msg', '');
+
     step('carol is invited by pubkey through her inbox');
     const carol = await open('carol');
     await carol.goto(`${base}?name=carol`);
@@ -128,6 +135,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     assert.ok(log.includes('net.peer.up'));
     assert.ok(log.includes('sync.done'));
     assert.ok(log.includes('qu.members.epoch'));
+    assert.ok(log.includes('qu.signal.'));
     for (const key of await relay.qu.storage.keys('rec/')) {
       assert.equal(Buffer.from(await relay.qu.storage.get(key)).includes('Hallo Bob'), false);
     }

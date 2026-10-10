@@ -23,7 +23,7 @@ const fromUrl = (text) => JSON.parse(atob(text.replace(/-/g, '+').replace(/_/g, 
 
 const qu = await createPeer({
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
-  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }]],
+  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status'],
   transports: [['ws', { connect: params.has('offline') ? [] : [relayUrl], minDelayMs: 300 }]],
 });
 globalThis.qu = qu; // for the console and the e2e test
@@ -84,7 +84,9 @@ $('doLookup').addEventListener('click', async () => {
 // ---------------------------------------------------------------- groups
 let space = null;
 let manager = null;
+let tracker = null;
 const known = new Map((await qu.restoreGroups()).map((s) => [s.id, s]));
+for (const s of known.values()) (await qu.status(s)).markDelivered('chat'); // delivered also for groups not on screen
 
 async function renderGroupList() {
   $('groups').replaceChildren(el('option', '– Gruppe wählen –', { value: '' }));
@@ -99,11 +101,14 @@ async function openGroup(target) {
   space = target;
   known.set(space.id, space);
   manager = await qu.members(space);
+  tracker = await qu.status(space);
+  await tracker.markDelivered('chat');
   if (location.hash !== `#g=${space.id}`) history.replaceState(null, '', `#g=${space.id}`);
   $('sid').textContent = `sid ${short(space.id)}`;
   $('invite').value = '';
   qu.bus.on(`qu.record.${space.id}`, scheduleRender);
   qu.bus.on('qu.members.*', scheduleRender);
+  qu.bus.on('qu.status.*', scheduleRender);
   await renderGroupList();
   await renderGroup();
 }
@@ -122,20 +127,29 @@ async function renderGroup() {
   const names = Object.fromEntries(people.map((p) => [p.alias, p.name ? `${p.name} ✓` : `alias ${short(p.alias)}`]));
   const windowMs = Number($('window').value);
   const messages = await qu.query({ space, path: 'chat', from: windowMs ? Date.now() - windowMs : undefined });
+  const ticks = await Promise.all(messages.map((m) => (m.author === manager.me ? tracker.of(m) : null)));
   $('chat').replaceChildren(
-    ...messages.map((m) => {
+    ...messages.map((m, i) => {
       const li = el('li', `${new Date(Number(m.hlc.slice(0, 13))).toLocaleTimeString()}  ${names[m.author] ?? `alias ${short(m.author)}`}: ${m.value}`);
       li.dataset.id = m.id;
+      const t = ticks[i];
+      if (t) {
+        const label = !t.sent ? '…' : t.read.length ? `gelesen ${t.read.length}/${t.members}` : t.delivered.length ? `✓✓ ${t.delivered.length}/${t.members}` : '✓';
+        li.append(el('span', label, { className: `tick${t.read.length ? ' read' : ''}` }));
+      }
       return li;
     })
   );
-
+  const typers = tracker.typing('chat').map((a) => names[a] ?? `alias ${short(a)}`);
+  $('typing').textContent = typers.length ? `${typers.join(', ')} tippt …` : '';
+  if (document.visibilityState === 'visible' && messages.some((m) => m.author !== manager.me)) tracker.markRead('chat');
   $('epoch').textContent = `Epoche ${space.epoch}`;
   const myRole = manager.role();
   $('banner').textContent = myRole === 'removed' ? 'Du wurdest entfernt – neue Nachrichten sind für dich nicht mehr lesbar.' : '';
   $('members').replaceChildren(
     ...people.map((p) => {
       const li = el('li');
+      li.append(el('span', '', { className: `dot${p.me || tracker.isOnline(p.alias) ? ' on' : ''}` }));
       li.append(el('span', `${names[p.alias]}${p.me ? ' (ich)' : ''} · ${p.role}`));
       if (!p.me && manager.isAdmin() && p.role !== 'removed' && p.role !== 'owner') {
         li.append(el('button', 'Entfernen', { className: 'secondary', onclick: () => manager.remove(p.alias).then(scheduleRender) }));
@@ -166,6 +180,8 @@ $('send').addEventListener('click', async () => {
   $('msg').value = '';
 });
 $('msg').addEventListener('keydown', (e) => e.key === 'Enter' && $('send').click());
+$('msg').addEventListener('input', () => space && tracker.sendTyping('chat'));
+setInterval(() => space && renderGroup(), 2000); // presence and typing expire without events
 $('saveTitle').addEventListener('click', async () => {
   if (!space) return;
   await qu.write(space, 'meta', $('title').value, { key: 'title' });

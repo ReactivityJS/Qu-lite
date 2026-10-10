@@ -22,6 +22,8 @@ import { mirror } from './mirror.js';
 import { user } from './user.js';
 import { members } from './members.js';
 import { inbox } from './inbox.js';
+import { signals } from './signals.js';
+import { status } from './status.js';
 import { topology } from './net/topology.js';
 import { wsTransport } from './net/ws.js';
 
@@ -36,6 +38,8 @@ export function defaultRegistry() {
     .register('plugin', 'user', (options) => user(options))
     .register('plugin', 'members', (options) => members(options))
     .register('plugin', 'inbox', (options) => inbox(options))
+    .register('plugin', 'signals', (options) => signals(options))
+    .register('plugin', 'status', (options) => status(options))
     .register('plugin', 'topology', (options) => topology(options))
     .register('transport', 'ws', (options) => wsTransport(options));
 }

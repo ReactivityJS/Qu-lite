@@ -1,5 +1,5 @@
 /** Shared test helpers (not a test file). */
-import { createQu, records, sync, user, inbox, members, mirror, connectInProcess } from '../src/index.js';
+import { createQu, records, sync, user, inbox, members, mirror, signals, connectInProcess } from '../src/index.js';
 
 export const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -11,7 +11,7 @@ export async function until(check, ms = 5000, label = 'condition') {
   }
 }
 
-/** A full client: records, sync, user node, inbox, members. */
+/** A full client: records, sync, user node, inbox, members, signals. */
 export async function fullClient(options = {}) {
   const qu = await createQu(options);
   qu.use(records());
@@ -19,6 +19,7 @@ export async function fullClient(options = {}) {
   qu.use(user());
   qu.use(members());
   qu.use(inbox(options.inbox));
+  qu.use(signals());
   await qu.inbox.ready;
   return qu;
 }

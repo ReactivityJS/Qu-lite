@@ -30,6 +30,10 @@
     #log { font-family: ui-monospace, monospace; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; margin: 0; }
     #raw { max-height: 200px; overflow: auto; margin: 0; }
     ul.plain { list-style: none; margin: 0; padding: 0; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+    .dot.on { background: var(--ok); }
+    .tick { color: var(--muted); font-size: 12px; margin-left: 6px; }
+    .tick.read { color: var(--accent); }
     ul.plain li { display: flex; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
     ul.plain li span { flex: 1; min-width: 120px; }
     .wide { grid-column: 1 / -1; }
@@ -67,6 +71,7 @@
       <div class="row"><input id="msg" placeholder="Nachricht"><button id="send">Senden</button>
         <select id="window"><option value="">alles</option><option value="3600000">letzte Stunde</option><option value="86400000">letzte 24 h</option></select></div>
       <ul id="chat"></ul>
+      <div id="typing" class="muted"></div>
       <div class="muted">Klick auf eine Nachricht zeigt ihren gespeicherten, verschlüsselten Umschlag.</div>
       <pre id="raw" class="mono"></pre>
     </section>

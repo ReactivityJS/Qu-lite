@@ -20,7 +20,8 @@
  * write (`qu.write.before`) of a group space:
  *   - the owner may do anything; admins (owner-signed list) may write any
  *     `_members` entry, `_grants` and `_keys`;
- *   - a member may only re-write its own entry without changing its role;
+ *   - a member may only re-write its own entry without changing its role,
+ *     and only write its own `_receipts/*` cursor (key = own alias);
  *     a newcomer may create its own entry with a valid admin-signed invite
  *     token (single use);
  *   - every other record needs an active member as author; a removed
@@ -43,6 +44,7 @@ import { Space } from './space.js';
 const MEMBERS = '_members';
 const GRANTS = '_grants';
 const KEYS = '_keys';
+const RECEIPTS = '_receipts/';
 const ACTIVE = new Set(['owner', 'admin', 'member']);
 const BOX_SIZE = 32 + 12 + 32 + 16; // ephemeral pub + iv + 32-byte key + GCM tag
 const enc = new TextEncoder();
@@ -194,6 +196,7 @@ export function members({ pad = 8 } = {}) {
           return verdict === 'no token' ? 'defer' : verdict; // an admin-written entry may still arrive
         }
         if (record.path === GRANTS || record.path === KEYS) return isAdmin(author) ? 'ok' : 'defer';
+        if (record.path.startsWith(RECEIPTS) && record.key !== author) return 'not your receipt';
         if (!entry) return 'defer';
         if (entry.role === 'removed' && record.hlc > entry.removedAt) return 'removed';
         return 'ok';
@@ -213,6 +216,7 @@ export function members({ pad = 8 } = {}) {
           if (!isAdmin(me)) throw new Error('members: admins only');
           return;
         }
+        if (draft.path.startsWith(RECEIPTS) && draft.key !== me) throw new Error('members: receipts only under your own alias');
         if (!entry || !ACTIVE.has(entry.role)) throw new Error('members: not an active member of this space');
       }
 

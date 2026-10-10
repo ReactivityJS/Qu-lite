@@ -21,3 +21,5 @@ export { members, encodeGrant, decodeGrant } from './members.js';
 export { inbox } from './inbox.js';
 export { Bus } from './bus.js';
 export * as crypto from './crypto.js';
+export { signals } from './signals.js';
+export { status } from './status.js';

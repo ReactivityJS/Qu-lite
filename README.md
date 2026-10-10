@@ -1,10 +1,11 @@
 # @qu/lite
 
-A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-5: kernel, mounts, spaces and user nodes, a privacy-first
+A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-6: kernel, mounts, spaces and user nodes, a privacy-first
 envelope, robust sync (Negentropy reconciliation, partial sync, resync/repair, durable outbox and
 resumable reconciles), persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket first),
 one peer base for clients and relays/mirrors, a Docker relay, a browser demo, and group membership with
-roles, admin-signed key epochs, anonymous key packages and per-user inboxes.
+roles, admin-signed key epochs, anonymous key packages, per-user inboxes, and status (online, typing,
+sent, delivered, read).
 
 **Try it:** `npm run lite:demo` (or `docker compose -f docker-compose.lite.yml up --build`), then open
 `http://localhost:8787/?name=alice` and `http://localhost:8787/?name=bob` in two browsers, create a group,
@@ -155,8 +156,32 @@ await qu.restoreGroups();                              // after a reload
   "mailbox X got N bytes", nothing more. `inbox({ enabled: false })` makes you unreachable this way.
 - **Local state survives reloads**: kept epoch keys (`members/keys/`) and joined groups (`members/groups/`).
 
+## Status (milestone 6)
+
+```js
+qu.use(status());                                      // options: interval, presence, readReceipts
+const st = await qu.status(group);
+st.isOnline(alias); st.typing('chat');                 // presence & typing of the others
+await st.sendTyping('chat');
+await st.markRead('chat');                             // my read cursor for this conversation
+await st.of(record);                                   // {sent, delivered: [aliases], read: [aliases], members}
+await qu.signal(group, 'wave', { hi: true });          // any ephemeral event of your own
+```
+
+- **Signals** (`signals.js`): ephemeral remote events - sealed, signed, encrypted envelopes like records,
+  sent as `sig` and **never stored** (not at peers, not at the mirror, never in sync). Receivers check
+  freshness (60 s), dedupe by id (replays), verify both signatures and the member rules; a mirror
+  forwards verified signals to its subscribers without reading them.
+- **Presence and typing** are signals: a heartbeat every `interval`, an immediate answer to newcomers
+  and a re-announce when the member list changes, `offline` on a clean leave (`pagehide`), typing
+  expiring after 5 s. `status({ presence: false })` never announces you.
+- **Sent / delivered / read** with no per-message overhead: *sent* = the envelope left the outbox (a
+  mirror stored it); *delivered* and *read* are ONE cursor record per member and conversation
+  (`_receipts/<path>`, key = own alias, `{delivered, read}`), raised automatically on arrival and by
+  `markRead()`; only its owner may write it. `status({ readReceipts: false })` sends delivered only.
+
 ## Next milestones
 
-6 status (presence, delivered/read cursors) · 7 WebRTC + browser mesh · 8 HTTPS+SSE transport ·
+7 WebRTC + browser mesh · 8 HTTPS+SSE transport ·
 9 atomic writes · 10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
 text (optional).

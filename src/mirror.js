@@ -10,13 +10,15 @@
  *   - persist every accepted grant under `mirror/grants/<sid>` and
  *     re-verify the whole chain into the keyring on start;
  *   - watch every granted space whole (with `sync({role: 'mirror'})`);
- *   - forward records it pulled via resync live to its subscribers (hub);
+ *   - forward records it pulled via resync live to its subscribers (hub),
+ *     and ephemeral signals (signals.js) without storing them;
  *   - optional `allow` list: other sids are refused for grants and records.
  *
  * Install next to `sync({role: 'mirror'})`, without `records()`.
  */
 import * as crypto from './crypto.js';
 import { envelopes } from './envelopes.js';
+import { signals } from './signals.js';
 
 /** @param {{allow?: string[]|null}} [options] */
 export function mirror({ allow = null } = {}) {
@@ -25,6 +27,7 @@ export function mirror({ allow = null } = {}) {
     const env = envelopes()(qu);
     env.acceptGrants = true;
     env.forwardSynced = true; // a hub: what it pulls from one peer is new for its other subscribers
+    signals()(qu); // forwards verified ephemeral signals, never stores them
     const allowed = (sid) => !allow || allow.includes(sid);
 
     const watchSpace = (sid) => (typeof qu.watch === 'function' ? qu.watch({ space: { sid } }) : undefined);

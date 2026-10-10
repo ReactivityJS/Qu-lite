@@ -445,8 +445,14 @@ export function sync({
       return { outbox: (await storage.keys('sync/out/')).length, pending: (await storage.keys('sync/pending/')).length };
     }
 
-    const api = { watch, resync, reconcileWith, status };
-    Object.assign(qu, { watch, resync, syncStatus: status });
+    /**
+     * Delivery state of one envelope from this device's point of view.
+     * @returns {Promise<'pending'|'sent'>} pending while it waits in the outbox
+     */
+    const syncState = async (sid, id) => ((await storage.has(`sync/out/${sid}/${id}`)) ? 'pending' : 'sent');
+
+    const api = { watch, resync, reconcileWith, status, syncState };
+    Object.assign(qu, { watch, resync, syncStatus: status, syncState });
     return api;
   };
 }
