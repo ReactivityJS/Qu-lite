@@ -1,11 +1,11 @@
 # @qu/lite
 
-A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-6: kernel, mounts, spaces and user nodes, a privacy-first
+A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-7: kernel, mounts, spaces and user nodes, a privacy-first
 envelope, robust sync (Negentropy reconciliation, partial sync, resync/repair, durable outbox and
 resumable reconciles), persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket first),
 one peer base for clients and relays/mirrors, a Docker relay, a browser demo, and group membership with
-roles, admin-signed key epochs, anonymous key packages, per-user inboxes, and status (online, typing,
-sent, delivered, read).
+roles, admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing,
+sent, delivered, read) and direct browser-to-browser links over WebRTC.
 
 **Try it:** `npm run lite:demo` (or `docker compose -f docker-compose.lite.yml up --build`), then open
 `http://localhost:8787/?name=alice` and `http://localhost:8787/?name=bob` in two browsers, create a group,
@@ -179,6 +179,27 @@ await qu.signal(group, 'wave', { hi: true });          // any ephemeral event of
   mirror stored it); *delivered* and *read* are ONE cursor record per member and conversation
   (`_receipts/<path>`, key = own alias, `{delivered, read}`), raised automatically on arrival and by
   `markRead()`; only its owner may write it. `status({ readReceipts: false })` sends delivered only.
+
+## WebRTC (milestone 7)
+
+```js
+const qu = await createPeer({ store: ['indexeddb', { name: 'me' }],
+  plugins: ['records', 'user', 'members', 'inbox', 'sync', 'status'],
+  transports: [['ws', { connect: [relay] }], ['webrtc', { mode: 'auto', iceServers: [{ urls: 'stun:…' }] }]] });
+await qu.rtc.track(group);                             // direct links to online members of this group
+await qu.rtc.setMode('relay-only');                    // privacy: never reveal your IP to members
+```
+
+- **Just another transport** (`net/webrtc.js`): a DataChannel is a byte channel for `createLink`, so sync,
+  records, signals and status run over it unchanged. The relay stays connected (durability, members who
+  are offline); duplicates arriving both ways are deduplicated by id.
+- **Signaling through the space**: offer, answer and ICE candidates travel as `rtc` signals whose payload is
+  an anonymous sealed box to the target's alias key - the relay and the other members see neither SDP nor
+  candidates (no IP addresses). The member with the smaller alias offers (no glare).
+- **Topology**: `mesh` (all online members), `auto` (mesh up to `maxMesh`, then `fanout` peers chosen by a
+  per-peer rendezvous hash so links spread), `relay-only` (no direct links; switchable at runtime).
+- Tested with a fake RTCPeerConnection in Node and with real WebRTC between two Chromium instances, which
+  keep chatting after the relay is shut down.
 
 ## Next milestones
 

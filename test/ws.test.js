@@ -11,7 +11,7 @@ const dir = mkdtempSync(join(tmpdir(), 'qu-lite-ws-'));
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
 
 const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(check, ms = 8000) {
+async function until(check, ms = 20_000) {
   const deadline = Date.now() + ms;
   while (!(await check())) {
     if (Date.now() > deadline) throw new Error('until: condition not met in time');

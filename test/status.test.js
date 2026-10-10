@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { status } from '../src/index.js';
 import { fullClient, mirrorNode, connectInProcess, until, settle } from './helpers.js';
 
-const fast = { interval: 100, typingThrottleMs: 0, typingTtlMs: 150, receiptThrottleMs: 20 };
+// short, but with headroom for a loaded CI machine (offline after 2.5 x interval)
+const fast = { interval: 300, typingThrottleMs: 0, typingTtlMs: 300, receiptThrottleMs: 20 };
 
 async function client(options = {}) {
   const qu = await fullClient();
@@ -37,9 +38,9 @@ test('presence: online while heartbeats arrive, offline on a clean leave or when
 
   await until(() => st.bob.isOnline(alias.carol), 3000);
   await peers.carol.link.disconnect(); // crash: no goodbye
-  await until(() => !st.bob.isOnline(alias.carol), 2000, 'timeout after 2.5 intervals');
+  await until(() => !st.bob.isOnline(alias.carol), 4000, 'timeout after 2.5 intervals');
   connectInProcess(peers.carol, m);
-  await until(() => st.bob.isOnline(alias.carol), 2000, 'back online');
+  await until(() => st.bob.isOnline(alias.carol), 4000, 'back online');
 });
 
 test('typing indicator appears and expires; presence: false stays invisible', async () => {

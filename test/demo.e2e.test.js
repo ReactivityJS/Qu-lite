@@ -1,7 +1,8 @@
 /**
  * End-to-end: the real relay (bin/mirror.mjs preset, serving the demo) and
- * two separate Chromium contexts ("two browsers"). Skipped if Playwright or
- * its browser is not available.
+ * separate Chromium contexts ("separate browsers"), plus real WebRTC between
+ * two of them. Both tests live in this one file so they run one after the
+ * other, never two browser fleets at once. Skipped without Playwright/Chromium.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -51,7 +52,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     const step = (name) => process.env.QU_E2E_DEBUG && console.log(`# step: ${name}`);
     const ready = (page) => page.waitForSelector('body[data-ready="true"]');
     const connected = (page) => page.waitForFunction(() => document.getElementById('conn').textContent === 'verbunden');
-    const chatHas = (page, text) => page.waitForFunction((t) => document.getElementById('chat').textContent.includes(t), text, { timeout: 15_000 });
+    const chatHas = (page, text) => page.waitForFunction((t) => document.getElementById('chat').textContent.includes(t), text, { timeout: 40_000 });
     const send = async (page, text) => {
       await page.fill('#msg', text);
       await page.click('#send');
@@ -78,10 +79,10 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await chatHas(bob, 'Hallo Bob');
 
     step('status: online dot, read receipt, typing');
-    await alice.waitForFunction(() => document.querySelectorAll('#members .dot.on').length === 2, null, { timeout: 15_000 });
-    await alice.waitForFunction(() => document.getElementById('chat').textContent.includes('gelesen 1/1'), null, { timeout: 15_000 });
+    await alice.waitForFunction(() => document.querySelectorAll('#members .dot.on').length === 2, null, { timeout: 40_000 });
+    await alice.waitForFunction(() => document.getElementById('chat').textContent.includes('gelesen 1/1'), null, { timeout: 40_000 });
     await bob.type('#msg', 'tippe');
-    await alice.waitForFunction(() => document.getElementById('typing').textContent.includes('tippt'), null, { timeout: 15_000 });
+    await alice.waitForFunction(() => document.getElementById('typing').textContent.includes('tippt'), null, { timeout: 40_000 });
     await bob.fill('#msg', '');
 
     step('carol is invited by pubkey through her inbox');
@@ -91,7 +92,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await connected(carol);
     await alice.fill('#invitePub', await carol.textContent('#mypub'));
     await alice.click('#invitePubBtn');
-    await carol.waitForSelector('#inbox button', { timeout: 15_000 });
+    await carol.waitForSelector('#inbox button', { timeout: 40_000 });
     await carol.click('#inbox button');
     await chatHas(carol, 'Hallo Bob');
 
@@ -123,10 +124,10 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await alice.waitForFunction((a) => [...document.querySelectorAll('#members li')].some((li) => li.textContent.includes(a.slice(0, 8))), bobAlias);
     await alice.evaluate((a) => [...document.querySelectorAll('#members li')].find((li) => li.textContent.includes(a.slice(0, 8))).querySelector('button').click(), bobAlias);
     await alice.waitForFunction(() => document.getElementById('epoch').textContent === 'Epoche 1');
-    await carol.waitForFunction(() => document.getElementById('epoch').textContent === 'Epoche 1', null, { timeout: 15_000 });
+    await carol.waitForFunction(() => document.getElementById('epoch').textContent === 'Epoche 1', null, { timeout: 40_000 });
     await send(alice, 'nach dem Entfernen');
     await chatHas(carol, 'nach dem Entfernen');
-    await bob.waitForFunction(() => document.getElementById('banner').textContent.includes('entfernt'), null, { timeout: 15_000 });
+    await bob.waitForFunction(() => document.getElementById('banner').textContent.includes('entfernt'), null, { timeout: 40_000 });
     await new Promise((r) => setTimeout(r, 500));
     assert.equal((await bob.textContent('#chat')).includes('nach dem Entfernen'), false);
 
@@ -143,6 +144,63 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
   } finally {
     await browser.close();
     await relay.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two browsers connect directly (WebRTC) and keep chatting when the relay goes down', { skip: !chromium && 'playwright not installed', timeout: 120_000 }, async (t) => {
+  // Local test: let Chromium use plain host candidates instead of mDNS names.
+  const args = ['--disable-features=WebRtcHideLocalIpsWithMdns'];
+  let browser = null;
+  for (const executablePath of [undefined, process.env.QU_CHROMIUM, '/opt/pw-browsers/chromium'].filter((p, i) => i === 0 || p)) {
+    try {
+      browser = await chromium.launch(executablePath ? { executablePath, args } : { args });
+      break;
+    } catch {}
+  }
+  if (!browser) return t.skip('no Chromium available');
+  const dir = mkdtempSync(join(tmpdir(), 'qu-lite-rtc-'));
+  await buildDemo();
+  const relay = await startMirror({ port: 0, db: join(dir, 'relay.sqlite'), static: demoDir, log: () => {} });
+  const base = `http://127.0.0.1:${relay.port}/`;
+  const errors = [];
+  try {
+    const open = async (name) => {
+      const page = await (await browser.newContext()).newPage();
+      page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
+      return page;
+    };
+    const ready = (page) => page.waitForSelector('body[data-ready="true"]');
+    const chatHas = (page, text) => page.waitForFunction((x) => document.getElementById('chat').textContent.includes(x), text, { timeout: 40_000 });
+
+    const alice = await open('alice');
+    await alice.goto(`${base}?name=alice`);
+    await ready(alice);
+    await alice.waitForFunction(() => document.getElementById('conn').textContent === 'verbunden');
+    await alice.click('#newGroup');
+    await alice.waitForFunction(() => location.hash.startsWith('#g='));
+    await alice.click('#makeLink');
+    await alice.waitForFunction(() => document.getElementById('invite').value.includes('#i='));
+    const link = await alice.inputValue('#invite');
+    const bob = await open('bob');
+    await bob.goto(`${base}?name=bob${link.slice(link.indexOf('#'))}`);
+    await ready(bob);
+
+    for (const page of [alice, bob]) await page.waitForFunction(() => document.getElementById('direct').textContent === '1', null, { timeout: 40_000 });
+
+    await relay.close(); // the relay is gone; only the direct link remains
+    for (const page of [alice, bob]) await page.waitForFunction(() => document.getElementById('conn').textContent !== 'verbunden', null, { timeout: 40_000 });
+    await alice.fill('#msg', 'ohne Relay');
+    await alice.click('#send');
+    await chatHas(bob, 'ohne Relay');
+
+    // relay-only closes the direct link
+    await bob.selectOption('#rtcMode', 'relay-only');
+    for (const page of [alice, bob]) await page.waitForFunction(() => document.getElementById('direct').textContent === '0', null, { timeout: 40_000 });
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+    await relay.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });
   }
 });

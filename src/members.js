@@ -230,7 +230,7 @@ export function members({ pad = 8 } = {}) {
         /** my alias in this space (hex) */
         me,
         /** @returns {Array<{alias: string, role: string, identity?: string, name?: string, verified: boolean, me: boolean}>} */
-        list: () => [...list].map(([alias, e]) => ({ alias, role: e.role, identity: e.identity, name: e.name, verified: e.verified, me: alias === me })),
+        list: () => [...list].map(([alias, e]) => ({ alias, role: e.role, xpub: e.xpub, identity: e.identity, name: e.name, verified: e.verified, me: alias === me })),
         role: (alias = me) => list.get(alias)?.role ?? null,
         isAdmin: (alias = me) => isAdmin(alias),
 

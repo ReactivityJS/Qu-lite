@@ -23,3 +23,4 @@ export { Bus } from './bus.js';
 export * as crypto from './crypto.js';
 export { signals } from './signals.js';
 export { status } from './status.js';
+export { rtc } from './net/webrtc.js';

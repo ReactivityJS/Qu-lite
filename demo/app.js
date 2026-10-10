@@ -24,7 +24,10 @@ const fromUrl = (text) => JSON.parse(atob(text.replace(/-/g, '+').replace(/_/g, 
 const qu = await createPeer({
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
   plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status'],
-  transports: [['ws', { connect: params.has('offline') ? [] : [relayUrl], minDelayMs: 300 }]],
+  transports: [
+    ['ws', { connect: params.has('offline') ? [] : [relayUrl], minDelayMs: 300 }],
+    ['webrtc', { mode: params.get('rtc') ?? localStorage.getItem('qu-demo-rtc') ?? 'auto' }],
+  ],
 });
 globalThis.qu = qu; // for the console and the e2e test
 
@@ -60,6 +63,17 @@ async function renderStatus() {
   $('pending').textContent = pending;
 }
 setInterval(renderStatus, 500);
+const direct = new Set();
+qu.bus.on('net.peer.up', ({ peer, via }) => via === 'webrtc' && direct.add(peer));
+qu.bus.on('net.peer.down', ({ peer }) => direct.delete(peer));
+setInterval(() => ($('direct').textContent = direct.size), 500);
+$('rtcMode').value = qu.rtc.mode;
+$('rtcMode').addEventListener('change', async () => {
+  try {
+    localStorage.setItem('qu-demo-rtc', $('rtcMode').value);
+  } catch {}
+  await qu.rtc.setMode($('rtcMode').value);
+});
 qu.bus.on('net.peer.*', renderStatus);
 $('toggle').addEventListener('click', () => {
   if (qu.transports.ws.status().length) qu.transports.ws.disconnect();
@@ -102,6 +116,7 @@ async function openGroup(target) {
   known.set(space.id, space);
   manager = await qu.members(space);
   tracker = await qu.status(space);
+  await qu.rtc.track(space);
   await tracker.markDelivered('chat');
   if (location.hash !== `#g=${space.id}`) history.replaceState(null, '', `#g=${space.id}`);
   $('sid').textContent = `sid ${short(space.id)}`;
