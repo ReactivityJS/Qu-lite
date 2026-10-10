@@ -1,0 +1,15 @@
+{
+  "name": "@qu/lite",
+  "version": "0.1.0",
+  "description": "Qu Lite: a small, event-driven Qu core - EventBus-based processes and hooks, unstorage-style mounts and drivers, Space-rooted records sealed in a metadata-hiding envelope (opaque space id, encrypted path/author/time), and an event-bridge network layer. Milestone 1: no sync/reconciliation yet.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@qu/core": "^0.1.0",
+    "@qu/events": "^0.1.0"
+  },
+  "license": "MIT"
+}
