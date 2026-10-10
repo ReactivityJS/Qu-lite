@@ -35,7 +35,7 @@ function staticHandler(dir) {
 }
 
 /**
- * @param {{bus: import('@qu/events').EventBus, peerId: string}} qu
+ * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string}} [options]
  * @returns {Promise<{port: number, close: () => Promise<void>, wss: WebSocketServer}>}
  */

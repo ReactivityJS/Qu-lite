@@ -22,7 +22,7 @@ test('client and mirror ingest through the same envelope layer; only the keyring
 
   const client = await createQu();
   client.use(records());
-  client.join(await Space.open(space.secret));
+  client.join(await Space.open(space.invite));
   assert.equal((await client.envelopes.ingest(bytes)).status, 'stored');
   assert.equal((await client.query({ space: space.id, path: 'chat' }))[0].value, 'x');
 });
@@ -32,7 +32,7 @@ test('a reader refusing a record (qu.accept) removes its envelope again', async 
   const { bytes, id } = await sealed(space);
   const client = await createQu();
   client.use(records());
-  client.join(await Space.open(space.secret));
+  client.join(await Space.open(space.invite));
   client.bus.on('qu.accept', (_record, ctx) => ctx.stop());
   const outcome = await client.envelopes.ingest(bytes, { from: 'someone' });
   assert.deepEqual([outcome.status, outcome.reason], ['rejected', 'hook']);
@@ -49,8 +49,8 @@ test('the mirror allow-list refuses other spaces at the grant and at the record'
   const a = await createQu();
   a.use(records());
   a.use(sync());
-  a.join(await Space.open(allowed.secret));
-  a.join(await Space.open(other.secret));
+  a.join(await Space.open(allowed.invite));
+  a.join(await Space.open(other.invite));
   await connectInProcess(a, m).ready;
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.deepEqual(await m.mirror.spaces(), [allowed.id]);

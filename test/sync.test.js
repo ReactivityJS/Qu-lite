@@ -35,7 +35,7 @@ const recIds = async (qu, space) => (await qu.storage.keys(`rec/${space.id}/`)).
 const values = async (qu, space, path, q = {}) => (await qu.query({ space, path, ...q })).map((r) => r.value);
 
 async function shared(...peers) {
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   return Promise.all(peers.map(async (qu) => qu.join(await Space.open(secret))));
 }
 
@@ -239,7 +239,7 @@ test('reload: unacknowledged local writes survive and are pushed to the mirror o
   const disk = memoryDriver(); // stands in for IndexedDB: survives the "reload"
   const identity = await (await createQu()).identity;
   const mirror = await peer({ role: 'mirror' });
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sm = mirror.join(await Space.open(secret));
   await mirror.watch({ space: sm });
 
@@ -278,7 +278,7 @@ test('a resync cut off by a dropped connection resumes by itself after reload + 
   const disk = memoryDriver();
   const identity = await (await createQu()).identity;
   const a = await peer();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.join(await Space.open(secret));
   for (let i = 0; i < 200; i++) await a.write(sa, 'log', i);
 

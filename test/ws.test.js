@@ -36,7 +36,7 @@ test('over real WebSockets: live sync, mirror restart, auto-reconnect and a clie
   let rootA = sqliteDriver({ path: clientDb });
   let a = await client({ root: rootA });
   const identityA = a.identity;
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   let sa = a.join(await Space.open(secret));
   const b = await client();
   const sb = b.join(await Space.open(secret));

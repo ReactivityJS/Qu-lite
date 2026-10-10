@@ -15,7 +15,7 @@
 import { encodeFrame, decodeFrame } from './frame.js';
 
 /**
- * @param {{bus: import('@qu/events').EventBus, peerId: string}} qu
+ * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {{send: (bytes: Uint8Array) => void, close?: () => void, via?: string, onUp?: (peer: string) => void, onDown?: () => void}} transport
  * @returns {{receive: (bytes: Uint8Array) => void, closed: () => void, close: () => void, stats: {sent: number, received: number}, readonly peer: string|null}}
  */

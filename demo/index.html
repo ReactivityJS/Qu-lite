@@ -29,6 +29,9 @@
     #chat li:hover { background: var(--bg); }
     #log { font-family: ui-monospace, monospace; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; margin: 0; }
     #raw { max-height: 200px; overflow: auto; margin: 0; }
+    ul.plain { list-style: none; margin: 0; padding: 0; }
+    ul.plain li { display: flex; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    ul.plain li span { flex: 1; min-width: 120px; }
     .wide { grid-column: 1 / -1; }
   </style>
 </head>
@@ -56,14 +59,23 @@
     </section>
     <section>
       <h2>Gruppe <span class="muted" id="sid"></span></h2>
-      <div class="row"><button id="newGroup">Neue Gruppe</button><input id="invite" readonly placeholder="Einladungslink (Secret steht nur im #, geht nie an den Server)"></div>
+      <div id="banner" class="muted" style="color:var(--bad)"></div>
+      <div class="row"><select id="groups"><option value="">– Gruppe wählen –</option></select><button id="newGroup">Neue Gruppe</button></div>
+      <div class="row"><button id="makeLink" class="secondary">Einladungslink</button><input id="invite" readonly placeholder="Link enthält Secret + Token nur im # (geht nie an den Server)"></div>
+      <div class="row"><input id="invitePub" placeholder="Pubkey einladen (über dessen Inbox)"><button id="invitePubBtn" class="secondary">Einladen</button></div>
       <div class="row"><input id="title" placeholder="Titel / Betreff (verschlüsselt, last-write-wins)"><button id="saveTitle">Setzen</button></div>
-      <div class="row"><button id="reveal" class="secondary">Mich in der Gruppe zu erkennen geben</button><span class="muted">Autor ist sonst nur ein Alias</span></div>
       <div class="row"><input id="msg" placeholder="Nachricht"><button id="send">Senden</button>
         <select id="window"><option value="">alles</option><option value="3600000">letzte Stunde</option><option value="86400000">letzte 24 h</option></select></div>
       <ul id="chat"></ul>
       <div class="muted">Klick auf eine Nachricht zeigt ihren gespeicherten, verschlüsselten Umschlag.</div>
       <pre id="raw" class="mono"></pre>
+    </section>
+    <section>
+      <h2>Mitglieder <span class="muted" id="epoch"></span></h2>
+      <div class="row"><button id="reveal" class="secondary">Mich zu erkennen geben</button><span class="muted">sonst nur Alias</span></div>
+      <ul id="members" class="plain"></ul>
+      <h2>Inbox</h2>
+      <ul id="inbox" class="plain"></ul>
     </section>
     <section class="wide">
       <h2>Event-Log <input id="filter" placeholder="Filter, z. B. net. oder sync." style="max-width:260px"></h2>

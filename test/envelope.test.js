@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuCrypto } from '@qu/core';
+import * as crypto from '../src/crypto.js';
 import { Space, sealEnvelope, openEnvelope, peekEnvelope, verifyEnvelope, formatHlc } from '../src/index.js';
 
 const hlc = formatHlc(1_760_000_123_456, 7);
 
 async function setup(visibility = 'private') {
-  const identity = await QuCrypto.generateKeypair();
+  const identity = await crypto.generateIdentity();
   const space = await Space.create();
   const author = await space.authorFor(identity);
   const sealed = await sealEnvelope(space, { path: 'chat/general', hlc, value: { text: 'hallo' }, visibility }, author);
@@ -20,7 +20,7 @@ test('seal/open round-trips path, key, hlc, author and value', async () => {
   assert.equal(record.path, 'chat/general');
   assert.equal(record.key, null);
   assert.equal(record.hlc, hlc);
-  assert.equal(record.author, QuCrypto.toHex(author.publicKey));
+  assert.equal(record.author, crypto.toHex(author.publicKey));
   assert.deepEqual(record.value, { text: 'hallo' });
 });
 
@@ -28,12 +28,12 @@ test('the public header carries opaque ids, epoch, a minute-rounded time and the
   const { identity, author, space, bytes } = await setup();
   const header = peekEnvelope(bytes);
   assert.equal(header.sid, space.id);
-  assert.equal(header.shard, QuCrypto.toHex(await space.shardOf('chat/anything')));
+  assert.equal(header.shard, crypto.toHex(await space.shardOf('chat/anything')));
   assert.equal(header.epoch, 0);
   assert.equal(header.ts % 60_000, 0);
   assert.equal(header.visibility, 'private');
-  assert.equal(header.author, QuCrypto.toHex(author.publicKey));
-  assert.notEqual(header.author, QuCrypto.toHex(identity.publicKey));
+  assert.equal(header.author, crypto.toHex(author.publicKey));
+  assert.notEqual(header.author, crypto.toHex(identity.publicKey));
 });
 
 test('raw envelope bytes contain neither path, value, precise hlc nor the identity', async () => {
@@ -65,7 +65,7 @@ test('tampering with ct, header, author signature or membership signature is rej
 
 test('a non-member cannot forge a record: no epoch write key, no valid membership signature', async () => {
   const { space } = await setup();
-  const attacker = await QuCrypto.generateKeypair();
+  const attacker = await crypto.generateIdentity();
   const attackerSpace = await Space.create();
   const forged = await sealEnvelope(attackerSpace, { path: 'chat/x', hlc, value: 'spam' }, attacker);
   forged.bytes.set(space.sid, 2);
@@ -78,7 +78,7 @@ test('another space cannot open the envelope', async () => {
 });
 
 test('public records are signed and readable without the space key', async () => {
-  const owner = await QuCrypto.generateKeypair();
+  const owner = await crypto.generateIdentity();
   const mine = await Space.user(owner.publicKey, owner);
   const { bytes } = await sealEnvelope(mine, { path: 'profile', key: 'name', hlc, value: 'Anna', visibility: 'public' }, await mine.authorFor(owner));
   const strangersView = await Space.user(owner.publicKey);

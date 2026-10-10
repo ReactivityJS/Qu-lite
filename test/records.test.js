@@ -71,7 +71,7 @@ test('records are mirrored live to a connected peer and duplicates are ignored',
   const a = await makeQu();
   const b = await makeQu();
   const c = await makeQu();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.qu.join(await Space.open(secret));
   const sb = b.qu.join(await Space.open(secret));
   const sc = c.qu.join(await Space.open(secret));
@@ -97,7 +97,7 @@ test('records are mirrored live to a connected peer and duplicates are ignored',
 test('qu.accept hooks can reject an incoming record, and an unknown space is dropped', async () => {
   const a = await makeQu();
   const b = await makeQu();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.qu.join(await Space.open(secret));
   const sb = b.qu.join(await Space.open(secret));
   connectInProcess(a.qu, b.qu);
@@ -125,7 +125,7 @@ test('qu.accept hooks can reject an incoming record, and an unknown space is dro
 test('a record from a peer with a clock too far ahead is rejected', async () => {
   const a = await makeQu(1_760_000_000_000 + 60 * 60 * 1000);
   const b = await makeQu();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.qu.join(await Space.open(secret));
   const sb = b.qu.join(await Space.open(secret));
   connectInProcess(a.qu, b.qu);
@@ -141,7 +141,7 @@ test('a record from a peer with a clock too far ahead is rejected', async () => 
 test('concurrent keyed writes converge to the same head on both peers', async () => {
   const a = await makeQu();
   const b = await makeQu();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.qu.join(await Space.open(secret));
   const sb = b.qu.join(await Space.open(secret));
 

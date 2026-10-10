@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuCrypto } from '@qu/core';
+import * as crypto from '../src/crypto.js';
 import { createQu, records, sync, user, mirror, Space, connectInProcess, encodeFrame, sealEnvelope, formatHlc } from '../src/index.js';
 
 const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -45,13 +45,13 @@ async function dump(qu) {
   return Buffer.concat(parts);
 }
 
-const needles = (identity) => [Buffer.from(identity.publicKey), Buffer.from(QuCrypto.toHex(identity.publicKey)), Buffer.from(QuCrypto.toBase64(identity.publicKey))];
+const needles = (identity) => [Buffer.from(identity.publicKey), Buffer.from(crypto.toHex(identity.publicKey)), Buffer.from(crypto.toBase64(identity.publicKey))];
 
 test('nothing on the wire, at the mirror or in local storage reveals identity, path names or content', async () => {
   const m = await mirrorPeer();
   const alice = await client();
   const bob = await client();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = alice.join(await Space.open(secret));
   const sb = bob.join(await Space.open(secret));
   await bob.watch({ space: sb });
@@ -74,7 +74,7 @@ test('nothing on the wire, at the mirror or in local storage reveals identity, p
 test('the network id is random and rotatable, never derived from the identity', async () => {
   const a = await client();
   assert.match(a.peerId, /^[0-9a-f]{16}$/);
-  assert.notEqual(a.peerId, QuCrypto.toHex(a.identity.publicKey).slice(0, 16));
+  assert.notEqual(a.peerId, crypto.toHex(a.identity.publicKey).slice(0, 16));
   const before = a.peerId;
   assert.notEqual(await a.rotateNetId(), before);
 });
@@ -98,10 +98,10 @@ test('authors are per-space aliases: the same person is unlinkable across spaces
   const r1 = await a.write(s1, 'chat', 'x');
   const r2 = await a.write(s2, 'chat', 'y');
   assert.notEqual(r1.author, r2.author);
-  assert.notEqual(r1.author, QuCrypto.toHex(a.identity.publicKey));
+  assert.notEqual(r1.author, crypto.toHex(a.identity.publicKey));
   // Another device of the same identity signs with the same alias.
   const device2 = await client({ identity: a.identity });
-  const s1b = device2.join(await Space.open(s1.secret));
+  const s1b = device2.join(await Space.open(s1.invite));
   assert.equal((await device2.write(s1b, 'chat', 'z')).author, r1.author);
 });
 
@@ -115,12 +115,12 @@ test('user node: public fields readable by pubkey via the mirror, private ones n
   const me = await alice.me();
   await me.set('name', 'Alice');
   await me.set('phone', '0123 456', { visibility: 'private' });
-  assert.equal(me.id, QuCrypto.toHex(alice.identity.publicKey));
+  assert.equal(me.id, crypto.toHex(alice.identity.publicKey));
 
   const aliceForBob = await bob.user(me.id);
   await until(async () => (await aliceForBob.get('name')) === 'Alice');
   const fields = await aliceForBob.fields();
-  assert.equal(fields.epub, QuCrypto.toHex(alice.identity.xPublicKey));
+  assert.equal(fields.epub, crypto.toHex(alice.identity.xPublicKey));
   assert.equal('phone' in fields, false);
   assert.equal((await dump(bob)).includes(Buffer.from('0123 456')), false);
 

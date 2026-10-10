@@ -11,7 +11,7 @@
  * function. Node-only adapters (sqlite, ws-server) are added by
  * `nodeRegistry()` from `@qu/lite/node`, so browser bundles never see them.
  */
-import { QuCrypto } from '@qu/core';
+import * as crypto from './crypto.js';
 import { createQu } from './qu.js';
 import { Registry } from './registry.js';
 import { memoryDriver } from './drivers/memory.js';
@@ -20,6 +20,8 @@ import { records } from './records.js';
 import { sync } from './sync/sync.js';
 import { mirror } from './mirror.js';
 import { user } from './user.js';
+import { members } from './members.js';
+import { inbox } from './inbox.js';
 import { topology } from './net/topology.js';
 import { wsTransport } from './net/ws.js';
 
@@ -32,6 +34,8 @@ export function defaultRegistry() {
     .register('plugin', 'sync', (options) => sync(options))
     .register('plugin', 'mirror', (options) => mirror(options))
     .register('plugin', 'user', (options) => user(options))
+    .register('plugin', 'members', (options) => members(options))
+    .register('plugin', 'inbox', (options) => inbox(options))
     .register('plugin', 'topology', (options) => topology(options))
     .register('transport', 'ws', (options) => wsTransport(options));
 }
@@ -57,7 +61,7 @@ export async function createPeer({ registry = defaultRegistry(), store = 'memory
   if (identity === 'persisted') {
     identity = await root.get('qu/identity');
     if (!identity) {
-      identity = await QuCrypto.generateKeypair();
+      identity = await crypto.generateIdentity();
       await root.set('qu/identity', identity);
     }
   }

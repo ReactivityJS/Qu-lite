@@ -16,7 +16,8 @@
  *   write:   run('qu.write.before', draft)   transform, or throw to veto
  *            -> seal (author = per-space alias by default) -> envelopes.ingest(local)
  *   read:    'qu.envelope.stored' -> open -> clock drift check
- *            -> emit('qu.accept', record)   ctx.stop() rejects (envelope removed)
+ *            -> emit('qu.accept', record)   ctx.stop() rejects (envelope removed),
+ *                                           ctx.defer = true postpones (see admit())
  *            -> pointer indexes -> notify('qu.record.<sid>')
  *
  * Storage (besides rec/ and sx/ owned by envelopes.js) - pointers only,
@@ -25,6 +26,7 @@
  *   idx/<sid>/<pathTag>/<hlc>-<id>     {id, hlc, author}
  *   head/<sid>/<pathTag>/<keyTag>      {id, hlc, author} of a keyed entry
  *   loc/<sid>/<id>                     {idx|null, head?} (idx null: superseded version)
+ *   defer/<sid>/<id>                   envelope kept but not yet admitted (reindex())
  */
 import { sealEnvelope, openEnvelope, envelopeId, verifyEnvelope, peekEnvelope } from './envelope.js';
 import { envelopes as envelopeLayer, sxKey } from './envelopes.js';
@@ -119,34 +121,81 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       return current;
     }
 
+    /**
+     * Decides what happens to a stored envelope of a joined space:
+     *   'stored' / 'superseded'  indexed (readable)
+     *   'deferred'               kept, not yet indexed: its epoch key is not
+     *                            known yet, or a hook could not decide yet
+     *                            (e.g. author's membership not synced) -
+     *                            re-tried by `reindex()`
+     *   'blind'                  kept, never readable here (a private field of someone else's user node)
+     *   {reject: reason}         refused - the envelope is removed again
+     */
+    async function admit(space, id, bytes, { from, local = false }) {
+      let record;
+      try {
+        record = await openEnvelope(space, bytes, { verify: false });
+      } catch (error) {
+        if (/unknown epoch/.test(error.message)) return defer(space, id);
+        if (/no key to read/.test(error.message)) return 'blind';
+        return { reject: error.message };
+      }
+      if (!local) {
+        if (!clock.recv(record.hlc)) return { reject: 'clock drift' };
+        const accepted = await bus.emit('qu.accept', record, { space, from });
+        if (accepted.stopped) return { reject: accepted.reason ?? 'hook' };
+        if (accepted.defer) return defer(space, id);
+      }
+      await storage.remove(`defer/${space.id}/${id}`);
+      const current = await index(space, record);
+      remember(record);
+      if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: Boolean(local) });
+      else await bus.notify('qu.record.superseded', { from, space: space.id, id });
+      return current ? 'stored' : 'superseded';
+    }
+
+    async function defer(space, id) {
+      await storage.set(`defer/${space.id}/${id}`, 1);
+      await bus.notify('qu.record.deferred', { space: space.id, id });
+      return 'deferred';
+    }
+
     bus.on('qu.envelope.stored', async ({ sid, id, bytes, from, local }, ctx) => {
       const entry = spaces.get(sid);
       if (!entry) return; // not a member: kept blind (verified, unreadable)
-      let record;
-      try {
-        record = await openEnvelope(entry.space, bytes, { verify: false });
-      } catch (error) {
-        if (/no key to read/.test(error.message)) return; // e.g. a private field of someone else's user node
-        ctx.reason = error.message;
+      const outcome = await admit(entry.space, id, bytes, { from, local });
+      if (outcome?.reject) {
+        ctx.reason = outcome.reject;
         return ctx.stop();
       }
-      if (!local) {
-        if (!clock.recv(record.hlc)) {
-          ctx.reason = 'clock drift';
-          return ctx.stop();
-        }
-        const accepted = await bus.emit('qu.accept', record, { space: entry.space, from });
-        if (accepted.stopped) {
-          ctx.reason = 'hook';
-          return ctx.stop();
-        }
-      }
-      const current = await index(entry.space, record);
-      remember(record);
-      ctx.status = current ? 'stored' : 'superseded';
-      if (current) await bus.notify(`qu.record.${sid}`, { ...record, space: sid, local: Boolean(local) });
-      else await bus.notify('qu.record.superseded', { from, space: sid, id });
+      ctx.status = outcome;
     });
+
+    /**
+     * Re-tries every deferred envelope of a space - call after it learned a
+     * new epoch key or its membership state changed (members.js does).
+     * @returns {Promise<{admitted: number, rejected: number, deferred: number}>}
+     */
+    async function reindex(spaceRef) {
+      const space = spaceOf(spaceRef);
+      const counts = { admitted: 0, rejected: 0, deferred: 0 };
+      for (const key of await storage.keys(`defer/${space.id}/`)) {
+        const id = key.slice(key.lastIndexOf('/') + 1);
+        const bytes = await storage.get(`rec/${space.id}/${id}`);
+        if (!bytes) {
+          await storage.remove(key);
+          continue;
+        }
+        const outcome = await admit(space, id, bytes, {});
+        if (outcome?.reject) {
+          await storage.remove(key);
+          await drop(space.id, id);
+          counts.rejected++;
+        } else if (outcome === 'deferred') counts.deferred++;
+        else counts.admitted++;
+      }
+      return counts;
+    }
 
     /**
      * @param {import('./space.js').Space} space
@@ -241,19 +290,30 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         const id = key.slice(key.lastIndexOf('/') + 1);
         const bytes = await storage.get(key);
         report.checked++;
-        let record = null;
+        // 1. integrity, checkable without any secret: id = hash, both signatures valid
+        let header = null;
+        let valid = false;
         try {
-          const header = peekEnvelope(bytes);
-          const writePub = qu.keyring.get(space.id, header.epoch);
-          if ((await envelopeId(bytes)) === id && writePub && (await verifyEnvelope(bytes, writePub))) record = await openEnvelope(space, bytes, { verify: false });
+          header = peekEnvelope(bytes);
+          const writePub = qu.keyring.get(space.id, header.epoch) ?? space.writeKeys().get(header.epoch);
+          valid = (await envelopeId(bytes)) === id && Boolean(writePub) && (await verifyEnvelope(bytes, writePub));
         } catch {
-          record = null;
+          valid = false;
         }
         cache.delete(id);
-        if (!record) {
+        if (!valid) {
           await storage.remove(key); // can't trust its header to find the sx entry
+          await storage.remove(`defer/${space.id}/${id}`);
           await drop(space.id, id);
           report.dropped.push(id);
+          continue;
+        }
+        // 2. index repair - only for admitted records (deferred/blind ones are not indexed by design)
+        if (await storage.has(`defer/${space.id}/${id}`)) continue;
+        let record;
+        try {
+          record = await openEnvelope(space, bytes, { verify: false });
+        } catch {
           continue;
         }
         const loc = await storage.get(`loc/${space.id}/${id}`);
@@ -282,7 +342,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
     /** Re-announces a space's write keys (after `rotate()`/`acceptEpoch()`). */
     const announce = (spaceRef) => env.announce(spaceOf(spaceRef).id);
 
-    Object.assign(qu, { join, leave, write, get, query, scrub, announce });
-    return { join, leave, write, get, query, scrub, announce, spaceOf };
+    /** @param {string} sid @returns {import('./space.js').Space|null} */
+    const spaceById = (sid) => spaces.get(sid)?.space ?? null;
+
+    Object.assign(qu, { join, leave, write, get, query, scrub, announce, reindex, space: spaceById });
+    return { join, leave, write, get, query, scrub, announce, reindex, spaceOf };
   };
 }

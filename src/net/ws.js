@@ -15,7 +15,7 @@ const OPEN = 1;
 
 /**
  * Wires one already-created socket into a link.
- * @param {{bus: import('@qu/events').EventBus, peerId: string}} qu
+ * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {WebSocket} socket
  * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void}} [options]
  */
@@ -44,7 +44,7 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown } = {}) {
 
 /**
  * One self-healing client connection.
- * @param {{bus: import('@qu/events').EventBus, peerId: string}} qu
+ * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {string} url
  * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number}} [options]
  * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null, readonly url: string}}

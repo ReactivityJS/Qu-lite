@@ -17,7 +17,7 @@
  *
  * Needs `records()`; uses `sync()` (if installed) to fetch other users' nodes.
  */
-import { QuCrypto } from '@qu/core';
+import * as crypto from './crypto.js';
 import { Space } from './space.js';
 
 const PUBLIC = 'profile';
@@ -28,7 +28,7 @@ export function user() {
     if (typeof qu.write !== 'function') throw new Error('user(): install records() first');
     /** @type {Map<string, Promise<object>>} */
     const nodes = new Map();
-    const myId = QuCrypto.toHex(qu.identity.publicKey);
+    const myId = crypto.toHex(qu.identity.publicKey);
 
     const fieldsOf = async (space, path) => {
       const out = {};
@@ -69,7 +69,7 @@ export function user() {
               getPrivate: (field) => qu.get(space, PRIVATE, field),
               privateFields: () => fieldsOf(space, PRIVATE),
             });
-            if ((await view.get('epub')) === null) await view.set('epub', QuCrypto.toHex(qu.identity.xPublicKey));
+            if ((await view.get('epub')) === null) await view.set('epub', crypto.toHex(qu.identity.xPublicKey));
             return view;
           })()
         );
@@ -88,7 +88,7 @@ export function user() {
         nodes.set(
           pubHex,
           (async () => {
-            const space = qu.join(await Space.user(QuCrypto.fromHex(pubHex)));
+            const space = qu.join(await Space.user(crypto.fromHex(pubHex)));
             if (typeof qu.watch === 'function') await qu.watch({ space, path: PUBLIC });
             return viewOf(space);
           })()

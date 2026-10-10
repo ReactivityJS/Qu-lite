@@ -1,295 +1,382 @@
 /**
- * SPACE - the root of every app and every piece of data. Two kinds:
+ * SPACE - the root of every app and every piece of data. Three kinds:
  *
- * GROUP SPACE - a 32-byte secret plus key EPOCHS; everything else derived:
+ * GROUP - a 32-byte secret, an OWNER and key EPOCHS:
  *
- *   epoch 0 key  = HKDF(secret, "qu-lite/epoch/0")
- *   epoch n key  = random, distributed wrapped per member (rotate/acceptEpoch)
- *   write key(n) = Ed25519 from HKDF(epochKey(n), "qu-lite/write")
- *   sid          = SHA-256(writePub(0))[0..16]          opaque id on the wire
- *   shardKey     = HKDF(secret, "qu-lite/shard")        HMAC key for path shards
- *   tagKey       = HKDF(secret, "qu-lite/tag")          HMAC key for local index tags
+ *   ctx           = hex(SHA-256(secret))                 alias context (stable, secret)
+ *   owner         = the founder's alias in this space    (set at creation)
+ *   epoch 0 key   = HKDF(secret, "qu-lite/epoch/0")
+ *   epoch n key   = random; distributed as anonymous sealed boxes (members.js)
+ *   write key(n)  = Ed25519 from HKDF(epochKey(n), "qu-lite/write")
+ *   sid           = SHA-256(writePub(0) || ownerPub)[0..16]
+ *   shard/tag key = HKDF(secret, "qu-lite/shard" | "qu-lite/tag")
  *
- * USER NODE - a space reachable by an identity's PUBKEY instead of a secret:
+ * USER NODE - reachable by an identity's pubkey, written only by its owner:
+ *   sid = SHA-256("qu-lite/user" || identityPub)[0..16], write key = identity key,
+ *   private records encrypted with HKDF(identity.privateKey, "qu-lite/user-private").
  *
- *   sid          = SHA-256("qu-lite/user" || identityPub)[0..16]
- *   write key    = the identity key itself - only its owner can write
- *   public recs  = signed, plaintext: anyone who knows the pubkey reads them
- *   private recs = AES key HKDF(identity.privateKey, "qu-lite/user-private"):
- *                  only the owner's devices read them
+ * INBOX - reachable by an identity's pubkey, writable by ANYONE (the write
+ *   key is derived from the public key), records are public envelopes that
+ *   carry anonymous sealed boxes to the owner's epub (inbox.js):
+ *   sid = SHA-256("qu-lite/inbox" || identityPub)[0..16].
  *
- * Both sids are SELF-CERTIFYING: a mirror shown epoch 0's write public key
- * can check it against the sid and then verify every record's signatures
- * without any secret. Later epochs of a group are announced as GRANTS signed
- * with the previous epoch's write key (`grants()`).
+ * GRANTS - what lets a peer that holds no secret (a mirror) verify records:
  *
- * AUTHORS: records are signed by an AUTHOR key that is public on the wire
- * (envelope.js). By default it is a per-space ALIAS derived from the
- * identity's private key (`authorFor()`): every device of the identity gets
- * the same alias, nobody without the private key can link it to the
- * identity, and the aliases of one identity in two spaces are unlinkable.
+ *   {epoch: 0, writePub, owner}         group: SHA-256(writePub || owner) = sid
+ *   {epoch: 0, writePub}                user node: SHA-256("qu-lite/user" || writePub) = sid
+ *   {epoch: 0, writePub, inboxOf}       inbox: sid from inboxOf, writePub derived from it
+ *   {kind: 'admins', seq, admins, sig}  signed by the OWNER; highest seq wins
+ *   {epoch: n, writePub, by, sig}       signed by the owner or a current admin
+ *
+ * Epochs are thus authorised by the owner/admins, not by "whoever had the
+ * previous key": a removed member cannot announce (and so block) the next
+ * epoch at a mirror.
+ *
+ * AUTHORS - records are signed by a per-space ALIAS (Ed25519 + X25519 for
+ * key packages) derived from the identity's private key and the space's
+ * ctx: identical on all of a person's devices, unlinkable to the identity
+ * and across spaces. User nodes sign with the identity itself.
  */
-import { QuCrypto } from '@qu/core';
+import * as crypto from './crypto.js';
 
-const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
 
-/** @param {Uint8Array} ikm @param {string} info @param {number} [length] @returns {Promise<Uint8Array>} */
-export async function hkdf(ikm, info, length = 32) {
-  const key = await subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
-  const bits = await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: enc.encode(info) }, key, length * 8);
-  return new Uint8Array(bits);
-}
+const digestPrefix = async (label, ...parts) => (await crypto.sha256(crypto.concat(enc.encode(label), ...parts))).slice(0, 16);
 
-/** @param {Uint8Array} keyBytes @param {Uint8Array} data @returns {Promise<Uint8Array>} */
-export async function hmac(keyBytes, data) {
-  const key = await subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return new Uint8Array(await subtle.sign('HMAC', key, data));
-}
+/** @returns {Promise<Uint8Array>} 16-byte sid of a group space */
+export const sidOf = async (writePub0, ownerPub) => (await crypto.sha256(crypto.concat(writePub0, ownerPub))).slice(0, 16);
+/** @returns {Promise<Uint8Array>} 16-byte sid of an identity's user node */
+export const userSidOf = (identityPub) => digestPrefix('qu-lite/user', identityPub);
+/** @returns {Promise<Uint8Array>} 16-byte sid of an identity's inbox */
+export const inboxSidOf = (identityPub) => digestPrefix('qu-lite/inbox', identityPub);
 
-/** @param {Uint8Array} writePub0 @returns {Promise<Uint8Array>} 16-byte sid of a group space. */
-export async function sidOf(writePub0) {
-  return (await QuCrypto.sha256(writePub0)).slice(0, 16);
-}
+/** The (public!) write key pair of an identity's inbox. */
+export const inboxWriteKey = async (identityPub) => crypto.keypairFromSeed('Ed25519', await crypto.hkdf(identityPub, 'qu-lite/inbox-write'));
 
-/** @param {Uint8Array} identityPub @returns {Promise<Uint8Array>} 16-byte sid of that identity's user node. */
-export async function userSidOf(identityPub) {
-  const prefix = enc.encode('qu-lite/user');
-  const data = new Uint8Array(prefix.length + identityPub.length);
-  data.set(prefix, 0);
-  data.set(identityPub, prefix.length);
-  return (await QuCrypto.sha256(data)).slice(0, 16);
-}
-
-/** What a grant for `epoch` signs (with the write key of `epoch - 1`). */
-export function grantMessage(sidHex, epoch, writePub) {
-  const head = enc.encode(`qu-lite/grant\n${sidHex}\n${epoch}\n`);
-  const out = new Uint8Array(head.length + writePub.length);
-  out.set(head, 0);
-  out.set(writePub, head.length);
-  return out;
+/** Canonical bytes a grant signature covers. */
+export function grantMessage(sidHex, grant) {
+  if (grant.kind === 'admins') return crypto.concat(enc.encode(`qu-lite/grant\n${sidHex}\nadmins\n${grant.seq}\n`), ...grant.admins);
+  return crypto.concat(enc.encode(`qu-lite/grant\n${sidHex}\nepoch\n${grant.epoch}\n`), grant.writePub);
 }
 
 /**
- * Checks a list of grants against already-known write keys (`known`: epoch
- * -> writePub) and returns the newly verified ones, in epoch order.
- * @param {string} sidHex
- * @param {Array<{epoch: number, writePub: Uint8Array, sig: Uint8Array|null}>} grants
- * @param {Map<number, Uint8Array>} known
- * @returns {Promise<Map<number, Uint8Array>>}
+ * Grant state of one space as a verifier knows it.
+ * @typedef {{owner: Uint8Array|null, admins: {seq: number, list: Uint8Array[]}, epochs: Map<number, Uint8Array>}} GrantState
  */
-export async function verifyGrants(sidHex, grants, known) {
-  const accepted = new Map();
-  const keyFor = (epoch) => known.get(epoch) ?? accepted.get(epoch);
-  for (const { epoch, writePub, sig } of [...grants].sort((a, b) => a.epoch - b.epoch)) {
-    if (keyFor(epoch)) continue;
-    if (epoch === 0) {
-      const certified = QuCrypto.toHex(await sidOf(writePub)) === sidHex || QuCrypto.toHex(await userSidOf(writePub)) === sidHex;
-      if (certified) accepted.set(0, writePub);
-    } else if (sig && keyFor(epoch - 1) && (await QuCrypto.verify(grantMessage(sidHex, epoch, writePub), sig, keyFor(epoch - 1)))) {
-      accepted.set(epoch, writePub);
+export const emptyGrantState = () => ({ owner: null, admins: { seq: -1, list: [] }, epochs: new Map() });
+
+const same = (a, b) => a && b && crypto.toHex(a) === crypto.toHex(b);
+
+/**
+ * Verifies offered grants against what is already known and returns the
+ * new, merged state plus what changed. Pure: does not mutate `state`.
+ * Order inside the offer does not matter (epoch 0, then admins, then epochs).
+ * @param {string} sidHex
+ * @param {Array<object>} grants
+ * @param {GrantState} state
+ * @returns {Promise<{state: GrantState, changed: string[]}>}
+ */
+export async function verifyGrants(sidHex, grants, state) {
+  const next = { owner: state.owner, admins: { ...state.admins, list: [...state.admins.list] }, epochs: new Map(state.epochs) };
+  const changed = [];
+  const list = Array.isArray(grants) ? grants : [];
+  const bytes = (v) => v instanceof Uint8Array;
+
+  for (const g of list.filter((g) => g?.epoch === 0 && bytes(g.writePub))) {
+    if (next.epochs.has(0)) break;
+    let ok = false;
+    let owner = null;
+    if (bytes(g.owner) && crypto.toHex(await sidOf(g.writePub, g.owner)) === sidHex) [ok, owner] = [true, g.owner];
+    else if (bytes(g.inboxOf) && crypto.toHex(await inboxSidOf(g.inboxOf)) === sidHex && same((await inboxWriteKey(g.inboxOf)).publicKey, g.writePub)) ok = true;
+    else if (crypto.toHex(await userSidOf(g.writePub)) === sidHex) [ok, owner] = [true, g.writePub];
+    if (ok) {
+      next.epochs.set(0, g.writePub);
+      next.owner = owner;
+      changed.push('epoch:0');
     }
   }
-  return accepted;
+  for (const g of list.filter((g) => g?.kind === 'admins' && Array.isArray(g.admins) && g.admins.every(bytes)).sort((a, b) => a.seq - b.seq)) {
+    if (!next.owner || !(g.seq > next.admins.seq) || !bytes(g.sig)) continue;
+    if (await crypto.verify(grantMessage(sidHex, g), g.sig, next.owner)) {
+      next.admins = { seq: g.seq, list: g.admins, sig: g.sig };
+      changed.push(`admins:${g.seq}`);
+    }
+  }
+  const authorised = (by) => same(by, next.owner) || next.admins.list.some((a) => same(a, by));
+  for (const g of list.filter((g) => Number.isInteger(g?.epoch) && g.epoch > 0 && bytes(g.writePub)).sort((a, b) => a.epoch - b.epoch)) {
+    if (next.epochs.has(g.epoch) || !bytes(g.by) || !bytes(g.sig) || !authorised(g.by)) continue;
+    if (await crypto.verify(grantMessage(sidHex, g), g.sig, g.by)) {
+      next.epochs.set(g.epoch, g.writePub);
+      changed.push(`epoch:${g.epoch}`);
+    }
+  }
+  return { state: next, changed };
 }
 
 async function deriveEpoch(epochKey) {
-  const seed = await hkdf(epochKey, 'qu-lite/write');
-  const { publicKey, privateKeyPkcs8 } = await QuCrypto.keypairFromSeed('Ed25519', seed);
-  const aesKey = await subtle.importKey('raw', epochKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-  return { key: epochKey, aesKey, writePub: publicKey, writePriv: privateKeyPkcs8 };
+  const { publicKey, privateKey } = await crypto.keypairFromSeed('Ed25519', await crypto.hkdf(epochKey, 'qu-lite/write'));
+  return { key: epochKey, aesKey: await crypto.aesKey(epochKey), writePub: publicKey, writePriv: privateKey };
 }
 
 export class Space {
   /** @type {Map<number, {key: Uint8Array|null, aesKey: CryptoKey|null, writePub: Uint8Array, writePriv: Uint8Array|null}>} */
   #epochs = new Map();
+  /** @type {Map<number, {by: Uint8Array, sig: Uint8Array}>} signatures of epoch grants n > 0 */
+  #epochSigs = new Map();
+  /** @type {{seq: number, list: Uint8Array[], sig?: Uint8Array}} */
+  #admins = { seq: -1, list: [] };
   #shardKey;
   #tagKey;
-  /** @type {Map<string, Promise<{publicKey: Uint8Array, privateKey: Uint8Array}>>} */
-  #authors = new Map();
+  #ctx;
+  #inboxOf = null;
+  /** @type {Map<string, Promise<object>>} */
+  #aliases = new Map();
 
-  /** Use `Space.create()`/`Space.open()`/`Space.user()`. */
-  constructor({ secret = null, sid, shardKey, tagKey, owner = null }) {
-    /** @type {Uint8Array|null} Group secret (null for user nodes). */
+  /** Use `Space.create()` / `Space.open()` / `Space.user()` / `Space.inbox()`. */
+  constructor({ kind, secret = null, sid, shardKey, tagKey, ctx = null, owner = null }) {
+    /** @type {'group'|'user'|'inbox'} */
+    this.kind = kind;
+    /** @type {Uint8Array|null} group secret */
     this.secret = secret;
-    /** @type {Uint8Array} 16 bytes, what travels on the wire. */
+    /** @type {Uint8Array} 16 bytes on the wire */
     this.sid = sid;
-    /** @type {string} hex of `sid` - storage keys, bus topics. */
-    this.id = QuCrypto.toHex(sid);
-    /** @type {Uint8Array|null} User nodes: the owning identity's Ed25519 pubkey. */
+    /** @type {string} hex sid - storage keys, bus topics */
+    this.id = crypto.toHex(sid);
+    /** @type {Uint8Array|null} group: founder's alias; user node: the identity */
     this.owner = owner;
-    /** @type {'group'|'user'} */
-    this.kind = owner ? 'user' : 'group';
     this.#shardKey = shardKey;
     this.#tagKey = tagKey;
-    /** @type {number} The epoch new records are sealed with. */
+    this.#ctx = ctx;
+    /** @type {number} the epoch new records are sealed with */
     this.epoch = 0;
   }
 
-  /** @returns {Promise<Space>} A new group space with a random secret. */
-  static async create() {
-    return Space.open(globalThis.crypto.getRandomValues(new Uint8Array(32)));
+  // ------------------------------------------------------------- factories
+  /**
+   * A new group; `identity` becomes its owner (through its alias).
+   * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} [identity]
+   */
+  static async create(identity) {
+    // Without a founder the owner is a throwaway identity: a group nobody can administer.
+    identity = identity ?? (await crypto.generateIdentity());
+    const secret = crypto.randomBytes(32);
+    const ctx = crypto.toHex(await crypto.sha256(secret));
+    const owner = (await aliasPair(identity, ctx)).publicKey;
+    return Space.open(secret, { owner });
   }
 
-  /** @param {Uint8Array} secret @returns {Promise<Space>} */
-  static async open(secret) {
+  /**
+   * @param {Uint8Array|{secret: Uint8Array, owner: Uint8Array}} secret - or an `invite` object
+   * @param {{owner?: Uint8Array|string}} [options] - the owner's alias public key (from the invite)
+   */
+  static async open(secret, { owner } = {}) {
+    if (secret && !(secret instanceof Uint8Array)) ({ secret, owner } = secret); // an invite object
     if (!(secret instanceof Uint8Array) || secret.length !== 32) throw new Error('Space.open: secret must be 32 bytes');
-    const epoch0 = await deriveEpoch(await hkdf(secret, 'qu-lite/epoch/0'));
-    const space = new Space({ secret, sid: await sidOf(epoch0.writePub), shardKey: await hkdf(secret, 'qu-lite/shard'), tagKey: await hkdf(secret, 'qu-lite/tag') });
+    const ownerPub = typeof owner === 'string' ? crypto.fromHex(owner) : owner;
+    if (!(ownerPub instanceof Uint8Array) || ownerPub.length !== 32) throw new Error('Space.open: owner public key required');
+    const epoch0 = await deriveEpoch(await crypto.hkdf(secret, 'qu-lite/epoch/0'));
+    const space = new Space({
+      kind: 'group',
+      secret,
+      sid: await sidOf(epoch0.writePub, ownerPub),
+      shardKey: await crypto.hkdf(secret, 'qu-lite/shard'),
+      tagKey: await crypto.hkdf(secret, 'qu-lite/tag'),
+      ctx: crypto.toHex(await crypto.sha256(secret)),
+      owner: ownerPub,
+    });
     space.#epochs.set(0, epoch0);
     return space;
   }
 
   /**
-   * A user node, reachable by `identityPub`. Pass the matching `identity`
-   * (with private keys) to get the OWNER's view - writable, private records
-   * readable; without it you get the public view anyone has.
-   * @param {Uint8Array} identityPub
-   * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} [identity]
-   * @returns {Promise<Space>}
+   * A user node. With the matching `identity` you get the owner's view
+   * (writable, private records readable); without it the public view.
    */
   static async user(identityPub, identity) {
-    if (identity && QuCrypto.toHex(identity.publicKey) !== QuCrypto.toHex(identityPub)) throw new Error('Space.user: identity does not match pubkey');
+    if (identity && crypto.toHex(identity.publicKey) !== crypto.toHex(identityPub)) throw new Error('Space.user: identity does not match pubkey');
     const space = new Space({
+      kind: 'user',
       sid: await userSidOf(identityPub),
-      shardKey: await hkdf(identityPub, 'qu-lite/user-shard'),
-      tagKey: await hkdf(identityPub, 'qu-lite/user-tag'),
+      shardKey: await crypto.hkdf(identityPub, 'qu-lite/user-shard'),
+      tagKey: await crypto.hkdf(identityPub, 'qu-lite/user-tag'),
       owner: identityPub,
     });
-    const privateKey = identity ? await hkdf(identity.privateKey, 'qu-lite/user-private') : null;
-    space.#epochs.set(0, {
-      key: privateKey,
-      aesKey: privateKey ? await subtle.importKey('raw', privateKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']) : null,
-      writePub: identityPub,
-      writePriv: identity ? identity.privateKey : null,
-    });
+    const privateKey = identity ? await crypto.hkdf(identity.privateKey, 'qu-lite/user-private') : null;
+    space.#epochs.set(0, { key: privateKey, aesKey: privateKey ? await crypto.aesKey(privateKey) : null, writePub: identityPub, writePriv: identity?.privateKey ?? null });
     return space;
   }
 
-  /** @returns {string|null} A user node's human-facing id (owner pubkey hex), else null. */
-  get ownerId() {
-    return this.owner ? QuCrypto.toHex(this.owner) : null;
+  /** An identity's inbox: anyone can drop (public envelopes of sealed boxes), only the owner can open them. */
+  static async inbox(identityPub) {
+    const space = new Space({
+      kind: 'inbox',
+      sid: await inboxSidOf(identityPub),
+      shardKey: await crypto.hkdf(identityPub, 'qu-lite/inbox-shard'),
+      tagKey: await crypto.hkdf(identityPub, 'qu-lite/inbox-tag'),
+    });
+    space.#inboxOf = identityPub;
+    const writer = await inboxWriteKey(identityPub);
+    space.#epochs.set(0, { key: null, aesKey: null, writePub: writer.publicKey, writePriv: writer.privateKey });
+    return space;
   }
 
-  /** Can this view write (holds the current epoch's write key)? */
+  // ------------------------------------------------------------- identity
+  /** What a new member needs to open this group: `Space.open(space.invite)`. */
+  get invite() {
+    return { secret: this.secret, owner: this.owner };
+  }
+
+  get ownerId() {
+    return this.owner ? crypto.toHex(this.owner) : null;
+  }
+
   get writable() {
     return Boolean(this.#epochs.get(this.epoch)?.writePriv);
   }
 
   /**
-   * The key pair that signs this identity's records in this space - public
-   * on the wire as the record's author.
-   *   'alias' (default for groups): Ed25519 from HKDF(identity.privateKey,
-   *            "qu-lite/alias/" + sid) - stable across the identity's
-   *            devices, unlinkable to the identity and across spaces.
-   *   'identity' (always for user nodes): the identity key itself.
-   * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} identity
-   * @param {'alias'|'identity'} [mode]
+   * The key pair that signs this identity's records here: the per-space
+   * alias for groups (and inboxes: a fresh one-time key per call), the
+   * identity itself for its user node or with mode 'identity'.
    * @returns {Promise<{publicKey: Uint8Array, privateKey: Uint8Array}>}
    */
-  authorFor(identity, mode = this.kind === 'user' ? 'identity' : 'alias') {
-    if (this.kind === 'user' || mode === 'identity') return Promise.resolve({ publicKey: identity.publicKey, privateKey: identity.privateKey });
-    const cacheKey = QuCrypto.toHex(identity.publicKey);
-    if (!this.#authors.has(cacheKey)) {
-      this.#authors.set(
-        cacheKey,
-        hkdf(identity.privateKey, `qu-lite/alias/${this.id}`).then(async (seed) => {
-          const { publicKey, privateKeyPkcs8 } = await QuCrypto.keypairFromSeed('Ed25519', seed);
-          return { publicKey, privateKey: privateKeyPkcs8 };
-        })
-      );
-    }
-    return this.#authors.get(cacheKey);
+  async authorFor(identity, mode = 'alias') {
+    if (this.kind === 'user' || mode === 'identity') return { publicKey: identity.publicKey, privateKey: identity.privateKey };
+    if (this.kind === 'inbox') return crypto.keypairFromSeed('Ed25519', crypto.randomBytes(32));
+    return (await this.#alias(identity)).ed;
   }
 
-  /**
-   * Opaque, deterministic tag for a path or key - what local indexes are
-   * keyed by, so no path or field name is ever stored in clear.
-   * @param {string} text
-   * @returns {Promise<string>} 24 hex chars
-   */
+  /** The alias' X25519 key pair (receives epoch key packages). */
+  async aliasX(identity) {
+    return (await this.#alias(identity)).x;
+  }
+
+  #alias(identity) {
+    const key = crypto.toHex(identity.publicKey);
+    if (!this.#aliases.has(key)) this.#aliases.set(key, aliasPair(identity, this.#ctx, true));
+    return this.#aliases.get(key);
+  }
+
+  // ------------------------------------------------------------- tags
+  /** 8-byte opaque shard tag of a path's first segment. */
+  async shardOf(path) {
+    return (await crypto.hmac(this.#shardKey, enc.encode(path.split('/')[0]))).slice(0, 8);
+  }
+
+  /** Opaque local-index tag for a path or key (24 hex chars). */
   async tag(text) {
-    return QuCrypto.toHex((await hmac(this.#tagKey, enc.encode(text))).slice(0, 12));
+    return crypto.toHex((await crypto.hmac(this.#tagKey, enc.encode(text))).slice(0, 12));
   }
 
-  /** @returns {Map<number, Uint8Array>} epoch -> write public key, for the keyring. */
-  writeKeys() {
-    return new Map([...this.#epochs].map(([epoch, keys]) => [epoch, keys.writePub]));
-  }
-
-  /** @param {number} epoch */
+  // ------------------------------------------------------------- epochs
   hasEpoch(epoch) {
     return this.#epochs.has(epoch);
   }
 
-  /** @param {number} epoch */
   epochKeys(epoch) {
     const keys = this.#epochs.get(epoch);
     if (!keys) throw new Error(`Space ${this.id}: unknown epoch ${epoch}`);
     return keys;
   }
 
-  /**
-   * 8-byte opaque shard tag for a path: HMAC over its FIRST segment
-   * (`chat/general` -> `chat`), so a mirror can serve "only the chat part"
-   * without ever learning the word "chat".
-   * @param {string} path
-   * @returns {Promise<Uint8Array>}
-   */
-  async shardOf(path) {
-    return (await hmac(this.#shardKey, enc.encode(path.split('/')[0]))).slice(0, 8);
+  /** @returns {Map<number, Uint8Array>} epoch -> write public key */
+  writeKeys() {
+    return new Map([...this.#epochs].map(([epoch, keys]) => [epoch, keys.writePub]));
+  }
+
+  /** @returns {number} the highest known epoch */
+  get latestEpoch() {
+    return Math.max(...this.#epochs.keys());
   }
 
   /**
-   * Starts a new epoch with a fresh random key and wraps it for exactly
-   * `memberXPubs` - whoever is left out can neither read nor (outer-)sign
-   * anything sealed from now on. The returned object is meant to be stored
-   * as an ordinary record (`_keys`) so members pick it up via sync.
-   * @param {Uint8Array[]} memberXPubs
-   * @param {{xPublicKey: Uint8Array, xPrivateKey: Uint8Array}} by
-   * @returns {Promise<{epoch: number, from: Uint8Array, iv: Uint8Array, ct: Uint8Array, to: Array<{pub: Uint8Array, key: Uint8Array}>}>}
+   * Creates the next epoch (an admin's action): a fresh key and its grant,
+   * signed by `admin` (the admin's alias key pair). Does NOT switch
+   * `this.epoch` - the caller first publishes the key packages under the
+   * old epoch, then calls `useEpoch()`.
+   * @returns {Promise<{epoch: number, key: Uint8Array, grant: object}>}
    */
-  async rotate(memberXPubs, by) {
-    if (this.kind === 'user') throw new Error('Space.rotate: a user node has no epochs to rotate');
-    const epoch = Math.max(...this.#epochs.keys()) + 1;
-    const key = globalThis.crypto.getRandomValues(new Uint8Array(32));
-    const { iv, ct, to } = await QuCrypto.encrypt(key, memberXPubs, by.xPrivateKey);
-    this.#epochs.set(epoch, await deriveEpoch(key));
+  async rotate(admin) {
+    if (this.kind !== 'group') throw new Error('Space.rotate: only group spaces have epochs');
+    const epoch = this.latestEpoch + 1;
+    const key = crypto.randomBytes(32);
+    const keys = await deriveEpoch(key);
+    const grant = { epoch, writePub: keys.writePub, by: admin.publicKey };
+    grant.sig = await crypto.sign(grantMessage(this.id, grant), admin.privateKey);
+    this.#epochs.set(epoch, keys);
+    this.#epochSigs.set(epoch, { by: grant.by, sig: grant.sig });
+    return { epoch, key, grant };
+  }
+
+  /**
+   * Adds an epoch learned from a key package. The grant must be valid for
+   * the current owner/admins (checked here, like a mirror would).
+   * @returns {Promise<boolean>} false if the grant does not verify
+   */
+  async addEpoch(grant, key) {
+    if (this.#epochs.has(grant.epoch)) return true;
+    const keys = await deriveEpoch(key);
+    if (crypto.toHex(keys.writePub) !== crypto.toHex(grant.writePub)) return false;
+    const { changed } = await verifyGrants(this.id, [grant], this.grantState());
+    if (!changed.includes(`epoch:${grant.epoch}`)) return false;
+    this.#epochs.set(grant.epoch, keys);
+    this.#epochSigs.set(grant.epoch, { by: grant.by, sig: grant.sig });
+    return true;
+  }
+
+  /** Switches sealing to `epoch` (default: the latest known). */
+  useEpoch(epoch = this.latestEpoch) {
+    this.epochKeys(epoch);
     this.epoch = epoch;
-    return { epoch, from: by.xPublicKey, iv, ct, to };
   }
 
   /**
-   * The write public keys a mirror needs to verify this space's records:
-   * epoch 0 is self-certifying (its hash is the sid), every later epoch is
-   * signed with the previous epoch's write key. Epochs whose predecessor
-   * this member never had are left out - the mirror already has that link.
-   * @returns {Promise<Array<{epoch: number, writePub: Uint8Array, sig: Uint8Array|null}>>}
+   * Sets the admin list (owner only).
+   * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} owner - the owner's alias key pair
+   * @param {Uint8Array[]} admins
    */
+  async setAdmins(owner, admins) {
+    if (crypto.toHex(owner.publicKey) !== this.ownerId) throw new Error('Space.setAdmins: only the owner can set admins');
+    const grant = { kind: 'admins', seq: this.#admins.seq + 1, admins };
+    grant.sig = await crypto.sign(grantMessage(this.id, grant), owner.privateKey);
+    this.#admins = { seq: grant.seq, list: admins, sig: grant.sig };
+    return grant;
+  }
+
+  /** Adopts an admin grant someone else made (verified). */
+  async addAdmins(grant) {
+    const { state, changed } = await verifyGrants(this.id, [grant], this.grantState());
+    if (changed.length) this.#admins = state.admins;
+    return changed.length > 0;
+  }
+
+  /** @param {Uint8Array} pub @returns {boolean} owner or current admin */
+  isAdmin(pub) {
+    return same(pub, this.owner) || this.#admins.list.some((a) => same(a, pub));
+  }
+
+  /** @returns {GrantState} */
+  grantState() {
+    return { owner: this.owner, admins: this.#admins, epochs: this.writeKeys() };
+  }
+
+  /** Everything a mirror needs to verify this space's records. */
   async grants() {
     const out = [];
-    for (const epoch of [...this.#epochs.keys()].sort((a, b) => a - b)) {
-      const { writePub } = this.#epochs.get(epoch);
-      if (epoch === 0) out.push({ epoch, writePub, sig: null });
-      else if (this.#epochs.has(epoch - 1)) {
-        const sig = await QuCrypto.sign(grantMessage(this.id, epoch, writePub), this.#epochs.get(epoch - 1).writePriv);
-        out.push({ epoch, writePub, sig });
-      }
-    }
+    const epoch0 = this.#epochs.get(0);
+    if (this.kind === 'group') out.push({ epoch: 0, writePub: epoch0.writePub, owner: this.owner });
+    else if (this.kind === 'inbox') out.push({ epoch: 0, writePub: epoch0.writePub, inboxOf: this.#inboxOf });
+    else out.push({ epoch: 0, writePub: epoch0.writePub });
+    if (this.#admins.sig) out.push({ kind: 'admins', seq: this.#admins.seq, admins: this.#admins.list, sig: this.#admins.sig });
+    for (const [epoch, { by, sig }] of [...this.#epochSigs].sort((a, b) => a[0] - b[0])) out.push({ epoch, writePub: this.#epochs.get(epoch).writePub, by, sig });
     return out;
   }
+}
 
-  /**
-   * Unwraps an epoch produced by `rotate()`. Throws if `identity` wasn't a recipient.
-   * @param {{epoch: number, from: Uint8Array, iv: Uint8Array, ct: Uint8Array, to: Array<{pub: Uint8Array, key: Uint8Array}>}} wrapped
-   * @param {{xPublicKey: Uint8Array, xPrivateKey: Uint8Array}} identity
-   */
-  async acceptEpoch(wrapped, identity) {
-    const mine = QuCrypto.toHex(identity.xPublicKey);
-    const entry = wrapped.to.find((t) => QuCrypto.toHex(t.pub) === mine);
-    if (!entry) throw new Error(`Space ${this.id}: not a recipient of epoch ${wrapped.epoch}`);
-    const key = await QuCrypto.decrypt(wrapped.iv, wrapped.ct, entry.key, wrapped.from, identity.xPrivateKey);
-    this.#epochs.set(wrapped.epoch, await deriveEpoch(key));
-    if (wrapped.epoch > this.epoch) this.epoch = wrapped.epoch;
-  }
+/** Alias key pairs of `identity` in the space with context `ctx`. */
+async function aliasPair(identity, ctx, withX = false) {
+  const ed = await crypto.keypairFromSeed('Ed25519', await crypto.hkdf(identity.privateKey, `qu-lite/alias/${ctx}`));
+  if (!withX) return ed;
+  const x = await crypto.keypairFromSeed('X25519', await crypto.hkdf(identity.privateKey, `qu-lite/alias-x/${ctx}`));
+  return { ed, x };
 }

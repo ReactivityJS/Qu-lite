@@ -27,7 +27,7 @@
  *
  * The record id is `sha256(whole envelope)`: content-addressed.
  */
-import { QuCrypto } from '@qu/core';
+import * as crypto from './crypto.js';
 
 const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
@@ -42,7 +42,7 @@ const CT_OFFSET = OSIG + 64;
 
 /** @param {Uint8Array} bytes @returns {Promise<string>} */
 export async function envelopeId(bytes) {
-  return QuCrypto.toHex(await QuCrypto.sha256(bytes));
+  return crypto.toHex(await crypto.sha256(bytes));
 }
 
 /**
@@ -57,11 +57,11 @@ export function peekEnvelope(bytes) {
   return {
     version: bytes[0],
     visibility: bytes[1] & FLAG_PUBLIC ? 'public' : 'private',
-    sid: QuCrypto.toHex(bytes.subarray(2, 18)),
-    shard: QuCrypto.toHex(bytes.subarray(18, 26)),
+    sid: crypto.toHex(bytes.subarray(2, 18)),
+    shard: crypto.toHex(bytes.subarray(18, 26)),
     epoch: view.getUint16(26),
     ts: view.getUint32(28) * 60_000,
-    author: QuCrypto.toHex(bytes.subarray(32, 64)),
+    author: crypto.toHex(bytes.subarray(32, 64)),
   };
 }
 
@@ -96,8 +96,8 @@ export async function sealEnvelope(space, { path, key = null, hlc, value, visibi
     ct = concat(iv, sealed);
   }
 
-  const asig = await QuCrypto.sign(concat(header, ct), author.privateKey);
-  const osig = await QuCrypto.sign(concat(header, ct, asig), keys.writePriv);
+  const asig = await crypto.sign(concat(header, ct), author.privateKey);
+  const osig = await crypto.sign(concat(header, ct, asig), keys.writePriv);
   const bytes = concat(header, asig, osig, ct);
   return { bytes, id: await envelopeId(bytes) };
 }
@@ -116,9 +116,9 @@ export async function verifyEnvelope(bytes, writePub) {
   const asig = bytes.subarray(ASIG, OSIG);
   const osig = bytes.subarray(OSIG, CT_OFFSET);
   const ct = bytes.subarray(CT_OFFSET);
-  const authorOk = await QuCrypto.verify(concat(header, ct), asig, header.subarray(32, 64)).catch(() => false);
+  const authorOk = await crypto.verify(concat(header, ct), asig, header.subarray(32, 64)).catch(() => false);
   if (!authorOk) return false;
-  return QuCrypto.verify(concat(header, ct, asig), osig, writePub).catch(() => false);
+  return crypto.verify(concat(header, ct, asig), osig, writePub).catch(() => false);
 }
 
 /**
@@ -150,7 +150,7 @@ export async function openEnvelope(space, bytes, { verify = true } = {}) {
     }
   }
   const { p, k, h, v } = JSON.parse(dec.decode(inner));
-  if (QuCrypto.toHex(await space.shardOf(p)) !== outer.shard) throw new Error('envelope: shard tag does not match path');
+  if (crypto.toHex(await space.shardOf(p)) !== outer.shard) throw new Error('envelope: shard tag does not match path');
 
   return { id: await envelopeId(bytes), path: p, key: k, hlc: h, author: outer.author, value: v, epoch: outer.epoch, ts: outer.ts, visibility: outer.visibility };
 }

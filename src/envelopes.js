@@ -18,8 +18,9 @@
  *                                                             (a hub sets `forwardSynced`)
  *            -> notify('qu.record.processed', {from, sid, id, status})
  *
- *   keyring: (sid, epoch) -> write public key. Members register their own
- *            spaces (`register()`); a mirror fills it from verified grants.
+ *   keyring: per sid the verified grant state (owner, admins, epoch -> write
+ *            public key). Members register their own spaces (`register()`);
+ *            a mirror fills it from verified grants (owner/admin-signed chain).
  *
  *   grants:  `register(space, {mirror: true})` spaces are announced - write
  *            PUBLIC keys only - to peers that said `hello {role: 'mirror'}`,
@@ -30,7 +31,7 @@
  * Storage: rec/<sid>/<id> (sealed bytes), sx/<sid>/<shard>/<ts>-<id> (sync index).
  */
 import { peekEnvelope, verifyEnvelope, envelopeId } from './envelope.js';
-import { verifyGrants } from './space.js';
+import { verifyGrants, emptyGrantState } from './space.js';
 
 const pad = (ms) => String(ms).padStart(13, '0');
 
@@ -46,21 +47,36 @@ export function envelopes({ acceptGrants = false } = {}) {
     const roles = new Map();
     /** @type {Map<string, Promise<object>>} id -> outcome of the ingest currently running for it. */
     const inFlight = new Map();
-    /** @type {Map<string, Map<number, Uint8Array>>} */
+    /** @type {Map<string, import('./space.js').GrantState>} */
     const keyring = new Map();
     /** @type {Map<string, {space: import('./space.js').Space, mirror: boolean}>} */
     const registered = new Map();
 
+    const stateOf = (sid) => keyring.get(sid) ?? emptyGrantState();
     const ring = {
-      /** @param {string} sid @param {number} epoch @param {Uint8Array} writePub */
+      /** Trusted insert of one epoch key (own spaces, tests). */
       set(sid, epoch, writePub) {
-        if (!keyring.has(sid)) keyring.set(sid, new Map());
-        keyring.get(sid).set(epoch, writePub);
+        const state = stateOf(sid);
+        state.epochs.set(epoch, writePub);
+        keyring.set(sid, state);
       },
-      get: (sid, epoch) => keyring.get(sid)?.get(epoch),
-      epochs: (sid) => new Map(keyring.get(sid) ?? []),
+      get: (sid, epoch) => keyring.get(sid)?.epochs.get(epoch),
+      epochs: (sid) => new Map(keyring.get(sid)?.epochs ?? []),
+      state: (sid) => keyring.get(sid),
+      setState: (sid, state) => keyring.set(sid, state),
       has: (sid) => keyring.has(sid),
       sids: () => [...keyring.keys()],
+      /**
+       * Verifies grants into the keyring.
+       * @returns {Promise<{changed: string[], accepted: object[], isNew: boolean}>}
+       */
+      async accept(sid, grants) {
+        const isNew = !keyring.has(sid);
+        const { state, changed } = await verifyGrants(sid, grants, stateOf(sid));
+        if (changed.length) keyring.set(sid, state);
+        const label = (g) => (g.kind === 'admins' ? `admins:${g.seq}` : `epoch:${g.epoch}`);
+        return { changed, accepted: grants.filter((g) => changed.includes(label(g))), isNew: isNew && changed.length > 0 };
+      },
     };
 
     bus.on('net.peer.up', ({ peer }) => peers.add(peer));
@@ -79,11 +95,8 @@ export function envelopes({ acceptGrants = false } = {}) {
       const from = ctx.topic.split('.')[2];
       const offer = await bus.emit('qu.grant.offer', { sid, from });
       if (offer.stopped) return;
-      const accepted = await verifyGrants(sid, grants, ring.epochs(sid));
-      if (accepted.size === 0) return;
-      const isNew = !ring.has(sid);
-      for (const [epoch, writePub] of accepted) ring.set(sid, epoch, writePub);
-      await bus.notify('qu.grant.accepted', { sid, from, isNew, keys: accepted });
+      const { changed, accepted, isNew } = await ring.accept(sid, grants);
+      if (changed.length) await bus.notify('qu.grant.accepted', { sid, from, isNew, changed, accepted });
     });
 
     /** Removes a sealed envelope and its sync-index entry. */
@@ -172,7 +185,7 @@ export function envelopes({ acceptGrants = false } = {}) {
       const entry = registered.get(sid);
       if (!entry) return;
       const grants = await entry.space.grants();
-      for (const g of grants) ring.set(sid, g.epoch, g.writePub);
+      keyring.set(sid, entry.space.grantState());
       const to = targets ?? [...peers].filter((p) => roles.get(p) === 'mirror');
       for (const peer of to) await bus.emit(`net.out.${peer}.grant`, { sid, grants });
     }
@@ -185,7 +198,7 @@ export function envelopes({ acceptGrants = false } = {}) {
      */
     async function register(space, { mirror = true } = {}) {
       registered.set(space.id, { space, mirror });
-      for (const [epoch, writePub] of space.writeKeys()) ring.set(space.id, epoch, writePub);
+      keyring.set(space.id, space.grantState());
       await announce(space.id, mirror ? undefined : []);
     }
 

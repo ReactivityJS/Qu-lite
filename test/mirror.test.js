@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { QuCrypto } from '@qu/core';
-import { createQu, createClock, records, sync, mirror, Space, connectInProcess, verifyGrants } from '../src/index.js';
+import * as crypto from '../src/crypto.js';
+import { createQu, createClock, records, sync, mirror, Space, connectInProcess, verifyGrants, emptyGrantState } from '../src/index.js';
 
 const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, ms = 5000) {
@@ -27,27 +27,20 @@ async function mirrorPeer(options) {
 }
 const values = async (qu, space, path) => (await qu.query({ space, path })).map((r) => r.value);
 
-test('grants: epoch 0 must hash to the sid, later epochs must be signed by the previous one', async () => {
-  const alice = await QuCrypto.generateKeypair();
+test('grants: epoch 0 certifies sid and owner; a stranger\'s keys do not match', async () => {
   const space = await Space.create();
   const other = await Space.create();
-  await space.rotate([alice.xPublicKey], alice);
-  const grants = await space.grants();
-  assert.deepEqual(grants.map((g) => g.epoch), [0, 1]);
-
-  assert.deepEqual([...(await verifyGrants(space.id, grants, new Map())).keys()], [0, 1]);
-  // Someone else's epoch-0 key does not match this sid.
-  assert.equal((await verifyGrants(space.id, await other.grants(), new Map())).size, 0);
-  // An epoch-1 key signed by the wrong key is refused.
-  const forged = [grants[0], { ...grants[1], writePub: (await other.grants())[0].writePub }];
-  assert.deepEqual([...(await verifyGrants(space.id, forged, new Map())).keys()], [0]);
+  const { changed, state } = await verifyGrants(space.id, await space.grants(), emptyGrantState());
+  assert.deepEqual(changed, ['epoch:0']);
+  assert.deepEqual(state.owner, space.owner);
+  assert.deepEqual((await verifyGrants(space.id, await other.grants(), emptyGrantState())).changed, []);
 });
 
 test('star: peers only talk to a key-less mirror; live, offline and acks all go through it', async () => {
   const m = await mirrorPeer();
   const a = await peer({ ackFrom: 'mirror' });
   const b = await peer();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.join(await Space.open(secret));
   const sb = b.join(await Space.open(secret));
   await b.watch({ space: sb, path: 'chat' });
@@ -77,30 +70,23 @@ test('star: peers only talk to a key-less mirror; live, offline and acks all go 
   }
 });
 
-test('a mirror follows an epoch rotation and refuses records of an unknown epoch', async () => {
+test('a mirror follows an admin-signed epoch rotation', async () => {
+  const { fullClient, until: wait } = await import('./helpers.js');
   const m = await mirrorPeer();
-  const a = await peer();
-  const alice = a.identity;
-  const sa = a.join(await Space.create());
-  connectInProcess(a, m);
-  await until(async () => (await m.mirror.spaces()).includes(sa.id));
-
-  await sa.rotate([alice.xPublicKey], alice);
-  const unknown = [];
-  m.bus.on('qu.record.processed', (e) => e.status === 'unknown-space' && unknown.push(e.id));
-  await a.write(sa, 'chat', 'epoch 1 before the grant');
-  await until(() => unknown.length === 1);
-
-  await a.announce(sa);
-  await until(async () => (await m.mirror.writeKeys(sa.id)).has(1));
-  await a.resync({ space: sa });
-  await until(async () => (await m.mirror.count(sa.id)) === 1);
+  const a = await fullClient();
+  await connectInProcess(a, m).ready;
+  const space = await a.createGroup();
+  await wait(async () => (await m.mirror.spaces()).includes(space.id));
+  await (await a.members(space)).rotate();
+  await a.write(space, 'chat', 'epoch 1');
+  await wait(async () => (await m.mirror.writeKeys(space.id)).has(1));
+  await wait(async () => (await m.mirror.count(space.id)) >= 3); // owner entry, _keys, chat
 });
 
 test('the mirror restores its spaces after a restart (same storage)', async () => {
   const { memoryDriver } = await import('../src/index.js');
   const disk = memoryDriver();
-  const identity = await QuCrypto.generateKeypair();
+  const identity = await crypto.generateIdentity();
   let m = await createQu({ root: disk, identity });
   m.use(sync({ role: 'mirror' }));
   m.use(mirror());
@@ -117,7 +103,7 @@ test('the mirror restores its spaces after a restart (same storage)', async () =
   assert.deepEqual(await m.mirror.ready, [sa.id]);
 
   const c = await peer();
-  const sc = c.join(await Space.open(sa.secret));
+  const sc = c.join(await Space.open(sa.invite));
   await connectInProcess(c, m).ready;
   await c.resync({ space: sc });
   assert.deepEqual(await values(c, sc, 'chat'), ['x']);
@@ -127,7 +113,7 @@ test('the mirror is a hub: a record it pulls by resync reaches other subscribers
   const m = await mirrorPeer();
   const a = await peer();
   const b = await peer();
-  const secret = (await Space.create()).secret;
+  const secret = (await Space.create()).invite;
   const sa = a.join(await Space.open(secret));
   const sb = b.join(await Space.open(secret));
   await b.watch({ space: sb });

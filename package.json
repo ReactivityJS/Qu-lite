@@ -11,8 +11,6 @@
     "./ws-server": "./src/net/ws-server.js"
   },
   "dependencies": {
-    "@qu/core": "^0.1.0",
-    "@qu/events": "^0.1.0",
     "ws": "^8.18.0"
   },
   "license": "MIT",

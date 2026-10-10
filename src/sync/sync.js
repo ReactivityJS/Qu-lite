@@ -39,14 +39,14 @@
  * Everything is content-addressed and idempotent, so re-sending after an
  * interruption can only produce duplicates, which receivers drop.
  */
-import { QuCrypto } from '@qu/core';
+import * as crypto from '../crypto.js';
 import { Negentropy, NegentropyStorageVector } from './negentropy.js';
 import { peekEnvelope } from '../envelope.js';
 
 const MINUTE = 60_000;
 const pad = (ms) => String(ms).padStart(13, '0');
 const floorMinute = (ms) => Math.floor(ms / MINUTE) * MINUTE;
-const randomId = () => QuCrypto.toHex(globalThis.crypto.getRandomValues(new Uint8Array(8)));
+const randomId = () => crypto.toHex(globalThis.crypto.getRandomValues(new Uint8Array(8)));
 
 const later = (fn, ms) => {
   const timer = setTimeout(fn, ms);
@@ -103,7 +103,7 @@ export function sync({
       if (path && typeof space.shardOf !== 'function') throw new Error('sync: a path scope needs a Space instance');
       return {
         sid: space.id ?? space.sid,
-        shard: path ? QuCrypto.toHex(await space.shardOf(path)) : (space.shard ?? null),
+        shard: path ? crypto.toHex(await space.shardOf(path)) : (space.shard ?? null),
         from: from ?? null,
         to: to ?? null,
       };
@@ -315,7 +315,7 @@ export function sync({
     }
 
     bus.on('qu.record.processed', ({ from, sid, id, status }) => {
-      if (!from || !sid || !(status === 'stored' || status === 'duplicate' || status === 'superseded')) return;
+      if (!from || !sid || !(status === 'stored' || status === 'duplicate' || status === 'superseded' || status === 'deferred' || status === 'blind')) return;
       if (!ackQueue.has(from)) {
         ackQueue.set(from, new Map());
         queueMicrotask(() => flushAcks(from));
@@ -331,7 +331,7 @@ export function sync({
       if (!bySid || !peers.has(peer)) return;
       for (const [sid, list] of bySid) {
         const ids = new Uint8Array(list.length * 32);
-        list.forEach((id, i) => ids.set(QuCrypto.fromHex(id), i * 32));
+        list.forEach((id, i) => ids.set(crypto.fromHex(id), i * 32));
         await send(peer, 'ack', { sid, ids });
       }
     }
@@ -340,7 +340,7 @@ export function sync({
       const peer = ctx.topic.split('.')[2];
       const durable = ackFrom === 'any' || roles.get(peer) === 'mirror';
       for (let i = 0; i < ids.length; i += 32) {
-        const id = QuCrypto.toHex(ids.subarray(i, i + 32));
+        const id = crypto.toHex(ids.subarray(i, i + 32));
         if (durable && (await storage.has(`sync/out/${sid}/${id}`))) await storage.remove(`sync/out/${sid}/${id}`);
         await bus.notify('qu.record.acked', { sid, id, peer, role: roles.get(peer) ?? 'peer' });
       }
@@ -383,7 +383,7 @@ export function sync({
       const peer = ctx.topic.split('.')[2];
       const missing = [];
       for (let i = 0; i < ids.length; i += 32) {
-        const id = QuCrypto.toHex(ids.subarray(i, i + 32));
+        const id = crypto.toHex(ids.subarray(i, i + 32));
         if (!(await sendRecord(peer, sid, id))) missing.push(id);
       }
       if (missing.length) await send(peer, 'wantmiss', { session, ids: missing });
@@ -399,8 +399,8 @@ export function sync({
       } catch (error) {
         return finish(state, error);
       }
-      state.have.push(...have.map((id) => QuCrypto.toHex(id)));
-      state.need.push(...need.map((id) => QuCrypto.toHex(id)));
+      state.have.push(...have.map((id) => crypto.toHex(id)));
+      state.need.push(...need.map((id) => crypto.toHex(id)));
       if (next !== null) return send(state.peer, 'neg', { session, msg: next });
 
       await send(state.peer, 'negend', { session });
@@ -418,7 +418,7 @@ export function sync({
         awaiting.get(id).add(state);
       }
       const ids = new Uint8Array(wanted.length * 32);
-      wanted.forEach((id, i) => ids.set(QuCrypto.fromHex(id), i * 32));
+      wanted.forEach((id, i) => ids.set(crypto.fromHex(id), i * 32));
       await send(state.peer, 'want', { session, sid: state.scope.sid, ids });
     });
     bus.on('net.in.*.wantmiss', ({ session, ids }) => {
@@ -427,7 +427,7 @@ export function sync({
       for (const id of ids) settle(state, id, false);
     });
     bus.on('qu.record.processed', ({ id, status }) => {
-      const ok = status === 'stored' || status === 'duplicate' || status === 'superseded';
+      const ok = status === 'stored' || status === 'duplicate' || status === 'superseded' || status === 'deferred' || status === 'blind';
       for (const state of [...(awaiting.get(id) ?? [])]) settle(state, id, ok);
     });
 

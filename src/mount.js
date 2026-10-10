@@ -13,7 +13,7 @@
 import { memoryDriver } from './drivers/memory.js';
 
 /**
- * @param {{root?: object, bus?: import('@qu/events').EventBus}} [options]
+ * @param {{root?: object, bus?: import('./bus.js').Bus}} [options]
  *   `bus` (optional) receives `store.mount`/`store.unmount` events.
  */
 export function createMountRouter({ root = memoryDriver(), bus } = {}) {

@@ -32,7 +32,7 @@ export async function startMirror({ port = 8787, host, db = ':memory:', allow = 
 
   qu.bus.on('net.peer.up', ({ peer }) => log(`peer up   ${peer}`));
   qu.bus.on('net.peer.down', ({ peer }) => log(`peer down ${peer}`));
-  qu.bus.on('mirror.grant', ({ sid, epochs }) => log(`grant     ${sid} epochs ${epochs.join(',')}`));
+  qu.bus.on('mirror.grant', ({ sid, changed }) => log(`grant     ${sid} ${changed.join(',')}`));
   qu.bus.on('sync.done', ({ peer, sid, sent, received }) => (sent || received) && log(`sync      ${sid} with ${peer}: sent ${sent}, received ${received}`));
   log(`qu-lite mirror ${qu.peerId} on ${dir ? 'http+' : ''}ws://${host ?? 'localhost'}:${server.port} (db ${db}, ${spaces.length} spaces)`);
 

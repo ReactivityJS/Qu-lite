@@ -1,9 +1,10 @@
 # @qu/lite
 
-A small, event-driven Qu core. Milestones 1-4: kernel, mounts, spaces and user nodes, a privacy-first
+A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-5: kernel, mounts, spaces and user nodes, a privacy-first
 envelope, robust sync (Negentropy reconciliation, partial sync, resync/repair, durable outbox and
 resumable reconciles), persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket first),
-one peer base for clients and relays/mirrors, a Docker relay and a two-browser demo.
+one peer base for clients and relays/mirrors, a Docker relay, a browser demo, and group membership with
+roles, admin-signed key epochs, anonymous key packages and per-user inboxes.
 
 **Try it:** `npm run lite:demo` (or `docker compose -f docker-compose.lite.yml up --build`), then open
 `http://localhost:8787/?name=alice` and `http://localhost:8787/?name=bob` in two browsers, create a group,
@@ -31,7 +32,8 @@ await qu.scrub(space);                                 // local integrity repair
 await qu.syncStatus();                                 // { outbox, pending } still waiting
 ```
 
-- **Kernel** (`qu.js`): `EventBus` (`@qu/events`) + mount router + registry; everything else is `qu.use(plugin)`.
+- **Kernel** (`qu.js`): `Bus` (`bus.js`) + mount router + registry; everything else is `qu.use(plugin)`.
+- **Crypto** (`crypto.js`): WebCrypto only - Ed25519, X25519, AES-GCM, HKDF/HMAC, seeded key pairs and an anonymous sealed box.
 - **Mounts** (`mount.js`): unstorage-style, longest prefix wins; drivers implement `get/set/remove/keys`, optionally `range`.
 - **Space** (`space.js`): group spaces (32-byte secret → opaque `sid`, shard/tag HMAC keys, epoch keys, per-epoch write key; `rotate()`/`acceptEpoch()` for member removal) and user nodes (`Space.user(pubkey, identity?)`); `authorFor(identity)` gives the per-space alias.
 - **Envelope** (`envelope.js`, v2): see *Privacy model* below - both signatures over the ciphertext, author = alias. One ciphertext per record, no recipient list.
@@ -70,7 +72,7 @@ npm run lite:mirror -- --port 8787 --db ./mirror.sqlite      # or: node packages
 - **WebSocket** (`net/ws.js`, `net/ws-server.js`): the bridge contract over a socket; binary frames
   (`net/frame.js`) - byte fields travel raw, not base64. Clients reconnect with backoff + jitter.
 - **Mirror** (`mirror.js`, `bin/mirror.mjs`): a policy on an always-on peer without `records()`. The sid is
-  `SHA-256(epoch-0 write key)[0..16]` (user nodes: `SHA-256('qu-lite/user' || pubkey)`), so a peer's `grant`
+  `SHA-256(epoch-0 write key || owner)[0..16]` (user nodes: `SHA-256('qu-lite/user' || pubkey)`), so a peer's `grant`
   (sent to mirrors on connect) is self-certifying; later epochs are signed by the previous epoch's write
   key. The mirror verifies both signatures and stores envelopes + sync index - no space secret, no plaintext. Its
   identity lives in its database, so clients can resume pending syncs across mirror restarts.
@@ -120,9 +122,41 @@ const relay = await createPeer({ registry: nodeRegistry(), store: ['sqlite', { p
   (`createLink(qu, {send, close})`, then `receive(bytes)` / `closed()`). WebSocket client/server and
   the in-process test transport use it; WebRTC and HTTPS+SSE are planned on the same contract.
 
+## Members, epochs, inbox (milestone 5)
+
+```js
+const group = await qu.createGroup();                  // I am the owner (through my alias)
+const members = await qu.members(group);
+await members.invite(bobPubHex);                       // sealed box into Bob's inbox
+const link = await members.invite();                   // or an invite object for a link
+// Bob:
+qu.bus.on('qu.inbox.message', ({ payload }) => payload.type === 'invite' && qu.acceptInvite(payload));
+// later:
+await members.promote(carolAlias, 'admin');            // owner signs the admin list
+await members.remove(bobAlias);                        // role -> removed, new epoch for everyone else
+await members.reveal({ name: 'Alice' });               // optional, verifiable, members-only
+await qu.restoreGroups();                              // after a reload
+```
+
+- **Owner and admins sign the epoch chain** (`space.js` grants): a group's sid certifies epoch 0's write
+  key *and* the owner; the owner signs the admin list; the owner or an admin signs every later epoch. A
+  mirror and every member verify the same chain - a removed member can no longer announce (and so block)
+  the next epoch.
+- **Everything is a record in the space** (`members.js`): `_members/<alias>` (role, alias-X25519 key,
+  optional reveal), `_grants/admins`, and `_keys/<epoch>` - the new epoch key as **anonymous sealed boxes**,
+  one per remaining member, padded to a multiple of 8, published (public visibility) under the old epoch
+  so members receive it by sync without anyone learning which box is whose.
+- **Rules on every record**: owner/admins manage members and keys; a member edits only its own entry and
+  cannot change its role; newcomers need an admin-signed, single-use invite token; records of removed
+  members written after the removal are refused. What cannot be decided yet (membership or key not
+  synced) is **deferred** and re-checked automatically (`records.reindex`).
+- **Inbox** (`inbox.js`): one mailbox per identity, addressed by pubkey, writable by anyone with a public
+  write key, messages are sealed boxes to the owner's `epub` signed by one-time keys - the relay sees
+  "mailbox X got N bytes", nothing more. `inbox({ enabled: false })` makes you unreachable this way.
+- **Local state survives reloads**: kept epoch keys (`members/keys/`) and joined groups (`members/groups/`).
+
 ## Next milestones
 
-5 space management & secure epochs (admin-signed chain, `_members`/`_keys` records, invites via user
-nodes) · 6 status (presence, delivered/read cursors) · 7 WebRTC + browser mesh · 8 HTTPS+SSE transport ·
+6 status (presence, delivered/read cursors) · 7 WebRTC + browser mesh · 8 HTTPS+SSE transport ·
 9 atomic writes · 10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
 text (optional).

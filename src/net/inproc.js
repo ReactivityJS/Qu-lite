@@ -7,8 +7,8 @@
 import { createLink } from './link.js';
 
 /**
- * @param {{bus: import('@qu/events').EventBus, peerId: string}} a
- * @param {{bus: import('@qu/events').EventBus, peerId: string}} b
+ * @param {{bus: import('../bus.js').Bus, peerId: string}} a
+ * @param {{bus: import('../bus.js').Bus, peerId: string}} b
  * @returns {{stats: {aToB: number, bToA: number, messages: number}, ready: Promise<void>, disconnect: () => Promise<void>}}
  *   `ready` resolves once both sides completed the handshake (`net.peer.up`).
  */
