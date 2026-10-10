@@ -62,7 +62,8 @@ test('3 days offline on both sides: one resync brings both peers to the same sta
   assert.equal(summary.sent, 30);
   assert.equal(summary.received, 5);
   assert.deepEqual(summary.missing, []);
-  await settle();
+  // The 30 pushed to b are not awaited by resync(): wait until b has indexed them.
+  await until(async () => (await values(b, sb, 'chat')).length === 36);
 
   assert.deepEqual((await recIds(a, sa)).sort(), (await recIds(b, sb)).sort());
   assert.equal((await values(b, sb, 'chat')).length, 36);

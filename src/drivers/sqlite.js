@@ -36,6 +36,10 @@ export function sqliteDriver({ path = ':memory:' } = {}) {
     rangeDesc: db.prepare('SELECT key, bin, value FROM kv WHERE key >= ? AND key < ? ORDER BY key DESC LIMIT ?'),
     clear: db.prepare('DELETE FROM kv'),
   };
+  const setSync = (key, value) => {
+    if (value instanceof Uint8Array) q.set.run(key, 1, value);
+    else q.set.run(key, 0, Buffer.from(toJson(value), 'utf8'));
+  };
   const decode = (row) => (row.bin ? new Uint8Array(row.value) : fromJson(Buffer.from(row.value).toString('utf8')));
 
   return {
@@ -48,8 +52,22 @@ export function sqliteDriver({ path = ':memory:' } = {}) {
       return q.has.get(key) !== undefined;
     },
     async set(key, value) {
-      if (value instanceof Uint8Array) q.set.run(key, 1, value);
-      else q.set.run(key, 0, Buffer.from(toJson(value), 'utf8'));
+      setSync(key, value);
+    },
+    /** All ops in one transaction: committed together or rolled back together. */
+    async batch(ops) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const { op, key, value } of ops) {
+          if (op === 'set') setSync(key, value);
+          else if (op === 'remove') q.remove.run(key);
+          else throw new Error(`sqlite: unknown op ${op}`);
+        }
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
     },
     async remove(key) {
       q.remove.run(key);

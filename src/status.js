@@ -43,9 +43,11 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
     /** @type {Map<string, Promise<object>>} */
     const trackers = new Map();
     let connected = 0;
+    /** After a clean leave nothing announces "online" by itself (heartbeat, replies) until we come back. */
+    let away = false;
 
     const heartbeat = setInterval(() => {
-      if (connected > 0) for (const t of trackers.values()) t.then((s) => s.announce()).catch(() => {});
+      if (connected > 0) for (const t of trackers.values()) t.then((s) => s.announce('online', { auto: true })).catch(() => {});
     }, interval);
     heartbeat.unref?.();
 
@@ -84,14 +86,20 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
 
       const signal = (type, value) => (connected > 0 ? signals.send(space, type, value).catch(() => {}) : Promise.resolve());
 
-      async function announce(state = 'online') {
+      /** @param {'online'|'offline'} [state] @param {{auto?: boolean}} [options] `auto`: heartbeat/reply, skipped while away */
+      async function announce(state = 'online', { auto = false } = {}) {
         if (!presence) return;
+        if (state === 'offline') away = true;
+        else if (auto && away) return;
+        else away = false;
         lastAnnounce = Date.now();
         await signal('presence', { state });
       }
 
       bus.on(`qu.signal.${sid}.presence`, async ({ author, value, at }) => {
         if (author === me) return;
+        // signals are verified concurrently: an older heartbeat may finish after a newer "offline"
+        if (at < (seen.get(author)?.lastSeen ?? 0)) return;
         const wasOnline = isOnline(author);
         seen.set(author, { lastSeen: at, state: value?.state === 'offline' ? 'offline' : 'online' });
         await bus.notify('qu.status.presence', { space: sid, alias: author, online: isOnline(author) });
@@ -99,7 +107,7 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
         // stops by itself once both sides see each other online
         if (!wasOnline && value?.state !== 'offline' && Date.now() - (repliedTo.get(author) ?? 0) > 1000) {
           repliedTo.set(author, Date.now());
-          await announce();
+          await announce('online', { auto: true });
         }
       });
 
@@ -107,7 +115,7 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
       // then refused); once the member list changes, everyone re-announces
       // (throttled), and the newcomer answers - so both sides see each other.
       bus.on('qu.members.changed', ({ space: changed }) => {
-        if (changed === sid && Date.now() - lastAnnounce > 250) announce().catch(() => {});
+        if (changed === sid && Date.now() - lastAnnounce > 250) announce('online', { auto: true }).catch(() => {});
       });
 
       bus.on(`qu.signal.${sid}.typing`, async ({ author, value }) => {

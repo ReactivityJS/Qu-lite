@@ -18,7 +18,9 @@
  *   read:    'qu.envelope.stored' -> open -> clock drift check
  *            -> emit('qu.accept', record)   ctx.stop() rejects (envelope removed),
  *                                           ctx.defer = true postpones (see admit())
- *            -> pointer indexes -> notify('qu.record.<sid>')
+ *            -> pointer indexes into the envelope's write set (committed together
+ *               with rec/, sx/ and the outbox - all or nothing)
+ *            -> after the commit: notify('qu.record.<sid>')
  *
  * Storage (besides rec/ and sx/ owned by envelopes.js) - pointers only,
  * paths and keys as opaque per-space tags (space.tag):
@@ -31,6 +33,7 @@
 import { sealEnvelope, openEnvelope, envelopeId, verifyEnvelope, peekEnvelope } from './envelope.js';
 import { envelopes as envelopeLayer, sxKey } from './envelopes.js';
 import { formatHlc } from './hlc.js';
+import { writeSet } from './writeset.js';
 
 /** (hlc, author) order - the LWW tiebreak. @returns {number} */
 function compareVersion(a, b) {
@@ -73,6 +76,23 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       return { pathTag, keyTag };
     }
 
+    /**
+     * One repair step: build a write set under the space's commit lock (the
+     * same one envelope ingest uses - repairs are rare, so the whole step
+     * holds it), flush it, then run its side effects outside the lock
+     * (listeners may write to the space themselves).
+     */
+    async function step(sid, build) {
+      const ws = writeSet(storage);
+      const result = await env.exclusive(sid, async () => {
+        const value = await build(ws);
+        await ws.flush();
+        return value;
+      });
+      await ws.settle();
+      return result;
+    }
+
     /** Opens a stored envelope (no re-verification: stored means verified). */
     async function read(space, id) {
       if (cache.has(id)) return cache.get(id);
@@ -81,49 +101,58 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       return remember(await openEnvelope(space, bytes, { verify: false }));
     }
 
-    async function demote(sid, id) {
+    /*
+     * The index helpers below never write directly: they read the committed
+     * state and put their changes into a write set `ws` that the caller
+     * commits in one batch.
+     */
+
+    async function demote(sid, id, ws) {
       const loc = await storage.get(`loc/${sid}/${id}`);
       if (!loc?.idx) return;
-      await storage.remove(loc.idx);
-      await storage.set(`loc/${sid}/${id}`, { ...loc, idx: null });
+      ws.remove(loc.idx);
+      ws.set(`loc/${sid}/${id}`, { ...loc, idx: null });
     }
 
     /** Removes a record's indexes and its envelope. */
-    async function drop(sid, id) {
+    async function drop(sid, id, ws) {
       const loc = await storage.get(`loc/${sid}/${id}`);
-      if (loc?.idx) await storage.remove(loc.idx);
-      if (loc?.head && (await storage.get(loc.head))?.id === id) await storage.remove(loc.head);
-      await storage.remove(`loc/${sid}/${id}`);
-      cache.delete(id);
-      await env.remove(sid, id);
+      if (loc?.idx) ws.remove(loc.idx);
+      if (loc?.head && (await storage.get(loc.head))?.id === id) ws.remove(loc.head);
+      ws.remove(`loc/${sid}/${id}`);
+      ws.remove(`defer/${sid}/${id}`);
+      ws.after(() => cache.delete(id));
+      await env.remove(sid, id, ws);
     }
 
     /** @returns {Promise<boolean>} true if the record is (now) the current value. */
-    async function index(space, record) {
+    async function index(space, record, ws) {
       const { pathTag, keyTag } = await tags(space, record);
       const pointer = { id: record.id, hlc: record.hlc, author: record.author };
       const loc = { idx: null };
       let current = true;
       if (keyTag) {
         loc.head = `head/${space.id}/${pathTag}/${keyTag}`;
-        const head = await storage.get(loc.head);
+        let head = await storage.get(loc.head);
+        if (head?.id === record.id) head = null; // re-indexing the current head itself (scrub)
         if (head && compareVersion(head, record) >= 0) current = false;
         else {
-          if (head) await demote(space.id, head.id);
-          await storage.set(loc.head, pointer);
+          if (head) await demote(space.id, head.id, ws);
+          ws.set(loc.head, pointer);
         }
       }
       if (current) {
         loc.idx = `idx/${space.id}/${pathTag}/${record.hlc}-${record.id}`;
-        await storage.set(loc.idx, pointer);
+        ws.set(loc.idx, pointer);
       }
-      await storage.set(`loc/${space.id}/${record.id}`, loc);
+      ws.set(`loc/${space.id}/${record.id}`, loc);
       return current;
     }
 
     /**
      * Decides what happens to a stored envelope of a joined space:
-     *   'stored' / 'superseded'  indexed (readable)
+     *   'indexed'                indexed (readable) once the write set commits;
+     *                            ws.status then says 'stored' or 'superseded'
      *   'deferred'               kept, not yet indexed: its epoch key is not
      *                            known yet, or a hook could not decide yet
      *                            (e.g. author's membership not synced) -
@@ -131,12 +160,12 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
      *   'blind'                  kept, never readable here (a private field of someone else's user node)
      *   {reject: reason}         refused - the envelope is removed again
      */
-    async function admit(space, id, bytes, { from, local = false }) {
+    async function admit(space, id, bytes, { from, local = false }, ws) {
       let record;
       try {
         record = await openEnvelope(space, bytes, { verify: false });
       } catch (error) {
-        if (/unknown epoch/.test(error.message)) return defer(space, id);
+        if (/unknown epoch/.test(error.message)) return defer(space, id, ws);
         if (/no key to read/.test(error.message)) return 'blind';
         return { reject: error.message };
       }
@@ -144,31 +173,38 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         if (!clock.recv(record.hlc)) return { reject: 'clock drift' };
         const accepted = await bus.emit('qu.accept', record, { space, from });
         if (accepted.stopped) return { reject: accepted.reason ?? 'hook' };
-        if (accepted.defer) return defer(space, id);
+        if (accepted.defer) return defer(space, id, ws);
       }
-      await storage.remove(`defer/${space.id}/${id}`);
-      const current = await index(space, record);
-      remember(record);
-      if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: Boolean(local) });
-      else await bus.notify('qu.record.superseded', { from, space: space.id, id });
-      return current ? 'stored' : 'superseded';
+      ws.remove(`defer/${space.id}/${id}`);
+      // Which version is current is decided against the committed heads, inside the commit lock.
+      let current;
+      ws.locked(async () => {
+        current = await index(space, record, ws);
+        ws.status = current ? 'stored' : 'superseded';
+      });
+      ws.after(async () => {
+        remember(record);
+        if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: Boolean(local) });
+        else await bus.notify('qu.record.superseded', { from, space: space.id, id });
+      });
+      return 'indexed';
     }
 
-    async function defer(space, id) {
-      await storage.set(`defer/${space.id}/${id}`, 1);
-      await bus.notify('qu.record.deferred', { space: space.id, id });
+    function defer(space, id, ws) {
+      ws.set(`defer/${space.id}/${id}`, 1);
+      ws.after(() => bus.notify('qu.record.deferred', { space: space.id, id }));
       return 'deferred';
     }
 
-    bus.on('qu.envelope.stored', async ({ sid, id, bytes, from, local }, ctx) => {
+    bus.on('qu.envelope.stored', async ({ sid, id, bytes, from, local, ws }, ctx) => {
       const entry = spaces.get(sid);
       if (!entry) return; // not a member: kept blind (verified, unreadable)
-      const outcome = await admit(entry.space, id, bytes, { from, local });
+      const outcome = await admit(entry.space, id, bytes, { from, local }, ws);
       if (outcome?.reject) {
         ctx.reason = outcome.reject;
         return ctx.stop();
       }
-      ctx.status = outcome;
+      if (outcome !== 'indexed') ctx.status = outcome;
     });
 
     /**
@@ -186,12 +222,14 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
           await storage.remove(key);
           continue;
         }
-        const outcome = await admit(space, id, bytes, {});
-        if (outcome?.reject) {
-          await storage.remove(key);
-          await drop(space.id, id);
-          counts.rejected++;
-        } else if (outcome === 'deferred') counts.deferred++;
+        // One write set per record: it leaves `defer/` together with getting its indexes.
+        const outcome = await step(space.id, async (ws) => {
+          const result = await admit(space, id, bytes, {}, ws);
+          if (result?.reject) await drop(space.id, id, ws);
+          return result;
+        });
+        if (outcome?.reject) counts.rejected++;
+        else if (outcome === 'deferred') counts.deferred++;
         else counts.admitted++;
       }
       return counts;
@@ -231,6 +269,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       const signer = await space.authorFor(identity, spaces.get(space.id).author);
       const { bytes, id } = await sealEnvelope(space, { path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility }, signer);
       const outcome = await env.ingest(bytes, { local: true });
+      // 'failed': the commit failed and nothing was written - the write can be retried.
       if (outcome.status !== 'stored') throw new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`);
       return read(space, id);
     }
@@ -302,9 +341,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         }
         cache.delete(id);
         if (!valid) {
-          await storage.remove(key); // can't trust its header to find the sx entry
-          await storage.remove(`defer/${space.id}/${id}`);
-          await drop(space.id, id);
+          await step(space.id, async (ws) => {
+            ws.remove(key); // can't trust its header to find the sx entry
+            await drop(space.id, id, ws);
+          });
           report.dropped.push(id);
           continue;
         }
@@ -319,10 +359,11 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         const loc = await storage.get(`loc/${space.id}/${id}`);
         const intact = loc && (await storage.has(sxKey(peekEnvelope(bytes), id))) && (loc.idx === null || (await storage.has(loc.idx)));
         if (!intact) {
-          if (loc?.idx) await storage.remove(loc.idx);
-          if (loc?.head && (await storage.get(loc.head))?.id === id) await storage.remove(loc.head);
-          await storage.set(sxKey(peekEnvelope(bytes), id), 1);
-          await index(space, record);
+          await step(space.id, async (ws) => {
+            if (loc?.idx) ws.remove(loc.idx);
+            ws.set(sxKey(peekEnvelope(bytes), id), 1);
+            await index(space, record, ws); // replaces its own head pointer if it is still the current one
+          });
           report.reindexed.push(id);
         }
       }
@@ -330,8 +371,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       for (const key of await storage.keys(`sx/${space.id}/`)) {
         const id = key.slice(key.lastIndexOf('-') + 1);
         if (!(await storage.has(`rec/${space.id}/${id}`))) {
-          await storage.remove(key);
-          await drop(space.id, id);
+          await step(space.id, async (ws) => {
+            ws.remove(key);
+            await drop(space.id, id, ws);
+          });
           if (!report.dropped.includes(id)) report.dropped.push(id);
         }
       }

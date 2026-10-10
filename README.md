@@ -221,7 +221,24 @@ qu.use(sseTransport({ connect: ['https://relay.example/sse'] }));   // SSE only
   `retryWsMs`. The demo uses it (`&transport=sse` forces SSE); the e2e test runs one browser over SSE.
 - Cost: server-to-client frames are base64 (+33 %); client-to-server stays binary.
 
+## Atomic writes (milestone 9)
+
+- **One envelope, one batch**: the sealed envelope (`rec/`), its sync-index entry (`sx/`), the pointer indexes
+  (`idx/`, `head/`, `loc/`, `defer/`) and - for a local write - its outbox entry (`sync/out/`) are collected in
+  a write set (`src/writeset.js`) and committed with ONE `storage.batch()`. A crash or a failing disk leaves
+  either all of them or none: no envelope without index, no unindexed outbox entry, no index pointing nowhere.
+- **Drivers**: `batch(ops)` is atomic in memory, SQLite (`BEGIN IMMEDIATE … COMMIT`, rollback on error) and
+  IndexedDB (one readwrite transaction). The mount router batches per mount: atomic within a mount, not across
+  mounts. A driver without `batch()` still works (ops run one by one).
+- **Events after commit**: `qu.record.<sid>`, `superseded`, `deferred` and the read cache run via
+  `ws.after()` - only once the data is durable. A failed commit yields status `failed` and
+  `qu.record.failed`; `qu.write()` throws (and can be retried), a received record is fetched again by the next
+  resync (it was never acknowledged).
+- **LWW without races**: which version of a keyed entry is current is decided inside a short per-space commit
+  lock (`ws.locked()`), against the committed heads; decryption and hooks run outside it. `reindex()` and
+  `scrub()` repair one record per write set under the same lock.
+
 ## Next milestones
 
-9 atomic writes · 10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
+10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
 text (optional).

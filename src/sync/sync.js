@@ -286,9 +286,9 @@ export function sync({
       if (remoteRole === 'mirror') await flushOutbox(peer, () => true);
     });
 
-    bus.on('qu.write.stored', async ({ sid, id }) => {
-      const bytes = await storage.get(`rec/${sid}/${id}`);
-      await storage.set(`sync/out/${sid}/${id}`, { shard: peekEnvelope(bytes).shard });
+    // Same write set as the record itself: a stored local record always has its outbox entry.
+    bus.on('qu.write.stored', async ({ sid, id, header, ws }) => {
+      ws.set(`sync/out/${sid}/${id}`, { shard: header.shard });
     });
 
     /** Re-pushes unacknowledged local writes matching `wanted(sid, shard)` to `peer`, as live records. */

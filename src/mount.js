@@ -4,8 +4,8 @@
  * mounted. Keys are `/`-separated (`rec/<sid>/<id>`, `idx/<sid>/...`).
  *
  * Driver contract: `get(key)`, `set(key, value)`, `remove(key)`,
- * `keys(prefix)`, and OPTIONALLY `has(key)` and `range(prefix, {gte, lt,
- * limit, reverse})`. A driver without `range()` still works - the router
+ * `keys(prefix)`, and OPTIONALLY `has(key)`, `range(prefix, {gte, lt,
+ * limit, reverse})` and `batch(ops)` (atomic multi-key write). A driver without `range()` still works - the router
  * falls back to `keys(prefix)` + filter + sort, correct but O(prefix size).
  * Every driver sees the FULL key (unstorage strips the mount base; we don't,
  * so a driver can be moved between mounts without its data changing shape).
@@ -73,6 +73,25 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
     },
     remove(key) {
       return resolve(key).driver.remove(key);
+    },
+    /**
+     * Applies `[{op: 'set', key, value} | {op: 'remove', key}]`. Ops are
+     * grouped by mount; each group goes to the driver's atomic `batch()`
+     * (or, for a driver without one, one by one). Atomic within a mount,
+     * not across mounts.
+     * @param {Array<{op: 'set'|'remove', key: string, value?: *}>} ops
+     */
+    async batch(ops) {
+      const groups = new Map();
+      for (const op of ops) {
+        const m = resolve(op.key);
+        if (!groups.has(m)) groups.set(m, []);
+        groups.get(m).push(op);
+      }
+      for (const [{ driver }, group] of groups) {
+        if (typeof driver.batch === 'function') await driver.batch(group);
+        else for (const { op, key, value } of group) await (op === 'set' ? driver.set(key, value) : driver.remove(key));
+      }
     },
     async keys(prefix = '') {
       const all = [];

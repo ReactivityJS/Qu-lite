@@ -41,7 +41,37 @@ for (const [name, make] of Object.entries(drivers)) {
     assert.deepEqual((await d.range('p/', { gte: 'a', lt: 'z' })).map((r) => r.key), ['p/1', 'p/2', 'p/3', 'p/4']);
     assert.deepEqual(await d.range('p/', { gte: 'p/9' }), []);
   });
+
+  test(`${name}: batch() applies all ops, or none when one fails`, async () => {
+    const d = make();
+    await d.set('keep', 1);
+    await d.set('gone', 2);
+    await d.batch([
+      { op: 'set', key: 'a', value: new Uint8Array([1]) },
+      { op: 'set', key: 'b', value: { x: 1 } },
+      { op: 'remove', key: 'gone' },
+    ]);
+    assert.deepEqual(await d.keys(''), ['a', 'b', 'keep']);
+    await assert.rejects(d.batch([{ op: 'set', key: 'c', value: 3 }, { op: 'remove', key: 'keep' }, { op: 'bogus', key: 'd' }]));
+    assert.deepEqual(await d.keys(''), ['a', 'b', 'keep']);
+    assert.equal(await d.get('keep'), 1);
+  });
 }
+
+test('sqlite: a value that fails mid-batch rolls back the whole batch', async () => {
+  const d = sqliteDriver({ path: join(dir, 'rollback.sqlite') });
+  await assert.rejects(d.batch([{ op: 'set', key: 'a', value: 1 }, { op: 'set', key: 'b', value: { n: 1n } }]));
+  assert.equal(await d.has('a'), false);
+  await d.batch([{ op: 'set', key: 'a', value: 1 }]); // the connection is usable again
+  assert.equal(await d.get('a'), 1);
+  d.close();
+});
+
+test('indexeddb: a value that cannot be stored aborts the whole transaction', async () => {
+  const d = indexedDbDriver({ name: 'rollback', indexedDB: factory, IDBKeyRange });
+  await assert.rejects(d.batch([{ op: 'set', key: 'a', value: 1 }, { op: 'set', key: 'b', value: { fn() {} } }]));
+  assert.equal(await d.has('a'), false);
+});
 
 test('sqlite: data survives closing and reopening the file', async () => {
   const path = join(dir, 'reopen.sqlite');

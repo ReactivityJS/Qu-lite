@@ -51,6 +51,28 @@ export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = gl
     async remove(key) {
       await done((await objectStore('readwrite')).delete(key));
     },
+    /** All ops in one readwrite transaction: IndexedDB commits all or aborts all. */
+    async batch(ops) {
+      const tx = (await db()).transaction(store, 'readwrite');
+      const os = tx.objectStore(store);
+      const finished = new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error ?? new Error('indexeddb: transaction aborted'));
+        tx.onerror = () => reject(tx.error);
+      });
+      try {
+        for (const { op, key, value } of ops) {
+          if (op === 'set') os.put(value, key);
+          else if (op === 'remove') os.delete(key);
+          else throw new Error(`indexeddb: unknown op ${op}`);
+        }
+      } catch (error) {
+        tx.abort();
+        await finished.catch(() => {});
+        throw error;
+      }
+      await finished;
+    },
     async keys(prefix = '') {
       const range = bounds(prefix);
       return range ? done((await objectStore('readonly')).getAllKeys(range)) : [];

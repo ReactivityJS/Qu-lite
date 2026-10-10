@@ -9,11 +9,16 @@
  *   ingest:  net.in.<peer>.rec | local write
  *            -> emit('qu.envelope.accept', {header, from})   ctx.stop() refuses (policy)
  *            -> dedupe -> keyring lookup -> verifyEnvelope
- *            -> store rec/ + sx/
- *            -> emit('qu.envelope.stored', {...})             a reader may ctx.stop()
- *                                                             (envelope removed again) or
- *                                                             set ctx.status
- *            -> emit('qu.write.stored') for local writes      (sync: outbox)
+ *            -> emit('qu.envelope.stored', {..., ws})         a reader adds its indexes
+ *                                                             to the write set, may
+ *                                                             ctx.stop() (nothing is
+ *                                                             written) or set ctx.status
+ *            -> emit('qu.write.stored', {..., ws}) for local  (sync: outbox entry)
+ *            -> per-space lock: ws.locked() decisions (LWW head), then
+ *               ONE atomic storage.batch: rec/ + sx/ + indexes + outbox
+ *               (a failed commit leaves nothing behind: status 'failed',
+ *               a later resync fetches the envelope again)
+ *            -> ws.after() side effects (record notifications)
  *            -> run('qu.route') + emit('net.out.<peer>.rec')  unless fetched by a resync
  *                                                             (a hub sets `forwardSynced`)
  *            -> notify('qu.record.processed', {from, sid, id, status})
@@ -32,6 +37,7 @@
  */
 import { peekEnvelope, verifyEnvelope, envelopeId } from './envelope.js';
 import { verifyGrants, emptyGrantState } from './space.js';
+import { writeSet } from './writeset.js';
 
 const pad = (ms) => String(ms).padStart(13, '0');
 
@@ -47,6 +53,8 @@ export function envelopes({ acceptGrants = false } = {}) {
     const roles = new Map();
     /** @type {Map<string, Promise<object>>} id -> outcome of the ingest currently running for it. */
     const inFlight = new Map();
+    /** @type {Map<string, Promise<void>>} sid -> tail of its commit queue. */
+    const commits = new Map();
     /** @type {Map<string, import('./space.js').GrantState>} */
     const keyring = new Map();
     /** @type {Map<string, {space: import('./space.js').Space, mirror: boolean}>} */
@@ -99,11 +107,40 @@ export function envelopes({ acceptGrants = false } = {}) {
       if (changed.length) await bus.notify('qu.grant.accepted', { sid, from, isNew, changed, accepted });
     });
 
-    /** Removes a sealed envelope and its sync-index entry. */
-    async function remove(sid, id) {
+    /**
+     * Removes a sealed envelope and its sync-index entry - into `ws` when
+     * given (the caller commits), else right away.
+     * @param {string} sid
+     * @param {string} id
+     * @param {ReturnType<typeof writeSet>} [ws]
+     */
+    async function remove(sid, id, ws) {
+      const own = ws ?? writeSet(storage);
       const bytes = await storage.get(`rec/${sid}/${id}`);
-      if (bytes) await storage.remove(sxKey(peekEnvelope(bytes), id));
-      await storage.remove(`rec/${sid}/${id}`);
+      if (bytes) own.remove(sxKey(peekEnvelope(bytes), id));
+      own.remove(`rec/${sid}/${id}`);
+      if (!ws) await own.commit();
+    }
+
+    /**
+     * Runs `fn` exclusively per space: a reader decides from the committed
+     * indexes (e.g. which version of a keyed entry is current), so two
+     * envelopes of one space must not decide on the same state concurrently.
+     * Kept short: only the `ws.locked()` decisions and the batch run in it.
+     */
+    async function exclusive(sid, fn) {
+      const prev = commits.get(sid) ?? Promise.resolve();
+      let release;
+      const mine = new Promise((resolve) => (release = resolve));
+      const tail = prev.then(() => mine);
+      commits.set(sid, tail);
+      await prev;
+      try {
+        return await fn();
+      } finally {
+        release();
+        if (commits.get(sid) === tail) commits.delete(sid);
+      }
     }
 
     /**
@@ -150,17 +187,24 @@ export function envelopes({ acceptGrants = false } = {}) {
           await bus.notify('qu.record.rejected', { from, space: sid, id, reason: 'signature invalid' });
           return finish({ sid, id, status: 'rejected', reason: 'signature invalid' });
         }
-        await storage.set(`rec/${sid}/${id}`, bytes);
-        await storage.set(sxKey(header, id), 1);
+        const ws = writeSet(storage);
+        ws.set(`rec/${sid}/${id}`, bytes);
+        ws.set(sxKey(header, id), 1);
 
-        const stored = await bus.emit('qu.envelope.stored', { sid, id, header, bytes, from, sync, local });
+        const stored = await bus.emit('qu.envelope.stored', { sid, id, header, bytes, from, sync, local, ws });
         if (stored.stopped) {
-          await remove(sid, id);
           const reason = stored.reason ?? 'refused';
           await bus.notify('qu.record.rejected', { from, space: sid, id, reason });
           return finish({ sid, id, status: 'rejected', reason });
         }
-        if (local) await bus.emit('qu.write.stored', { sid, id });
+        if (local) await bus.emit('qu.write.stored', { sid, id, header, ws });
+        try {
+          await exclusive(sid, () => ws.flush());
+        } catch (error) {
+          await bus.notify('qu.record.failed', { from, space: sid, id, reason: error.message });
+          return finish({ sid, id, status: 'failed', reason: error.message });
+        }
+        await ws.settle();
         // Records fetched by a resync are normally not forwarded (the other peers
         // reconcile themselves). A hub (mirror) forwards them anyway: for its
         // subscribers it is the only path, and the record is new to it.
@@ -168,7 +212,7 @@ export function envelopes({ acceptGrants = false } = {}) {
           const { peers: targets } = await bus.run('qu.route', { sid, shard: header.shard, peers: [...peers], except: from });
           for (const peer of targets) if (peer !== from) await bus.emit(`net.out.${peer}.rec`, { bytes });
         }
-        return finish({ sid, id, status: stored.status ?? 'stored' });
+        return finish({ sid, id, status: ws.status ?? stored.status ?? 'stored' });
       } finally {
         inFlight.delete(id);
         settle();
@@ -202,7 +246,7 @@ export function envelopes({ acceptGrants = false } = {}) {
       await announce(space.id, mirror ? undefined : []);
     }
 
-    const api = { ingest, remove, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
+    const api = { ingest, remove, exclusive, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
     qu.envelopes = api;
     qu.keyring = ring;
     return api;
