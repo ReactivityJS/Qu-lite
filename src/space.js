@@ -2,11 +2,17 @@
  * SPACE - the root of every app and every piece of data. A Space is a
  * 32-byte secret plus a set of key EPOCHS; everything else is derived:
  *
- *   sid          = HKDF(secret, "qu-lite/sid")[0..16]   opaque id on the wire
- *   shardKey     = HKDF(secret, "qu-lite/shard")        HMAC key for path shards
  *   epoch 0 key  = HKDF(secret, "qu-lite/epoch/0")
  *   epoch n key  = random, distributed wrapped per member (rotate/acceptEpoch)
  *   write key(n) = Ed25519 from HKDF(epochKey(n), "qu-lite/write")
+ *   sid          = SHA-256(writePub(0))[0..16]          opaque id on the wire
+ *   shardKey     = HKDF(secret, "qu-lite/shard")        HMAC key for path shards
+ *
+ * The sid is SELF-CERTIFYING: a mirror that is shown epoch 0's write public
+ * key can check it against the sid and from then on verify every record's
+ * outer signature - without any secret. Later epochs are announced as
+ * GRANTS signed with the previous epoch's write key (`grants()`), so the
+ * mirror can follow rotations along that chain.
  *
  * The write key signs the OUTER envelope (envelope.js): it proves "a holder
  * of this epoch's key", never WHO - authorship is signed INSIDE the
@@ -33,6 +39,42 @@ export async function hkdf(ikm, info, length = 32) {
 export async function hmac(keyBytes, data) {
   const key = await subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await subtle.sign('HMAC', key, data));
+}
+
+/** @param {Uint8Array} writePub0 @returns {Promise<Uint8Array>} 16-byte sid. */
+export async function sidOf(writePub0) {
+  return (await QuCrypto.sha256(writePub0)).slice(0, 16);
+}
+
+/** What a grant for `epoch` signs (with the write key of `epoch - 1`). */
+export function grantMessage(sidHex, epoch, writePub) {
+  const head = enc.encode(`qu-lite/grant\n${sidHex}\n${epoch}\n`);
+  const out = new Uint8Array(head.length + writePub.length);
+  out.set(head, 0);
+  out.set(writePub, head.length);
+  return out;
+}
+
+/**
+ * Checks a list of grants against already-known write keys (`known`: epoch
+ * -> writePub) and returns the newly verified ones, in epoch order.
+ * @param {string} sidHex
+ * @param {Array<{epoch: number, writePub: Uint8Array, sig: Uint8Array|null}>} grants
+ * @param {Map<number, Uint8Array>} known
+ * @returns {Promise<Map<number, Uint8Array>>}
+ */
+export async function verifyGrants(sidHex, grants, known) {
+  const accepted = new Map();
+  const keyFor = (epoch) => known.get(epoch) ?? accepted.get(epoch);
+  for (const { epoch, writePub, sig } of [...grants].sort((a, b) => a.epoch - b.epoch)) {
+    if (keyFor(epoch)) continue;
+    if (epoch === 0) {
+      if (QuCrypto.toHex(await sidOf(writePub)) === sidHex) accepted.set(0, writePub);
+    } else if (sig && keyFor(epoch - 1) && (await QuCrypto.verify(grantMessage(sidHex, epoch, writePub), sig, keyFor(epoch - 1)))) {
+      accepted.set(epoch, writePub);
+    }
+  }
+  return accepted;
 }
 
 async function deriveEpoch(epochKey) {
@@ -69,8 +111,9 @@ export class Space {
   /** @param {Uint8Array} secret @param {{owner?: Uint8Array}} [options] @returns {Promise<Space>} */
   static async open(secret, { owner } = {}) {
     if (!(secret instanceof Uint8Array) || secret.length !== 32) throw new Error('Space.open: secret must be 32 bytes');
-    const space = new Space(secret, await hkdf(secret, 'qu-lite/sid', 16), await hkdf(secret, 'qu-lite/shard'), owner);
-    space.#epochs.set(0, await deriveEpoch(await hkdf(secret, 'qu-lite/epoch/0')));
+    const epoch0 = await deriveEpoch(await hkdf(secret, 'qu-lite/epoch/0'));
+    const space = new Space(secret, await sidOf(epoch0.writePub), await hkdf(secret, 'qu-lite/shard'), owner);
+    space.#epochs.set(0, epoch0);
     return space;
   }
 
@@ -129,6 +172,26 @@ export class Space {
     this.#epochs.set(epoch, await deriveEpoch(key));
     this.epoch = epoch;
     return { epoch, from: by.xPublicKey, iv, ct, to };
+  }
+
+  /**
+   * The write public keys a mirror needs to verify this space's records:
+   * epoch 0 is self-certifying (its hash is the sid), every later epoch is
+   * signed with the previous epoch's write key. Epochs whose predecessor
+   * this member never had are left out - the mirror already has that link.
+   * @returns {Promise<Array<{epoch: number, writePub: Uint8Array, sig: Uint8Array|null}>>}
+   */
+  async grants() {
+    const out = [];
+    for (const epoch of [...this.#epochs.keys()].sort((a, b) => a - b)) {
+      const { writePub } = this.#epochs.get(epoch);
+      if (epoch === 0) out.push({ epoch, writePub, sig: null });
+      else if (this.#epochs.has(epoch - 1)) {
+        const sig = await QuCrypto.sign(grantMessage(this.id, epoch, writePub), this.#epochs.get(epoch - 1).writePriv);
+        out.push({ epoch, writePub, sig });
+      }
+    }
+    return out;
   }
 
   /**

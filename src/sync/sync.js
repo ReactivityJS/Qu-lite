@@ -230,12 +230,12 @@ export function sync({
     }
 
     // --- routing: only to peers that asked for this (sid, shard) ----------
-    bus.on('qu.route', ({ sid, shard, peers: candidates }) => ({
-      peers: candidates.filter((peer) => {
-        const subs = remoteSubs.get(peer);
-        return !subs || subs.has(sid) || subs.has(`${sid}/${shard}`);
-      }),
-    }));
+    /** A peer that never subscribed gets everything; otherwise only its (sid[, shard]) subscriptions. */
+    function wants(peer, sid, shard) {
+      const subs = remoteSubs.get(peer);
+      return !subs || subs.has(sid) || subs.has(`${sid}/${shard}`);
+    }
+    bus.on('qu.route', ({ sid, shard, peers: candidates }) => ({ peers: candidates.filter((peer) => wants(peer, sid, shard)) }));
 
     // --- `query({ensure: true})` reconciles the window first --------------
     bus.on('qu.query.before', async (q) => {
@@ -402,7 +402,12 @@ export function sync({
       if (next !== null) return send(state.peer, 'neg', { session, msg: next });
 
       await send(state.peer, 'negend', { session });
-      for (const id of state.have) await sendRecord(state.peer, state.scope.sid, id);
+      // Push what the peer lacks - but only what it subscribed to: a mirror
+      // reconciling a whole space must not fill a partially-syncing peer.
+      for (const id of state.have) {
+        const bytes = await storage.get(`rec/${state.scope.sid}/${id}`);
+        if (bytes && wants(state.peer, state.scope.sid, peekEnvelope(bytes).shard)) await send(state.peer, 'rec', { bytes, sync: true });
+      }
       const wanted = [...new Set(state.need)];
       if (wanted.length === 0) return finish(state);
       for (const id of wanted) {

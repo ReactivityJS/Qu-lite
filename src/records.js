@@ -2,8 +2,10 @@
  * RECORDS - the data plugin. Two kinds of record live under a Space:
  *
  *   - log entries (no `key`): append-only, e.g. chat messages;
- *   - keyed entries (`key` set): last-write-wins by (hlc, author), older
- *     versions are dropped locally.
+ *   - keyed entries (`key` set): last-write-wins by (hlc, author). Older
+ *     versions leave the query index but their sealed envelope is KEPT, so
+ *     every peer and a key-less mirror hold the same set of envelopes and
+ *     reconciliation converges (pruning them is a later compaction step).
  *
  * Both flows are bus PROCESSES, so any plugin can hook in:
  *
@@ -23,6 +25,10 @@
  *   route:   run('qu.route', {sid, shard, peers, except}) - a plugin (sync)
  *            may narrow `peers`; without one, every connected peer gets it.
  *
+ *   grants:  on join and on every `net.peer.up`, each joined space's write
+ *            public keys go out as `net.out.<peer>.grant` - what a mirror
+ *            needs to verify (never read) the space's records.
+ *
  * Storage layout (all through the mount router, so each prefix - or each
  * space, e.g. `rec/<sid>/` - can be mounted on its own driver):
  *
@@ -30,7 +36,8 @@
  *   sx/<sid>/<shard>/<ts>-<id>             sync index: public header only
  *   idx/<sid>/<path>/<hlc>-<id>            opened record (local queries)
  *   head/<sid>/<path>/<key>                {hlc, author, id} of a keyed entry
- *   loc/<sid>/<id>                         {sx, idx, head?} - where it's indexed
+ *   loc/<sid>/<id>                         {sx, idx|null, head?} - where it's indexed
+ *                                          (idx null: a superseded keyed version)
  *
  * `<path>`/`<key>` are URI-encoded so `/` inside them can't collide; `<ts>`
  * is the envelope's minute-rounded time, zero-padded to 13 digits.
@@ -59,7 +66,10 @@ export function records() {
     const peers = new Set();
     const inFlight = new Set();
 
-    bus.on('net.peer.up', ({ peer }) => peers.add(peer));
+    bus.on('net.peer.up', async ({ peer }) => {
+      peers.add(peer);
+      for (const space of spaces.values()) await announce(space, [peer]);
+    });
     bus.on('net.peer.down', ({ peer }) => peers.delete(peer));
     bus.on('net.in.*.rec', ({ bytes, sync }, ctx) => receive(bytes, { from: ctx.topic.split('.')[2], sync }));
 
@@ -80,7 +90,7 @@ export function records() {
       const loc = await storage.get(`loc/${sid}/${id}`);
       if (loc) {
         await storage.remove(loc.sx);
-        await storage.remove(loc.idx);
+        if (loc.idx) await storage.remove(loc.idx);
         if (loc.head) {
           const head = await storage.get(loc.head);
           if (head?.id === id) await storage.remove(loc.head);
@@ -90,24 +100,39 @@ export function records() {
       await storage.remove(`rec/${sid}/${id}`);
     }
 
-    /** @returns {Promise<boolean>} false if an equal-or-newer keyed version already exists. */
+    /** Takes a former head out of the query index; its envelope stays for sync. */
+    async function demote(sid, id) {
+      const loc = await storage.get(`loc/${sid}/${id}`);
+      if (!loc?.idx) return;
+      await storage.remove(loc.idx);
+      await storage.set(`loc/${sid}/${id}`, { ...loc, idx: null });
+    }
+
+    /**
+     * Stores the envelope and indexes it. A keyed record that is older than
+     * the current head is stored as a superseded version (no query index).
+     * @returns {Promise<boolean>} true if it is (now) the current value.
+     */
     async function apply(space, record, bytes) {
-      const loc = {
-        sx: sxKey(peekEnvelope(bytes), record.id),
-        idx: `idx/${space.id}/${seg(record.path)}/${record.hlc}-${record.id}`,
-      };
+      const loc = { sx: sxKey(peekEnvelope(bytes), record.id), idx: null };
+      let current = true;
       if (record.key !== null && record.key !== undefined) {
         loc.head = `head/${space.id}/${seg(record.path)}/${seg(record.key)}`;
         const head = await storage.get(loc.head);
-        if (head && compareVersion(head, record) >= 0) return false;
-        if (head) await drop(space.id, head.id);
-        await storage.set(loc.head, { hlc: record.hlc, author: record.author, id: record.id });
+        if (head && compareVersion(head, record) >= 0) current = false;
+        else {
+          if (head) await demote(space.id, head.id);
+          await storage.set(loc.head, { hlc: record.hlc, author: record.author, id: record.id });
+        }
+      }
+      if (current) {
+        loc.idx = `idx/${space.id}/${seg(record.path)}/${record.hlc}-${record.id}`;
+        await storage.set(loc.idx, record);
       }
       await storage.set(`rec/${space.id}/${record.id}`, bytes);
       await storage.set(loc.sx, 1);
-      await storage.set(loc.idx, record);
       await storage.set(`loc/${space.id}/${record.id}`, loc);
-      return true;
+      return current;
     }
 
     async function receive(bytes, { from, sync = false } = {}) {
@@ -148,22 +173,33 @@ export function records() {
           await bus.notify('qu.record.rejected', { from, space: space.id, id: record.id, reason: 'hook' });
           return result('rejected');
         }
-        if (!(await apply(space, record, bytes))) {
-          await bus.notify('qu.record.superseded', { from, space: space.id, id: record.id });
-          return result('superseded');
-        }
-        await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: false });
+        const current = await apply(space, record, bytes);
+        if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: false });
+        else await bus.notify('qu.record.superseded', { from, space: space.id, id: record.id });
         if (!sync) await route(bytes, from);
-        return result('stored');
+        return result(current ? 'stored' : 'superseded');
       } finally {
         inFlight.delete(record.id);
       }
+    }
+
+    /**
+     * Sends the space's write-key grants (public keys only) to `targets` -
+     * call again after `space.rotate()`/`acceptEpoch()` so mirrors follow.
+     * @param {import('./space.js').Space|string} spaceRef
+     * @param {string[]} [targets] - default: every connected peer.
+     */
+    async function announce(spaceRef, targets = [...peers]) {
+      const space = spaceOf(spaceRef);
+      const grants = await space.grants();
+      for (const peer of targets) await bus.emit(`net.out.${peer}.grant`, { sid: space.id, grants });
     }
 
     /** @param {import('./space.js').Space} space */
     function join(space) {
       spaces.set(space.id, space);
       bus.notify('qu.space.joined', { space: space.id });
+      if (peers.size > 0) announce(space);
       return space;
     }
 
@@ -256,7 +292,7 @@ export function records() {
           continue;
         }
         const loc = await storage.get(`loc/${space.id}/${id}`);
-        const intact = loc && (await storage.has(loc.sx)) && (await storage.has(loc.idx));
+        const intact = loc && (await storage.has(loc.sx)) && (loc.idx === null || (await storage.has(loc.idx)));
         if (!intact) {
           await drop(space.id, id);
           if (record.key !== null && record.key !== undefined) {
@@ -278,7 +314,7 @@ export function records() {
       return report;
     }
 
-    Object.assign(qu, { join, leave, write, get, query, scrub });
-    return { join, leave, write, get, query, scrub, receive, spaceOf };
+    Object.assign(qu, { join, leave, write, get, query, scrub, announce });
+    return { join, leave, write, get, query, scrub, announce, receive, spaceOf };
   };
 }

@@ -30,7 +30,7 @@ test('write + time-window query over a path', async () => {
   assert.deepEqual((await qu.query({ space, path: 'chat', limit: 1, reverse: true })).map((r) => r.value), ['c']);
 });
 
-test('keyed entries are last-write-wins and keep only the head', async () => {
+test('keyed entries are last-write-wins; only the head is queryable', async () => {
   const { qu } = await makeQu();
   const space = qu.join(await Space.create());
 
@@ -39,7 +39,8 @@ test('keyed entries are last-write-wins and keep only the head', async () => {
 
   assert.equal(await qu.get(space, 'profile', 'name'), 'Anna');
   assert.deepEqual((await qu.query({ space, path: 'profile' })).map((r) => r.value), ['Anna']);
-  assert.equal((await qu.storage.keys(`rec/${space.id}/`)).length, 1);
+  // The superseded envelope is kept for sync (a key-less mirror can't tell it's old), just not indexed.
+  assert.equal((await qu.storage.keys(`rec/${space.id}/`)).length, 2);
 });
 
 test('qu.write.before hooks can transform or veto a write', async () => {
