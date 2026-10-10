@@ -122,3 +122,17 @@ test('the mirror restores its spaces after a restart (same storage)', async () =
   await c.resync({ space: sc });
   assert.deepEqual(await values(c, sc, 'chat'), ['x']);
 });
+
+test('the mirror is a hub: a record it pulls by resync reaches other subscribers live', async () => {
+  const m = await mirrorPeer();
+  const a = await peer();
+  const b = await peer();
+  const secret = (await Space.create()).secret;
+  const sa = a.join(await Space.open(secret));
+  const sb = b.join(await Space.open(secret));
+  await b.watch({ space: sb });
+  await connectInProcess(b, m).ready;
+  await a.write(sa, 'chat', 'written offline'); // a was never connected: only its outbox / a reconcile can deliver it
+  connectInProcess(a, m);
+  await until(async () => (await values(b, sb, 'chat')).length === 1);
+});

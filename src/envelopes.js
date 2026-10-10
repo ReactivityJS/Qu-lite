@@ -15,6 +15,7 @@
  *                                                             set ctx.status
  *            -> emit('qu.write.stored') for local writes      (sync: outbox)
  *            -> run('qu.route') + emit('net.out.<peer>.rec')  unless fetched by a resync
+ *                                                             (a hub sets `forwardSynced`)
  *            -> notify('qu.record.processed', {from, sid, id, status})
  *
  *   keyring: (sid, epoch) -> write public key. Members register their own
@@ -147,7 +148,10 @@ export function envelopes({ acceptGrants = false } = {}) {
           return finish({ sid, id, status: 'rejected', reason });
         }
         if (local) await bus.emit('qu.write.stored', { sid, id });
-        if (!sync) {
+        // Records fetched by a resync are normally not forwarded (the other peers
+        // reconcile themselves). A hub (mirror) forwards them anyway: for its
+        // subscribers it is the only path, and the record is new to it.
+        if (!sync || api.forwardSynced) {
           const { peers: targets } = await bus.run('qu.route', { sid, shard: header.shard, peers: [...peers], except: from });
           for (const peer of targets) if (peer !== from) await bus.emit(`net.out.${peer}.rec`, { bytes });
         }
@@ -185,7 +189,7 @@ export function envelopes({ acceptGrants = false } = {}) {
       await announce(space.id, mirror ? undefined : []);
     }
 
-    const api = { ingest, remove, register, announce, keyring: ring, acceptGrants, roles };
+    const api = { ingest, remove, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
     qu.envelopes = api;
     qu.keyring = ring;
     return api;

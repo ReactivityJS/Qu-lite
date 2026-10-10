@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qu Lite Demo</title>
+  <style>
+    :root { --bg: #f6f7f9; --card: #fff; --ink: #1d2330; --muted: #677085; --line: #dfe3ea; --accent: #2f6fde; --ok: #1f8a4c; --bad: #c0392b; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #14171d; --card: #1c2029; --ink: #e6e9ef; --muted: #98a0b3; --line: #2c3240; --accent: #6b9cff; --ok: #4cc27f; --bad: #ff6b5b; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+    header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card); position: sticky; top: 0; }
+    header h1 { font-size: 16px; margin: 0; }
+    main { display: grid; gap: 12px; padding: 12px 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+    section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+    section h2 { font-size: 14px; margin: 0 0 8px; }
+    .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+    input, select, button { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+    input { flex: 1; min-width: 120px; }
+    button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent; }
+    button.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
+    .pill { padding: 2px 8px; border-radius: 99px; font-size: 12px; border: 1px solid var(--line); }
+    .pill.on { color: var(--ok); border-color: var(--ok); } .pill.off { color: var(--bad); border-color: var(--bad); }
+    .muted { color: var(--muted); font-size: 12px; }
+    code, .mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+    #chat { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; }
+    #chat li { padding: 4px 6px; border-bottom: 1px solid var(--line); cursor: pointer; }
+    #chat li:hover { background: var(--bg); }
+    #log { font-family: ui-monospace, monospace; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; margin: 0; }
+    #raw { max-height: 200px; overflow: auto; margin: 0; }
+    .wide { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Qu Lite</h1>
+    <span>Profil <b id="profile"></b></span>
+    <span id="conn" class="pill off">getrennt</span>
+    <span class="muted">Netz-ID <code id="netid"></code></span>
+    <span class="muted">Relay <code id="relay">–</code></span>
+    <span class="muted">Outbox <b id="outbox">0</b> · offen <b id="pending">0</b></span>
+    <button id="toggle" class="secondary">Trennen</button>
+    <button id="resync" class="secondary">Resync</button>
+    <button id="scrub" class="secondary">Scrub</button>
+  </header>
+  <main>
+    <section>
+      <h2>Meine User-Node</h2>
+      <div class="muted">Pubkey (öffentlich, zum Teilen): <code id="mypub"></code></div>
+      <div class="row"><input id="name" placeholder="Anzeigename (öffentlich)"><button id="saveName">Speichern</button></div>
+      <div class="row"><input id="note" placeholder="Private Notiz (nur meine Geräte)"><button id="saveNote">Speichern</button></div>
+      <h2>Profil ansehen</h2>
+      <div class="row"><input id="lookup" placeholder="Pubkey (hex)"><button id="doLookup" class="secondary">Laden</button></div>
+      <pre id="lookupResult" class="mono"></pre>
+    </section>
+    <section>
+      <h2>Gruppe <span class="muted" id="sid"></span></h2>
+      <div class="row"><button id="newGroup">Neue Gruppe</button><input id="invite" readonly placeholder="Einladungslink (Secret steht nur im #, geht nie an den Server)"></div>
+      <div class="row"><input id="title" placeholder="Titel / Betreff (verschlüsselt, last-write-wins)"><button id="saveTitle">Setzen</button></div>
+      <div class="row"><button id="reveal" class="secondary">Mich in der Gruppe zu erkennen geben</button><span class="muted">Autor ist sonst nur ein Alias</span></div>
+      <div class="row"><input id="msg" placeholder="Nachricht"><button id="send">Senden</button>
+        <select id="window"><option value="">alles</option><option value="3600000">letzte Stunde</option><option value="86400000">letzte 24 h</option></select></div>
+      <ul id="chat"></ul>
+      <div class="muted">Klick auf eine Nachricht zeigt ihren gespeicherten, verschlüsselten Umschlag.</div>
+      <pre id="raw" class="mono"></pre>
+    </section>
+    <section class="wide">
+      <h2>Event-Log <input id="filter" placeholder="Filter, z. B. net. oder sync." style="max-width:260px"></h2>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script type="module" src="./dist/app.js"></script>
+</body>
+</html>

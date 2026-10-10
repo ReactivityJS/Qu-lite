@@ -9,6 +9,7 @@
  *   - persist verified write keys under `mirror/grant/<sid>/<epoch>` and
  *     load them into the keyring on start;
  *   - watch every granted space whole (with `sync({role: 'mirror'})`);
+ *   - forward records it pulled via resync live to its subscribers (hub);
  *   - optional `allow` list: other sids are refused for grants and records.
  *
  * Install next to `sync({role: 'mirror'})`, without `records()`.
@@ -22,6 +23,7 @@ export function mirror({ allow = null } = {}) {
     const { bus, storage } = qu;
     const env = envelopes()(qu);
     env.acceptGrants = true;
+    env.forwardSynced = true; // a hub: what it pulls from one peer is new for its other subscribers
     const allowed = (sid) => !allow || allow.includes(sid);
 
     const watchSpace = (sid) => (typeof qu.watch === 'function' ? qu.watch({ space: { sid } }) : undefined);
