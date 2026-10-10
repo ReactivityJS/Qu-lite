@@ -203,6 +203,6 @@ await qu.rtc.setMode('relay-only');                    // privacy: never reveal 
 
 ## Next milestones
 
-7 WebRTC + browser mesh · 8 HTTPS+SSE transport ·
+8 HTTPS+SSE transport ·
 9 atomic writes · 10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
 text (optional).
