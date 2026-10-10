@@ -85,11 +85,12 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await alice.waitForFunction(() => document.getElementById('typing').textContent.includes('tippt'), null, { timeout: 40_000 });
     await bob.fill('#msg', '');
 
-    step('carol is invited by pubkey through her inbox');
+    step('carol (over HTTPS + SSE) is invited by pubkey through her inbox');
     const carol = await open('carol');
-    await carol.goto(`${base}?name=carol`);
+    await carol.goto(`${base}?name=carol&transport=sse`); // carol is behind a "WebSocket-blocking proxy"
     await ready(carol);
     await connected(carol);
+    assert.equal(await carol.textContent('#via'), 'sse');
     await alice.fill('#invitePub', await carol.textContent('#mypub'));
     await alice.click('#invitePubBtn');
     await carol.waitForSelector('#inbox button', { timeout: 40_000 });

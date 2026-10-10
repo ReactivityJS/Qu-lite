@@ -32,13 +32,31 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown } = {}) {
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
     if (bytes && link) link.receive(bytes);
   });
-  socket.addEventListener('close', () => (link ? link.closed() : onDown?.()));
-  socket.addEventListener('error', () => {});
+  // Exactly one "down" per socket. Some implementations (Node's built-in
+  // WebSocket) report a refused upgrade with 'error' only, never 'close'.
+  let down = false;
+  const fail = () => {
+    if (down) return;
+    down = true;
+    if (link) link.closed();
+    else onDown?.();
+  };
+  socket.addEventListener('close', fail);
+  socket.addEventListener('error', () => {
+    if (!link) fail();
+  });
   return {
     get stats() {
       return link?.stats ?? { sent: 0, received: 0 };
     },
     close: () => socket.close(),
+    /** Treats the socket as failed now (e.g. it hangs while connecting). */
+    fail: () => {
+      try {
+        socket.close();
+      } catch {}
+      fail();
+    },
   };
 }
 
@@ -46,10 +64,10 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown } = {}) {
  * One self-healing client connection.
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {string} url
- * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number}} [options]
+ * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number, connectTimeoutMs?: number}} [options]
  * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null, readonly url: string}}
  */
-export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000 } = {}) {
+export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000, connectTimeoutMs = 10_000 } = {}) {
   let closed = false;
   let attempt = 0;
   let socket = null;
@@ -58,11 +76,15 @@ export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDe
 
   const open = () => {
     clearTimeout(timer);
-    if (closed || (socket && socket.readyState <= OPEN)) return;
+    if (closed || (socket && socket.readyState === OPEN)) return;
     qu.bus.notify('net.connecting', { url, attempt });
-    socket = new WebSocketImpl(url);
-    attachSocket(qu, socket, {
+    const current = (socket = new WebSocketImpl(url));
+    // A blocked WebSocket often neither opens nor fails (a proxy just holds it): give up after a while.
+    const guard = setTimeout(() => current.readyState !== OPEN && attached.fail(), connectTimeoutMs);
+    guard.unref?.();
+    const attached = attachSocket(qu, socket, {
       onUp: (remote) => {
+        clearTimeout(guard);
         attempt = 0;
         peer = remote;
       },

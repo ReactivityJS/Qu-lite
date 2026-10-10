@@ -1,11 +1,12 @@
 # @qu/lite
 
-A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-7: kernel, mounts, spaces and user nodes, a privacy-first
+A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-8: kernel, mounts, spaces and user nodes, a privacy-first
 envelope, robust sync (Negentropy reconciliation, partial sync, resync/repair, durable outbox and
 resumable reconciles), persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket first),
 one peer base for clients and relays/mirrors, a Docker relay, a browser demo, and group membership with
 roles, admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing,
-sent, delivered, read) and direct browser-to-browser links over WebRTC.
+sent, delivered, read), direct browser-to-browser links over WebRTC, and HTTPS + SSE as a fallback
+where WebSockets are blocked.
 
 **Try it:** `npm run lite:demo` (or `docker compose -f docker-compose.lite.yml up --build`), then open
 `http://localhost:8787/?name=alice` and `http://localhost:8787/?name=bob` in two browsers, create a group,
@@ -201,8 +202,26 @@ await qu.rtc.setMode('relay-only');                    // privacy: never reveal 
 - Tested with a fake RTCPeerConnection in Node and with real WebRTC between two Chromium instances, which
   keep chatting after the relay is shut down.
 
+## HTTPS + SSE fallback (milestone 8)
+
+```js
+qu.use(relayTransport({ url: 'https://relay.example' }));  // wss://…/ws, falls back to https://…/sse
+qu.transports.relay.via;                                     // 'ws' | 'sse'
+qu.use(sseTransport({ connect: ['https://relay.example/sse'] }));   // SSE only
+```
+
+- **Server** (`net/ws-server.js` `listenHttp` / transport `http-server`): one port for WebSocket upgrades,
+  `GET/POST /sse/<session>` and static files. `bin/mirror.mjs` serves both transports.
+- **SSE** (`net/sse.js`, `net/sse-server.js`): down = one long-lived event stream (one link frame per event,
+  base64), up = frames batched per tick and POSTed in order (`u32 length || frame`). The session id is 128
+  random bits from the client and valid only while its stream is open. The client uses streaming `fetch`
+  (browsers and Node), reconnects with backoff, and ends in the same `createLink` as every transport.
+- **Fallback** (`net/relay.js`): WebSocket first; after `wsAttempts` failures - refused, or hanging past
+  `connectTimeoutMs`, as blocking proxies often do - it switches to SSE and retries WebSocket every
+  `retryWsMs`. The demo uses it (`&transport=sse` forces SSE); the e2e test runs one browser over SSE.
+- Cost: server-to-client frames are base64 (+33 %); client-to-server stays binary.
+
 ## Next milestones
 
-8 HTTPS+SSE transport ·
 9 atomic writes · 10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
 text (optional).

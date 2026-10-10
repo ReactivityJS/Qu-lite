@@ -27,6 +27,8 @@ import { status } from './status.js';
 import { rtc } from './net/webrtc.js';
 import { topology } from './net/topology.js';
 import { wsTransport } from './net/ws.js';
+import { sseTransport } from './net/sse.js';
+import { relayTransport } from './net/relay.js';
 
 /** @returns {Registry} stores, plugins and transports usable in any environment. */
 export function defaultRegistry() {
@@ -43,7 +45,9 @@ export function defaultRegistry() {
     .register('plugin', 'status', (options) => status(options))
     .register('transport', 'webrtc', (options) => rtc(options))
     .register('plugin', 'topology', (options) => topology(options))
-    .register('transport', 'ws', (options) => wsTransport(options));
+    .register('transport', 'ws', (options) => wsTransport(options))
+    .register('transport', 'sse', (options) => sseTransport(options))
+    .register('transport', 'relay', (options) => relayTransport(options));
 }
 
 const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ? [spec, {}] : [null, spec]);

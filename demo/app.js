@@ -7,14 +7,15 @@
  *
  *   ?name=alice      profile (default "default")
  *   &offline         start without connecting
- *   &relay=ws://…    another relay
+ *   &relay=https://… another relay (origin; WebSocket at /ws, SSE fallback at /sse)
+ *   &transport=sse   force HTTPS + SSE instead of WebSocket
  *   #g=<sid>         open a known group      #i=<invite>  accept an invite link
  */
 import { createPeer, peekEnvelope, crypto } from '../src/index.js';
 
 const params = new URLSearchParams(location.search);
 const profile = params.get('name') || 'default';
-const relayUrl = params.get('relay') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+const relayUrl = params.get('relay') || location.origin;
 const $ = (id) => document.getElementById(id);
 const short = (hex) => (hex ? `${hex.slice(0, 8)}…` : '–');
 const el = (tag, text, attrs = {}) => Object.assign(document.createElement(tag), { textContent: text ?? '', ...attrs });
@@ -25,7 +26,7 @@ const qu = await createPeer({
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
   plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status'],
   transports: [
-    ['ws', { connect: params.has('offline') ? [] : [relayUrl], minDelayMs: 300 }],
+    ['relay', { url: params.has('offline') ? undefined : relayUrl, prefer: params.get('transport') === 'sse' ? 'sse' : 'ws', minDelayMs: 300 }],
     ['webrtc', { mode: params.get('rtc') ?? localStorage.getItem('qu-demo-rtc') ?? 'auto' }],
   ],
 });
@@ -53,8 +54,9 @@ $('filter').addEventListener('input', renderLog);
 $('profile').textContent = profile;
 $('netid').textContent = qu.peerId;
 async function renderStatus() {
-  const [conn] = qu.transports.ws.status();
+  const [conn] = qu.transports.relay.status();
   $('conn').textContent = conn?.connected ? 'verbunden' : conn ? 'verbinde…' : 'getrennt';
+  $('via').textContent = conn?.via ?? '–';
   $('conn').className = `pill ${conn?.connected ? 'on' : 'off'}`;
   $('relay').textContent = conn?.peer ?? '–';
   $('toggle').textContent = conn ? 'Trennen' : 'Verbinden';
@@ -76,8 +78,8 @@ $('rtcMode').addEventListener('change', async () => {
 });
 qu.bus.on('net.peer.*', renderStatus);
 $('toggle').addEventListener('click', () => {
-  if (qu.transports.ws.status().length) qu.transports.ws.disconnect();
-  else qu.transports.ws.connect(relayUrl);
+  if (qu.transports.relay.status().length) qu.transports.relay.disconnect();
+  else qu.transports.relay.connect(relayUrl);
   renderStatus();
 });
 

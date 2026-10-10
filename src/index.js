@@ -24,3 +24,5 @@ export * as crypto from './crypto.js';
 export { signals } from './signals.js';
 export { status } from './status.js';
 export { rtc } from './net/webrtc.js';
+export { connectSse, sseTransport } from './net/sse.js';
+export { relayTransport } from './net/relay.js';
