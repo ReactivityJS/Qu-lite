@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./node": "./src/node.js",
     "./sqlite": "./src/drivers/sqlite.js",
     "./ws-server": "./src/net/ws-server.js"
   },

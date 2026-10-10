@@ -187,8 +187,10 @@ export function sync({
      * @param {{space: object, path?: string, from?: number, to?: number, peer?: string}} input
      */
     async function resync(input) {
-      const scope = await resolveScope(input);
+      // Targets are fixed at call time: a link that drops while the scope is
+      // being resolved still gets a (failed, therefore pending) session.
       const targets = input.peer ? [input.peer] : [...peers];
+      const scope = await resolveScope(input);
       return Promise.all(targets.map((peer) => reconcileWith(peer, scope)));
     }
 

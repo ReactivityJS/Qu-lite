@@ -118,7 +118,7 @@ test('the mirror restores its spaces after a restart (same storage)', async () =
 
   const c = await peer();
   const sc = c.join(await Space.open(sa.secret));
-  connectInProcess(c, m);
+  await connectInProcess(c, m).ready;
   await c.resync({ space: sc });
   assert.deepEqual(await values(c, sc, 'chat'), ['x']);
 });

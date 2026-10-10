@@ -148,7 +148,7 @@ test('concurrent keyed writes converge to the same head on both peers', async ()
   // Written while disconnected, same wall time, then connected.
   await a.qu.write(sa, 'doc', 'from a', { key: 'title' });
   await b.qu.write(sb, 'doc', 'from b', { key: 'title' });
-  connectInProcess(a.qu, b.qu);
+  await connectInProcess(a.qu, b.qu).ready;
   // M1 has no reconciliation yet: re-deliver both heads explicitly.
   for (const [from, to, space] of [[a, b, sa], [b, a, sb]]) {
     for (const key of await from.qu.storage.keys(`rec/${space.id}/`)) {

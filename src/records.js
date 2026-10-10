@@ -1,55 +1,34 @@
 /**
- * RECORDS - the data plugin. Two kinds of record live under a Space:
+ * RECORDS - the reader/writer plugin of a space MEMBER, on top of the blind
+ * envelope layer (envelopes.js, installed automatically). Envelopes stay
+ * sealed in storage; this plugin only keeps POINTER indexes and decrypts on
+ * read (with a small in-memory cache), so nothing readable is ever stored
+ * and every stored record stays verifiable by anyone.
  *
+ * Two kinds of record live under a Space:
  *   - log entries (no `key`): append-only, e.g. chat messages;
  *   - keyed entries (`key` set): last-write-wins by (hlc, author). Older
- *     versions leave the query index but their sealed envelope is KEPT, so
- *     every peer and a key-less mirror hold the same set of envelopes and
- *     reconciliation converges (pruning them is a later compaction step).
+ *     versions leave the index but their envelope is KEPT, so every peer
+ *     and a key-less mirror hold the same set (pruning: later compaction).
  *
- * Both flows are bus PROCESSES, so any plugin can hook in:
+ * Both flows are bus processes:
  *
  *   write:   run('qu.write.before', draft)   transform, or throw to veto
- *            -> seal -> store -> emit('qu.write.stored', {sid, id})
- *            -> notify('qu.record.<sid>')    listeners
- *            -> route + emit('net.out.<peer>.rec')
+ *            -> seal (author = per-space alias by default) -> envelopes.ingest(local)
+ *   read:    'qu.envelope.stored' -> open -> clock drift check
+ *            -> emit('qu.accept', record)   ctx.stop() rejects (envelope removed)
+ *            -> pointer indexes -> notify('qu.record.<sid>')
  *
- *   receive: 'net.in.<peer>.rec' -> dedupe by id -> open (outer sig,
- *            decrypt, author sig) -> clock drift check
- *            -> emit('qu.accept', record)   ctx.stop() rejects
- *            -> store -> notify('qu.record.<sid>')
- *            -> route + forward to other peers (live records only; records
- *               fetched by a resync carry `sync: true` and are not forwarded)
- *            every outcome ends in notify('qu.record.processed', {id, status})
+ * Storage (besides rec/ and sx/ owned by envelopes.js) - pointers only,
+ * paths and keys as opaque per-space tags (space.tag):
  *
- *   route:   run('qu.route', {sid, shard, peers, except}) - a plugin (sync)
- *            may narrow `peers`; without one, every connected peer gets it.
- *
- *   grants:  on join and on every `net.peer.up`, each joined space's write
- *            public keys go out as `net.out.<peer>.grant` - what a mirror
- *            needs to verify (never read) the space's records.
- *
- * Storage layout (all through the mount router, so each prefix - or each
- * space, e.g. `rec/<sid>/` - can be mounted on its own driver):
- *
- *   rec/<sid>/<id>                         sealed envelope bytes (what syncs)
- *   sx/<sid>/<shard>/<ts>-<id>             sync index: public header only
- *   idx/<sid>/<path>/<hlc>-<id>            opened record (local queries)
- *   head/<sid>/<path>/<key>                {hlc, author, id} of a keyed entry
- *   loc/<sid>/<id>                         {sx, idx|null, head?} - where it's indexed
- *                                          (idx null: a superseded keyed version)
- *
- * `<path>`/`<key>` are URI-encoded so `/` inside them can't collide; `<ts>`
- * is the envelope's minute-rounded time, zero-padded to 13 digits.
+ *   idx/<sid>/<pathTag>/<hlc>-<id>     {id, hlc, author}
+ *   head/<sid>/<pathTag>/<keyTag>      {id, hlc, author} of a keyed entry
+ *   loc/<sid>/<id>                     {idx|null, head?} (idx null: superseded version)
  */
-import { sealEnvelope, openEnvelope, peekEnvelope, envelopeId } from './envelope.js';
+import { sealEnvelope, openEnvelope, envelopeId, verifyEnvelope, peekEnvelope } from './envelope.js';
+import { envelopes as envelopeLayer, sxKey } from './envelopes.js';
 import { formatHlc } from './hlc.js';
-
-const seg = (s) => encodeURIComponent(s);
-const pad = (ms) => String(ms).padStart(13, '0');
-
-/** Sync-index key for a record - derivable from the public header alone (a mirror can build it too). */
-export const sxKey = (header, id) => `sx/${header.sid}/${header.shard}/${pad(header.ts)}-${id}`;
 
 /** (hlc, author) order - the LWW tiebreak. @returns {number} */
 function compareVersion(a, b) {
@@ -58,49 +37,48 @@ function compareVersion(a, b) {
   return 0;
 }
 
-export function records() {
+/**
+ * @param {{author?: 'alias'|'identity', cacheSize?: number}} [options]
+ *   `author`: default signing key for group spaces (user nodes always sign
+ *   with the identity). Overridable per space in `join()`.
+ */
+export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = {}) {
   return (qu) => {
     const { bus, storage, clock, identity } = qu;
-    /** @type {Map<string, import('./space.js').Space>} */
+    const env = envelopeLayer()(qu);
+    /** @type {Map<string, {space: import('./space.js').Space, author: string}>} */
     const spaces = new Map();
-    const peers = new Set();
-    const inFlight = new Set();
+    /** @type {Map<string, object>} id -> opened record (LRU by insertion order). */
+    const cache = new Map();
 
-    bus.on('net.peer.up', async ({ peer }) => {
-      peers.add(peer);
-      for (const space of spaces.values()) await announce(space, [peer]);
-    });
-    bus.on('net.peer.down', ({ peer }) => peers.delete(peer));
-    bus.on('net.in.*.rec', ({ bytes, sync }, ctx) => receive(bytes, { from: ctx.topic.split('.')[2], sync }));
-
-    const spaceOf = (space) => {
-      const found = spaces.get(typeof space === 'string' ? space : space.id);
-      if (!found) throw new Error(`records: space ${typeof space === 'string' ? space : space.id} not joined`);
-      return found;
+    const remember = (record) => {
+      cache.delete(record.id);
+      cache.set(record.id, record);
+      if (cache.size > cacheSize) cache.delete(cache.keys().next().value);
+      return record;
     };
 
-    async function route(bytes, except) {
-      const header = peekEnvelope(bytes);
-      const { peers: targets } = await bus.run('qu.route', { sid: header.sid, shard: header.shard, peers: [...peers], except });
-      for (const peer of targets) if (peer !== except) await bus.emit(`net.out.${peer}.rec`, { bytes });
+    const spaceOf = (ref) => {
+      const id = typeof ref === 'string' ? ref : ref.id;
+      const entry = spaces.get(id);
+      if (!entry) throw new Error(`records: space ${id} not joined`);
+      return entry.space;
+    };
+
+    async function tags(space, record) {
+      const pathTag = await space.tag(record.path);
+      const keyTag = record.key !== null && record.key !== undefined ? await space.tag(`${record.path}\u0000${record.key}`) : null;
+      return { pathTag, keyTag };
     }
 
-    /** Removes a record and every index entry pointing at it. */
-    async function drop(sid, id) {
-      const loc = await storage.get(`loc/${sid}/${id}`);
-      if (loc) {
-        await storage.remove(loc.sx);
-        if (loc.idx) await storage.remove(loc.idx);
-        if (loc.head) {
-          const head = await storage.get(loc.head);
-          if (head?.id === id) await storage.remove(loc.head);
-        }
-      }
-      await storage.remove(`loc/${sid}/${id}`);
-      await storage.remove(`rec/${sid}/${id}`);
+    /** Opens a stored envelope (no re-verification: stored means verified). */
+    async function read(space, id) {
+      if (cache.has(id)) return cache.get(id);
+      const bytes = await storage.get(`rec/${space.id}/${id}`);
+      if (!bytes) return null;
+      return remember(await openEnvelope(space, bytes, { verify: false }));
     }
 
-    /** Takes a former head out of the query index; its envelope stays for sync. */
     async function demote(sid, id) {
       const loc = await storage.get(`loc/${sid}/${id}`);
       if (!loc?.idx) return;
@@ -108,98 +86,77 @@ export function records() {
       await storage.set(`loc/${sid}/${id}`, { ...loc, idx: null });
     }
 
-    /**
-     * Stores the envelope and indexes it. A keyed record that is older than
-     * the current head is stored as a superseded version (no query index).
-     * @returns {Promise<boolean>} true if it is (now) the current value.
-     */
-    async function apply(space, record, bytes) {
-      const loc = { sx: sxKey(peekEnvelope(bytes), record.id), idx: null };
+    /** Removes a record's indexes and its envelope. */
+    async function drop(sid, id) {
+      const loc = await storage.get(`loc/${sid}/${id}`);
+      if (loc?.idx) await storage.remove(loc.idx);
+      if (loc?.head && (await storage.get(loc.head))?.id === id) await storage.remove(loc.head);
+      await storage.remove(`loc/${sid}/${id}`);
+      cache.delete(id);
+      await env.remove(sid, id);
+    }
+
+    /** @returns {Promise<boolean>} true if the record is (now) the current value. */
+    async function index(space, record) {
+      const { pathTag, keyTag } = await tags(space, record);
+      const pointer = { id: record.id, hlc: record.hlc, author: record.author };
+      const loc = { idx: null };
       let current = true;
-      if (record.key !== null && record.key !== undefined) {
-        loc.head = `head/${space.id}/${seg(record.path)}/${seg(record.key)}`;
+      if (keyTag) {
+        loc.head = `head/${space.id}/${pathTag}/${keyTag}`;
         const head = await storage.get(loc.head);
         if (head && compareVersion(head, record) >= 0) current = false;
         else {
           if (head) await demote(space.id, head.id);
-          await storage.set(loc.head, { hlc: record.hlc, author: record.author, id: record.id });
+          await storage.set(loc.head, pointer);
         }
       }
       if (current) {
-        loc.idx = `idx/${space.id}/${seg(record.path)}/${record.hlc}-${record.id}`;
-        await storage.set(loc.idx, record);
+        loc.idx = `idx/${space.id}/${pathTag}/${record.hlc}-${record.id}`;
+        await storage.set(loc.idx, pointer);
       }
-      await storage.set(`rec/${space.id}/${record.id}`, bytes);
-      await storage.set(loc.sx, 1);
       await storage.set(`loc/${space.id}/${record.id}`, loc);
       return current;
     }
 
-    async function receive(bytes, { from, sync = false } = {}) {
-      const done = (status, extra = {}) => bus.notify('qu.record.processed', { from, status, ...extra });
-      let header;
-      try {
-        header = peekEnvelope(bytes);
-      } catch (error) {
-        await bus.notify('qu.record.rejected', { from, reason: error.message });
-        return done('rejected');
-      }
-      const space = spaces.get(header.sid);
-      if (!space) {
-        await bus.notify('qu.record.unknown-space', { from, sid: header.sid });
-        return done('unknown-space', { sid: header.sid, id: await envelopeId(bytes) });
-      }
-
+    bus.on('qu.envelope.stored', async ({ sid, id, bytes, from, local }, ctx) => {
+      const entry = spaces.get(sid);
+      if (!entry) return; // not a member: kept blind (verified, unreadable)
       let record;
       try {
-        record = await openEnvelope(space, bytes);
+        record = await openEnvelope(entry.space, bytes, { verify: false });
       } catch (error) {
-        await bus.notify('qu.record.rejected', { from, space: space.id, reason: error.message });
-        return done('rejected', { sid: space.id, id: await envelopeId(bytes) });
+        if (/no key to read/.test(error.message)) return; // e.g. a private field of someone else's user node
+        ctx.reason = error.message;
+        return ctx.stop();
       }
-      const result = (status, extra) => done(status, { sid: space.id, id: record.id, ...extra });
-      if (inFlight.has(record.id) || (await storage.has(`rec/${space.id}/${record.id}`))) {
-        await bus.notify('qu.record.duplicate', { from, space: space.id, id: record.id });
-        return result('duplicate');
-      }
-      inFlight.add(record.id);
-      try {
+      if (!local) {
         if (!clock.recv(record.hlc)) {
-          await bus.notify('qu.record.rejected', { from, space: space.id, id: record.id, reason: 'clock drift' });
-          return result('rejected');
+          ctx.reason = 'clock drift';
+          return ctx.stop();
         }
-        const ctx = await bus.emit('qu.accept', record, { space, from });
-        if (ctx.stopped) {
-          await bus.notify('qu.record.rejected', { from, space: space.id, id: record.id, reason: 'hook' });
-          return result('rejected');
+        const accepted = await bus.emit('qu.accept', record, { space: entry.space, from });
+        if (accepted.stopped) {
+          ctx.reason = 'hook';
+          return ctx.stop();
         }
-        const current = await apply(space, record, bytes);
-        if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: false });
-        else await bus.notify('qu.record.superseded', { from, space: space.id, id: record.id });
-        if (!sync) await route(bytes, from);
-        return result(current ? 'stored' : 'superseded');
-      } finally {
-        inFlight.delete(record.id);
       }
-    }
+      const current = await index(entry.space, record);
+      remember(record);
+      ctx.status = current ? 'stored' : 'superseded';
+      if (current) await bus.notify(`qu.record.${sid}`, { ...record, space: sid, local: Boolean(local) });
+      else await bus.notify('qu.record.superseded', { from, space: sid, id });
+    });
 
     /**
-     * Sends the space's write-key grants (public keys only) to `targets` -
-     * call again after `space.rotate()`/`acceptEpoch()` so mirrors follow.
-     * @param {import('./space.js').Space|string} spaceRef
-     * @param {string[]} [targets] - default: every connected peer.
+     * @param {import('./space.js').Space} space
+     * @param {{author?: 'alias'|'identity', mirror?: boolean}} [options]
+     *   `mirror` (default true): announce this space's write keys to mirrors.
      */
-    async function announce(spaceRef, targets = [...peers]) {
-      const space = spaceOf(spaceRef);
-      const grants = await space.grants();
-      for (const peer of targets) await bus.emit(`net.out.${peer}.grant`, { sid: space.id, grants });
-    }
-
-    /** @param {import('./space.js').Space} space */
-    function join(space) {
-      spaces.set(space.id, space);
+    function join(space, { author = defaultAuthor, mirror = true } = {}) {
+      spaces.set(space.id, { space, author });
       bus.notify('qu.space.joined', { space: space.id });
-      if (peers.size > 0) announce(space);
+      env.register(space, { mirror });
       return space;
     }
 
@@ -214,20 +171,19 @@ export function records() {
      * @param {import('./space.js').Space|string} spaceRef
      * @param {string} path
      * @param {*} value - Anything JSON-serialisable.
-     * @param {{key?: string}} [options] - Set `key` for a last-write-wins entry.
+     * @param {{key?: string, visibility?: 'private'|'public'}} [options]
+     *   `key`: last-write-wins entry. `visibility: 'public'`: signed but not
+     *   encrypted (e.g. public fields of a user node).
      * @returns {Promise<object>} The stored record.
      */
-    async function write(spaceRef, path, value, { key = null } = {}) {
+    async function write(spaceRef, path, value, { key = null, visibility = 'private' } = {}) {
       const space = spaceOf(spaceRef);
-      const draft = await bus.run('qu.write.before', { space: space.id, path, key, value });
-      const hlc = clock.tick();
-      const { bytes } = await sealEnvelope(space, { path: draft.path, key: draft.key, hlc, value: draft.value }, identity);
-      const record = await openEnvelope(space, bytes);
-      if (!(await apply(space, record, bytes))) throw new Error('records: write lost against a newer version');
-      await bus.emit('qu.write.stored', { sid: space.id, id: record.id });
-      await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: true });
-      await route(bytes);
-      return record;
+      const draft = await bus.run('qu.write.before', { space: space.id, path, key, value, visibility });
+      const signer = await space.authorFor(identity, spaces.get(space.id).author);
+      const { bytes, id } = await sealEnvelope(space, { path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility }, signer);
+      const outcome = await env.ingest(bytes, { local: true });
+      if (outcome.status !== 'stored') throw new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`);
+      return read(space, id);
     }
 
     /**
@@ -238,16 +194,15 @@ export function records() {
      */
     async function get(spaceRef, path, key) {
       const space = spaceOf(spaceRef);
-      const head = await storage.get(`head/${space.id}/${seg(path)}/${seg(key)}`);
+      const head = await storage.get(`head/${space.id}/${await space.tag(path)}/${await space.tag(`${path}\u0000${key}`)}`);
       if (!head) return null;
-      const record = await storage.get(`idx/${space.id}/${seg(path)}/${head.hlc}-${head.id}`);
-      return record ? record.value : null;
+      return (await read(space, head.id))?.value ?? null;
     }
 
     /**
-     * Time-window query over one path, ordered by HLC. Runs the
-     * `qu.query.before` process first - the sync plugin hooks in there to
-     * reconcile the window when `ensure: true`.
+     * Time-window query over one path, ordered by HLC; decrypts on read.
+     * Runs the `qu.query.before` process first - the sync plugin hooks in
+     * there to reconcile the window when `ensure: true`.
      * @param {{space: import('./space.js').Space|string, path: string, from?: number, to?: number, limit?: number, reverse?: boolean, ensure?: boolean}} q
      *   `from` inclusive, `to` exclusive, both wall-clock ms.
      * @returns {Promise<object[]>}
@@ -256,20 +211,26 @@ export function records() {
       const space = spaceOf(q.space);
       await bus.emit('qu.query.before', { ...q, space });
       const { path, from, to, limit, reverse } = q;
-      const base = `idx/${space.id}/${seg(path)}/`;
+      const base = `idx/${space.id}/${await space.tag(path)}/`;
       const rows = await storage.range(base, {
         gte: from !== undefined ? base + formatHlc(from) : undefined,
         lt: to !== undefined ? base + formatHlc(to) : undefined,
         limit,
         reverse,
       });
-      return rows.map((r) => r.value);
+      const out = [];
+      for (const { value: pointer } of rows) {
+        const record = await read(space, pointer.id);
+        if (record) out.push(record);
+      }
+      return out;
     }
 
     /**
-     * Local integrity repair for one space: every stored envelope must hash
-     * to its id and open; a broken one is dropped (a later resync fetches a
-     * good copy from a peer), a good one with missing indexes is re-indexed.
+     * Integrity repair for one space. Every stored envelope must hash to its
+     * id and carry valid signatures (checked WITHOUT decrypting); a broken
+     * one is dropped - a later resync fetches a good copy - and a good one
+     * with lost indexes is re-indexed.
      * @param {import('./space.js').Space|string} spaceRef
      * @returns {Promise<{checked: number, dropped: string[], reindexed: string[]}>}
      */
@@ -282,39 +243,46 @@ export function records() {
         report.checked++;
         let record = null;
         try {
-          if ((await envelopeId(bytes)) === id) record = await openEnvelope(space, bytes);
+          const header = peekEnvelope(bytes);
+          const writePub = qu.keyring.get(space.id, header.epoch);
+          if ((await envelopeId(bytes)) === id && writePub && (await verifyEnvelope(bytes, writePub))) record = await openEnvelope(space, bytes, { verify: false });
         } catch {
           record = null;
         }
+        cache.delete(id);
         if (!record) {
+          await storage.remove(key); // can't trust its header to find the sx entry
           await drop(space.id, id);
           report.dropped.push(id);
           continue;
         }
         const loc = await storage.get(`loc/${space.id}/${id}`);
-        const intact = loc && (await storage.has(loc.sx)) && (loc.idx === null || (await storage.has(loc.idx)));
+        const intact = loc && (await storage.has(sxKey(peekEnvelope(bytes), id))) && (loc.idx === null || (await storage.has(loc.idx)));
         if (!intact) {
-          await drop(space.id, id);
-          if (record.key !== null && record.key !== undefined) {
-            const headKey = `head/${space.id}/${seg(record.path)}/${seg(record.key)}`;
-            if ((await storage.get(headKey))?.id === id) await storage.remove(headKey);
-          }
-          await apply(space, record, bytes);
+          if (loc?.idx) await storage.remove(loc.idx);
+          if (loc?.head && (await storage.get(loc.head))?.id === id) await storage.remove(loc.head);
+          await storage.set(sxKey(peekEnvelope(bytes), id), 1);
+          await index(space, record);
           report.reindexed.push(id);
         }
       }
-      for (const key of await storage.keys(`loc/${space.id}/`)) {
-        const id = key.slice(key.lastIndexOf('/') + 1);
+      // Orphaned sync-index entries (envelope gone) would make reconcile claim records we don't have.
+      for (const key of await storage.keys(`sx/${space.id}/`)) {
+        const id = key.slice(key.lastIndexOf('-') + 1);
         if (!(await storage.has(`rec/${space.id}/${id}`))) {
+          await storage.remove(key);
           await drop(space.id, id);
-          report.dropped.push(id);
+          if (!report.dropped.includes(id)) report.dropped.push(id);
         }
       }
       await bus.notify('qu.scrub.done', { space: space.id, ...report });
       return report;
     }
 
+    /** Re-announces a space's write keys (after `rotate()`/`acceptEpoch()`). */
+    const announce = (spaceRef) => env.announce(spaceOf(spaceRef).id);
+
     Object.assign(qu, { join, leave, write, get, query, scrub, announce });
-    return { join, leave, write, get, query, scrub, announce, receive, spaceOf };
+    return { join, leave, write, get, query, scrub, announce, spaceOf };
   };
 }

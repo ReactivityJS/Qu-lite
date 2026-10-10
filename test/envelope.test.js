@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { QuCrypto } from '@qu/core';
-import { Space, sealEnvelope, openEnvelope, peekEnvelope, verifyOuter, formatHlc } from '../src/index.js';
+import { Space, sealEnvelope, openEnvelope, peekEnvelope, verifyEnvelope, formatHlc } from '../src/index.js';
 
 const hlc = formatHlc(1_760_000_123_456, 7);
 
-async function setup() {
-  const author = await QuCrypto.generateKeypair();
+async function setup(visibility = 'private') {
+  const identity = await QuCrypto.generateKeypair();
   const space = await Space.create();
-  const sealed = await sealEnvelope(space, { path: 'chat/general', hlc, value: { text: 'hallo' } }, author);
-  return { author, space, ...sealed };
+  const author = await space.authorFor(identity);
+  const sealed = await sealEnvelope(space, { path: 'chat/general', hlc, value: { text: 'hallo' }, visibility }, author);
+  return { identity, author, space, ...sealed };
 }
 
 test('seal/open round-trips path, key, hlc, author and value', async () => {
@@ -23,52 +24,67 @@ test('seal/open round-trips path, key, hlc, author and value', async () => {
   assert.deepEqual(record.value, { text: 'hallo' });
 });
 
-test('the public header carries only opaque sid/shard, epoch and a minute-rounded time', async () => {
-  const { space, bytes } = await setup();
+test('the public header carries opaque ids, epoch, a minute-rounded time and the ALIAS - never the identity', async () => {
+  const { identity, author, space, bytes } = await setup();
   const header = peekEnvelope(bytes);
   assert.equal(header.sid, space.id);
   assert.equal(header.shard, QuCrypto.toHex(await space.shardOf('chat/anything')));
   assert.equal(header.epoch, 0);
   assert.equal(header.ts % 60_000, 0);
+  assert.equal(header.visibility, 'private');
+  assert.equal(header.author, QuCrypto.toHex(author.publicKey));
+  assert.notEqual(header.author, QuCrypto.toHex(identity.publicKey));
 });
 
-test('raw envelope bytes contain neither path, author nor precise hlc', async () => {
-  const { author, bytes } = await setup();
+test('raw envelope bytes contain neither path, value, precise hlc nor the identity', async () => {
+  const { identity, bytes } = await setup();
   const raw = Buffer.from(bytes);
-  for (const needle of ['chat', 'general', 'hallo', hlc, hlc.slice(0, 13), QuCrypto.toHex(author.publicKey), QuCrypto.toBase64(author.publicKey)]) {
+  for (const needle of ['chat', 'general', 'hallo', hlc, hlc.slice(0, 13)]) {
     assert.equal(raw.includes(Buffer.from(needle)), false, `found "${needle}" in plaintext`);
   }
-  assert.equal(raw.includes(Buffer.from(author.publicKey)), false);
+  assert.equal(raw.includes(Buffer.from(identity.publicKey)), false);
 });
 
-test('tampering with ct or osig is rejected', async () => {
+test('anyone can verify both signatures on the sealed bytes without any key', async () => {
   const { space, bytes } = await setup();
-  const ct = bytes.slice();
-  ct[ct.length - 1] ^= 1;
-  await assert.rejects(openEnvelope(space, ct), /outer signature invalid/);
-  const sig = bytes.slice();
-  sig[40] ^= 1;
-  await assert.rejects(openEnvelope(space, sig), /outer signature invalid/);
+  const writePub = space.writeKeys().get(0);
+  assert.equal(await verifyEnvelope(bytes, writePub), true);
+  assert.equal(await verifyEnvelope(bytes, (await Space.create()).writeKeys().get(0)), false);
 });
 
-test('a mirror can check the outer signature with only the write public key', async () => {
+test('tampering with ct, header, author signature or membership signature is rejected', async () => {
   const { space, bytes } = await setup();
-  assert.equal(await verifyOuter(bytes, space.epochKeys(0).writePub), true);
-  const other = await Space.create();
-  assert.equal(await verifyOuter(bytes, other.epochKeys(0).writePub), false);
+  const writePub = space.writeKeys().get(0);
+  for (const offset of [bytes.length - 1, 30, 70, 140]) {
+    const copy = bytes.slice();
+    copy[offset] ^= 1;
+    assert.equal(await verifyEnvelope(copy, writePub), false, `byte ${offset}`);
+    await assert.rejects(openEnvelope(space, copy));
+  }
+});
+
+test('a non-member cannot forge a record: no epoch write key, no valid membership signature', async () => {
+  const { space } = await setup();
+  const attacker = await QuCrypto.generateKeypair();
+  const attackerSpace = await Space.create();
+  const forged = await sealEnvelope(attackerSpace, { path: 'chat/x', hlc, value: 'spam' }, attacker);
+  forged.bytes.set(space.sid, 2);
+  assert.equal(await verifyEnvelope(forged.bytes, space.writeKeys().get(0)), false);
 });
 
 test('another space cannot open the envelope', async () => {
   const { bytes } = await setup();
-  const other = await Space.create();
-  await assert.rejects(openEnvelope(other, bytes), /another space/);
+  await assert.rejects(openEnvelope(await Space.create(), bytes), /another space/);
 });
 
-test('a forged envelope signed with a foreign write key is rejected', async () => {
-  const { space, author } = await setup();
-  // Same sid (attacker knows it from the wire) but no epoch key: they can't produce a valid osig.
-  const attackerSpace = await Space.create();
-  const forged = await sealEnvelope(attackerSpace, { path: 'chat/x', hlc, value: 'spam' }, author);
-  forged.bytes.set(space.sid, 1);
-  await assert.rejects(openEnvelope(space, forged.bytes), /outer signature invalid/);
+test('public records are signed and readable without the space key', async () => {
+  const owner = await QuCrypto.generateKeypair();
+  const mine = await Space.user(owner.publicKey, owner);
+  const { bytes } = await sealEnvelope(mine, { path: 'profile', key: 'name', hlc, value: 'Anna', visibility: 'public' }, await mine.authorFor(owner));
+  const strangersView = await Space.user(owner.publicKey);
+  assert.equal(await verifyEnvelope(bytes, owner.publicKey), true);
+  assert.equal((await openEnvelope(strangersView, bytes)).value, 'Anna');
+  const secret = await sealEnvelope(mine, { path: 'profile', key: 'phone', hlc, value: '0123' }, await mine.authorFor(owner));
+  await assert.rejects(openEnvelope(strangersView, secret.bytes), /no key to read/);
+  assert.equal((await openEnvelope(mine, secret.bytes)).value, '0123');
 });

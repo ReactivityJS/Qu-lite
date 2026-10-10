@@ -20,9 +20,19 @@ import { createClock } from './hlc.js';
  *   registry?: Registry,
  * }} [options]
  */
-export async function createQu({ identity, bus = new EventBus(), root, clock = createClock(), registry = new Registry() } = {}) {
+export async function createQu({ identity, bus = new EventBus(), root, clock = createClock(), registry = new Registry(), netId } = {}) {
   identity = identity ?? (await QuCrypto.generateKeypair());
   const storage = createMountRouter({ root, bus });
+
+  // The NETWORK id is deliberately unrelated to the identity: relays and
+  // peers route by it, and must not be able to recognise the person behind
+  // it. Random per device, persisted (pending syncs refer to it), rotatable.
+  const randomNetId = () => QuCrypto.toHex(globalThis.crypto.getRandomValues(new Uint8Array(8)));
+  netId = netId ?? (await storage.get('qu/net-id'));
+  if (!netId) {
+    netId = randomNetId();
+    await storage.set('qu/net-id', netId);
+  }
 
   const qu = {
     bus,
@@ -30,8 +40,14 @@ export async function createQu({ identity, bus = new EventBus(), root, clock = c
     registry,
     clock,
     identity,
-    /** @type {string} Short public id used in `net.*` topics. */
-    peerId: QuCrypto.toHex(identity.publicKey).slice(0, 16),
+    /** @type {string} Network id used in `net.*` topics and the `hi` handshake - not derived from the identity. */
+    peerId: netId,
+    /** Picks a fresh network id for links opened from now on. */
+    async rotateNetId() {
+      qu.peerId = randomNetId();
+      await storage.set('qu/net-id', qu.peerId);
+      return qu.peerId;
+    },
     /** @param {string} base @param {object} driver */
     mount: (base, driver) => storage.mount(base, driver),
     /** @param {string} base */

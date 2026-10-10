@@ -1,84 +1,53 @@
 /**
- * WEBSOCKET BRIDGE - the same contract as `inproc.js`, over a real socket:
- * `net.out.<peer>.<type>` goes out as a binary frame (frame.js), incoming
- * frames are emitted as `net.in.<peer>.<type>`, and `net.peer.up/down`
- * bracket the connection. The first frame each side sends is `hi {peer}`,
- * which is how the remote peer id becomes known.
+ * WEBSOCKET TRANSPORT (client) - a byte channel for `createLink` (link.js).
+ * Works with any WHATWG-style socket: the browser's WebSocket, Node >= 22's
+ * global WebSocket, or a `ws` server-side socket (ws-server.js).
  *
- * `attachSocket()` works with any WHATWG-style socket (browser WebSocket,
- * Node >= 22's global WebSocket, or a `ws` server-side socket).
- * `connectWs()` adds automatic reconnect with exponential backoff + jitter
- * (and an immediate retry on the browser's `online` event).
- * The server side lives in `ws-server.js` (it needs the `ws` package).
+ *   qu.use(wsTransport({ connect: ['wss://relay.example/ws'] }))
+ *
+ * Each URL is kept alive: reconnect with exponential backoff + jitter, and
+ * immediately on the browser's `online` event. `qu.transports.ws` exposes
+ * connect()/disconnect()/status for UIs.
  */
-import { encodeFrame, decodeFrame } from './frame.js';
+import { createLink } from './link.js';
 
 const OPEN = 1;
 
 /**
+ * Wires one already-created socket into a link.
  * @param {{bus: import('@qu/events').EventBus, peerId: string}} qu
  * @param {WebSocket} socket
  * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void}} [options]
- * @returns {{close: () => void, stats: {sent: number, received: number}}}
  */
 export function attachSocket(qu, socket, { via = 'ws', onUp, onDown } = {}) {
-  const stats = { sent: 0, received: 0 };
-  let remote = null;
-  let off = null;
   socket.binaryType = 'arraybuffer';
-
-  const sendFrame = (type, payload) => {
-    if (socket.readyState !== OPEN) return;
-    const frame = encodeFrame(type, payload);
-    stats.sent += frame.length;
-    socket.send(frame);
+  let link = null;
+  const start = () => {
+    link = createLink(qu, { send: (bytes) => socket.readyState === OPEN && socket.send(bytes), close: () => socket.close(), via, onUp, onDown });
   };
-  const hello = () => sendFrame('hi', { peer: qu.peerId });
-  if (socket.readyState === OPEN) hello();
-  else socket.addEventListener('open', hello);
-
+  if (socket.readyState === OPEN) start();
+  else socket.addEventListener('open', start);
   socket.addEventListener('message', (event) => {
     const data = event.data;
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
-    if (!bytes) return;
-    stats.received += bytes.length;
-    let frame;
-    try {
-      frame = decodeFrame(bytes);
-    } catch {
-      return qu.bus.notify('net.error', { via, reason: 'bad frame' });
-    }
-    if (frame.type === 'hi') {
-      if (remote) return;
-      remote = String(frame.payload?.peer ?? '');
-      if (!/^[0-9a-f]{16}$/.test(remote)) return socket.close();
-      off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
-      onUp?.(remote);
-      qu.bus.notify('net.peer.up', { peer: remote, via });
-      return;
-    }
-    if (remote) qu.bus.emit(`net.in.${remote}.${frame.type}`, frame.payload);
+    if (bytes && link) link.receive(bytes);
   });
-
-  socket.addEventListener('close', () => {
-    if (remote) {
-      off?.();
-      qu.bus.notify('net.peer.down', { peer: remote, via });
-      remote = null;
-    }
-    onDown?.();
-  });
+  socket.addEventListener('close', () => (link ? link.closed() : onDown?.()));
   socket.addEventListener('error', () => {});
-
-  return { stats, close: () => socket.close() };
+  return {
+    get stats() {
+      return link?.stats ?? { sent: 0, received: 0 };
+    },
+    close: () => socket.close(),
+  };
 }
 
 /**
- * Client connection that keeps itself alive.
+ * One self-healing client connection.
  * @param {{bus: import('@qu/events').EventBus, peerId: string}} qu
  * @param {string} url
  * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number}} [options]
- * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null}}
+ * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null, readonly url: string}}
  */
 export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000 } = {}) {
   let closed = false;
@@ -115,6 +84,7 @@ export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDe
   open();
 
   return {
+    url,
     close() {
       closed = true;
       clearTimeout(timer);
@@ -127,5 +97,34 @@ export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDe
     get peer() {
       return peer;
     },
+  };
+}
+
+/**
+ * The plugin: keeps a set of relay URLs connected.
+ * @param {{connect?: string[], minDelayMs?: number, maxDelayMs?: number, WebSocketImpl?: typeof WebSocket}} [options]
+ */
+export function wsTransport({ connect = [], ...options } = {}) {
+  return (qu) => {
+    const conns = new Map();
+    const api = {
+      /** @param {string} url */
+      connect(url) {
+        if (!conns.has(url)) conns.set(url, connectWs(qu, url, options));
+        return conns.get(url);
+      },
+      /** @param {string} [url] - default: all */
+      disconnect(url) {
+        for (const [u, c] of conns) {
+          if (url && u !== url) continue;
+          c.close();
+          conns.delete(u);
+        }
+      },
+      status: () => [...conns.values()].map((c) => ({ url: c.url, connected: c.connected, peer: c.peer })),
+    };
+    for (const url of connect) api.connect(url);
+    qu.transports = { ...qu.transports, ws: api };
+    return api;
   };
 }

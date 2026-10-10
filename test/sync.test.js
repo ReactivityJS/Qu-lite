@@ -57,6 +57,7 @@ test('3 days offline on both sides: one resync brings both peers to the same sta
   }
 
   link = connectInProcess(a, b);
+  await link.ready;
   const [summary] = await a.resync({ space: sa });
   assert.equal(summary.sent, 30);
   assert.equal(summary.received, 5);
@@ -80,7 +81,7 @@ test('query({ensure: true}) on a fresh peer fetches exactly the requested window
     await a.write(sa, 'chat', `d${i}`);
     time.now += DAY;
   }
-  connectInProcess(a, c);
+  await connectInProcess(a, c).ready;
   const window = { from: START + 3 * DAY, to: START + 6 * DAY };
   assert.deepEqual(await values(c, sc, 'chat', { ...window, ensure: true }), ['d3', 'd4', 'd5']);
   assert.equal((await recIds(c, sc)).length, 3);
@@ -106,6 +107,7 @@ test('volume: reconciling 10,000 records after one offline change costs a few KB
 
   await a.write(sa, 'log', 'offline change');
   const link = connectInProcess(a, b);
+  await link.ready;
   const [summary] = await a.resync({ space: sa });
   await settle();
   const bytes = link.stats.aToB + link.stats.bToA;
@@ -151,7 +153,7 @@ test('repair: scrub drops a corrupted record, resync restores it; lost indexes a
   const a = await peer();
   const b = await peer();
   const [sa, sb] = await shared(a, b);
-  connectInProcess(a, b);
+  await connectInProcess(a, b).ready;
   for (let i = 0; i < 5; i++) await a.write(sa, 'chat', `x${i}`);
   await a.write(sa, 'profile', 'Anna', { key: 'name' });
   await settle();
@@ -283,6 +285,7 @@ test('a resync cut off by a dropped connection resumes by itself after reload + 
   let b = await peer({ root: disk, identity });
   let sb = b.join(await Space.open(secret));
   let link = connectInProcess(a, b);
+  await link.ready;
   const running = b.resync({ space: sb });
   await link.disconnect(); // network drop mid-session
   const [cut] = await running;
