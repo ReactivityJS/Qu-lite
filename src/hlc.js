@@ -67,6 +67,8 @@ export function createClock({ now = Date.now, maxDriftMs = 5 * 60 * 1000 } = {})
       advance(wall);
       return true;
     },
+    /** Wall-clock ms as this clock sees it (tests inject `now`). */
+    now: () => now(),
     /** The last HLC issued/observed, without advancing. */
     peek() {
       return formatHlc(lastMs, counter);

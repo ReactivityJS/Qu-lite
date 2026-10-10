@@ -22,8 +22,10 @@
  * the space's current epoch key (membership) - a mirror that only knows the
  * write public keys can reject forgeries and spam without reading anything.
  *
- * INNER: JSON `{p: path, k: key|null, h: hlc, v: value}` - path, key,
- * precise time and value never leave the ciphertext of a private record.
+ * INNER: JSON `{p: path, k: key|null, h: hlc, v: value}` plus optional
+ * `t` (control type, e.g. 'gc' - see gc.js) and `d: 1` (tombstone: the
+ * keyed entry was deleted) - path, key, precise time and value never leave
+ * the ciphertext of a private record.
  *
  * The record id is `sha256(whole envelope)`: content-addressed.
  */
@@ -71,7 +73,7 @@ export function peekEnvelope(bytes) {
  * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} author - see `space.authorFor(identity)`.
  * @returns {Promise<{bytes: Uint8Array, id: string}>}
  */
-export async function sealEnvelope(space, { path, key = null, hlc, value, visibility = 'private' }, author) {
+export async function sealEnvelope(space, { path, key = null, hlc, value, visibility = 'private', type, deleted = false }, author) {
   const epoch = space.epoch;
   const keys = space.epochKeys(epoch);
   if (!keys.writePriv) throw new Error(`envelope: no write key for space ${space.id}`);
@@ -88,7 +90,10 @@ export async function sealEnvelope(space, { path, key = null, hlc, value, visibi
   view.setUint32(28, Math.floor(Number(hlc.slice(0, 13)) / 60_000));
   header.set(author.publicKey, 32);
 
-  const inner = enc.encode(JSON.stringify({ p: path, k: key, h: hlc, v: value }));
+  const fields = { p: path, k: key, h: hlc, v: value };
+  if (type) fields.t = type;
+  if (deleted) fields.d = 1;
+  const inner = enc.encode(JSON.stringify(fields));
   let ct = inner;
   if (!isPublic) {
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
@@ -149,10 +154,28 @@ export async function openEnvelope(space, bytes, { verify = true } = {}) {
       throw new Error('envelope: decryption failed');
     }
   }
-  const { p, k, h, v } = JSON.parse(dec.decode(inner));
+  const { p, k, h, v, t, d } = JSON.parse(dec.decode(inner));
   if (crypto.toHex(await space.shardOf(p)) !== outer.shard) throw new Error('envelope: shard tag does not match path');
 
-  return { id: await envelopeId(bytes), path: p, key: k, hlc: h, author: outer.author, value: v, epoch: outer.epoch, ts: outer.ts, visibility: outer.visibility };
+  const record = { id: await envelopeId(bytes), path: p, key: k, hlc: h, author: outer.author, value: v, epoch: outer.epoch, ts: outer.ts, visibility: outer.visibility };
+  if (t) record.type = t;
+  if (d) record.deleted = true;
+  return record;
+}
+
+/**
+ * The inner fields of a PUBLIC envelope, readable without any key - what
+ * the blind layer (envelopes.js) needs to apply a drop list. Does not verify.
+ * @param {Uint8Array} bytes
+ * @returns {{p: string, k: string|null, h: string, v: *, t?: string}|null} null for private or malformed envelopes
+ */
+export function readPublic(bytes) {
+  try {
+    if (peekEnvelope(bytes).visibility !== 'public') return null;
+    return JSON.parse(dec.decode(bytes.subarray(CT_OFFSET)));
+  } catch {
+    return null;
+  }
 }
 
 function concat(...parts) {

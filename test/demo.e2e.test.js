@@ -85,6 +85,12 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await alice.waitForFunction(() => document.getElementById('typing').textContent.includes('tippt'), null, { timeout: 40_000 });
     await bob.fill('#msg', '');
 
+    step('delete: alice removes her own message, it disappears at bob');
+    await send(alice, 'Versehen');
+    await chatHas(bob, 'Versehen');
+    await alice.click('#chat li:has-text("Versehen") button.delete');
+    await bob.waitForFunction(() => !document.getElementById('chat').textContent.includes('Versehen'), null, { timeout: 40_000 });
+
     step('carol (over HTTPS + SSE) is invited by pubkey through her inbox');
     const carol = await open('carol');
     await carol.goto(`${base}?name=carol&transport=sse`); // carol is behind a "WebSocket-blocking proxy"

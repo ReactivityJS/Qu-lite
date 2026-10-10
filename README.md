@@ -238,7 +238,34 @@ qu.use(sseTransport({ connect: ['https://relay.example/sse'] }));   // SSE only
   lock (`ws.locked()`), against the committed heads; decryption and hooks run outside it. `reindex()` and
   `scrub()` repair one record per write set under the same lock.
 
+## Deleting and compaction (milestone 10)
+
+```js
+qu.use(compaction());                       // registry name 'compaction'
+await qu.del(space, record);                // a message: gone at every peer and the mirror
+await qu.del(space, 'settings', 'theme');   // a keyed entry: tombstone
+await qu.compact(space, { all: true });     // superseded versions (all: owner/admin)
+qu.forget(space);                           // local only: drop everything stored for a space
+```
+
+- **Drop lists** (`src/gc.js`): a public, signed envelope at `<segment>/_gc` (same shard as its targets) listing
+  `id ‖ ts ‖ author` per target - data that is public in the target's header anyway. Every peer and the blind
+  mirror apply it in the shared envelope layer, in the same atomic write set: an entry counts if its signer
+  wrote the target, is the space's owner/admin (verified grants) or owns the inbox. Members additionally check
+  the drop list like any record (active member).
+- **Nothing comes back**: the target's sync-index entry stays as a *gone* item, so reconcile transfers nothing;
+  a peer asking for a dropped id gets the drop list instead and verifies it itself; a stale device re-pushing an
+  old version is refused (`gone`), and learns the drop list by reconcile. A gone marker whose author claim does
+  not match the real record is ignored.
+- **Tombstones**: deleting a keyed entry writes a `deleted` version that stays the head - an older version
+  arriving later stays superseded. `get()` returns `null`.
+- **Auto-compaction**: your own superseded versions (profile fields, `_receipts` cursors, settings) are collected
+  and dropped in one drop list after `delayMs` (60 s). `qu.compact.candidate` can veto; `_keys`/`_grants` are kept.
+- **Horizon**: drop lists and their gone markers expire after `GC_HORIZON_MS` (90 days, a protocol constant cut at
+  day boundaries, so every peer and the mirror expire the same set). Limit: a device offline for longer can bring
+  dropped entries back.
+- Events: `qu.record.deleted`, `qu.envelope.dropped`, `qu.compact.done`, `qu.gc.expired`.
+
 ## Next milestones
 
-10 compaction & deletion · 11 mirror hardening & metadata padding · 12 collaborative
-text (optional).
+11 mirror hardening & metadata padding · 12 collaborative text (optional).

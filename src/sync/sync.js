@@ -43,6 +43,13 @@ import * as crypto from '../crypto.js';
 import { Negentropy, NegentropyStorageVector } from './negentropy.js';
 import { peekEnvelope } from '../envelope.js';
 
+/**
+ * Ingest outcomes after which a record counts as delivered (acked, and a
+ * resync waiting for it is satisfied). 'gone': dropped by a drop list,
+ * 'control': a drop list itself.
+ */
+const SETTLED = new Set(['stored', 'duplicate', 'superseded', 'deferred', 'blind', 'gone', 'control']);
+
 const MINUTE = 60_000;
 const pad = (ms) => String(ms).padStart(13, '0');
 const floorMinute = (ms) => Math.floor(ms / MINUTE) * MINUTE;
@@ -134,6 +141,21 @@ export function sync({
       const bytes = await storage.get(`rec/${sid}/${id}`);
       if (bytes) await send(peer, 'rec', viaSync ? { bytes, sync: true } : { bytes });
       return Boolean(bytes);
+    }
+
+    /**
+     * For reconcile: the record, or - if a drop list dropped it - that drop
+     * list (once per `sent` set), which the peer verifies and applies itself.
+     * @returns {Promise<boolean>} false if neither is held
+     */
+    async function sendOrDropList(peer, sid, id, sent, shardOk = () => true) {
+      const found = qu.envelopes ? await qu.envelopes.bytesFor(sid, id) : null;
+      if (!found) return false;
+      const key = found.id;
+      if (sent.has(key) || !shardOk(peekEnvelope(found.bytes).shard)) return true;
+      sent.add(key);
+      await send(peer, 'rec', { bytes: found.bytes, sync: true });
+      return true;
     }
 
     function finish(state, error) {
@@ -286,6 +308,12 @@ export function sync({
       if (remoteRole === 'mirror') await flushOutbox(peer, () => true);
     });
 
+    // A record dropped before it was acknowledged needs no upload any more
+    // (the drop list itself is in the outbox).
+    bus.on('qu.envelope.stored', ({ sid, ws }) => {
+      for (const id of ws?.dropped ?? []) ws.remove(`sync/out/${sid}/${id}`);
+    });
+
     // Same write set as the record itself: a stored local record always has its outbox entry.
     bus.on('qu.write.stored', async ({ sid, id, header, ws }) => {
       ws.set(`sync/out/${sid}/${id}`, { shard: header.shard });
@@ -315,7 +343,7 @@ export function sync({
     }
 
     bus.on('qu.record.processed', ({ from, sid, id, status }) => {
-      if (!from || !sid || !(status === 'stored' || status === 'duplicate' || status === 'superseded' || status === 'deferred' || status === 'blind')) return;
+      if (!from || !sid || !SETTLED.has(status)) return;
       if (!ackQueue.has(from)) {
         ackQueue.set(from, new Map());
         queueMicrotask(() => flushAcks(from));
@@ -382,9 +410,10 @@ export function sync({
     bus.on('net.in.*.want', async ({ session, sid, ids }, ctx) => {
       const peer = ctx.topic.split('.')[2];
       const missing = [];
+      const sent = new Set();
       for (let i = 0; i < ids.length; i += 32) {
         const id = crypto.toHex(ids.subarray(i, i + 32));
-        if (!(await sendRecord(peer, sid, id))) missing.push(id);
+        if (!(await sendOrDropList(peer, sid, id, sent))) missing.push(id);
       }
       if (missing.length) await send(peer, 'wantmiss', { session, ids: missing });
     });
@@ -406,10 +435,9 @@ export function sync({
       await send(state.peer, 'negend', { session });
       // Push what the peer lacks - but only what it subscribed to: a mirror
       // reconciling a whole space must not fill a partially-syncing peer.
-      for (const id of state.have) {
-        const bytes = await storage.get(`rec/${state.scope.sid}/${id}`);
-        if (bytes && wants(state.peer, state.scope.sid, peekEnvelope(bytes).shard)) await send(state.peer, 'rec', { bytes, sync: true });
-      }
+      // A dropped id the peer still lacks gets the drop list instead.
+      const sent = new Set();
+      for (const id of state.have) await sendOrDropList(state.peer, state.scope.sid, id, sent, (shard) => wants(state.peer, state.scope.sid, shard));
       const wanted = [...new Set(state.need)];
       if (wanted.length === 0) return finish(state);
       for (const id of wanted) {
@@ -427,7 +455,7 @@ export function sync({
       for (const id of ids) settle(state, id, false);
     });
     bus.on('qu.record.processed', ({ id, status }) => {
-      const ok = status === 'stored' || status === 'duplicate' || status === 'superseded' || status === 'deferred' || status === 'blind';
+      const ok = SETTLED.has(status);
       for (const state of [...(awaiting.get(id) ?? [])]) settle(state, id, ok);
     });
 

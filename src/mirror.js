@@ -12,7 +12,9 @@
  *   - watch every granted space whole (with `sync({role: 'mirror'})`);
  *   - forward records it pulled via resync live to its subscribers (hub),
  *     and ephemeral signals (signals.js) without storing them;
- *   - optional `allow` list: other sids are refused for grants and records.
+ *   - optional `allow` list: other sids are refused for grants and records;
+ *   - expire drop lists past the horizon (gc.js) every `expireEveryMs` -
+ *     applying them is the shared envelope layer's job.
  *
  * Install next to `sync({role: 'mirror'})`, without `records()`.
  */
@@ -20,8 +22,8 @@ import * as crypto from './crypto.js';
 import { envelopes } from './envelopes.js';
 import { signals } from './signals.js';
 
-/** @param {{allow?: string[]|null}} [options] */
-export function mirror({ allow = null } = {}) {
+/** @param {{allow?: string[]|null, expireEveryMs?: number}} [options] */
+export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000 } = {}) {
   return (qu) => {
     const { bus, storage } = qu;
     const env = envelopes()(qu);
@@ -57,8 +59,20 @@ export function mirror({ allow = null } = {}) {
       return sids;
     })();
 
+    /** Expires drop lists past the horizon in every served space. @returns {Promise<number>} */
+    async function expire() {
+      let count = 0;
+      for (const sid of env.keyring.sids()) count += await env.expire(sid, qu.clock.now());
+      return count;
+    }
+    if (expireEveryMs > 0) {
+      const timer = setInterval(() => expire().catch(() => {}), expireEveryMs);
+      timer.unref?.();
+    }
+
     const api = {
       ready,
+      expire,
       /** @returns {string[]} sids this mirror serves. */
       spaces: async () => (await ready, env.keyring.sids()),
       /** @param {string} sid @returns {Promise<number>} stored envelope count. */

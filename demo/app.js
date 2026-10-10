@@ -24,7 +24,7 @@ const fromUrl = (text) => JSON.parse(atob(text.replace(/-/g, '+').replace(/_/g, 
 
 const qu = await createPeer({
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
-  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status'],
+  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction'],
   transports: [
     ['relay', { url: params.has('offline') ? undefined : relayUrl, prefer: params.get('transport') === 'sse' ? 'sse' : 'ws', minDelayMs: 300 }],
     ['webrtc', { mode: params.get('rtc') ?? localStorage.getItem('qu-demo-rtc') ?? 'auto' }],
@@ -124,6 +124,7 @@ async function openGroup(target) {
   $('sid').textContent = `sid ${short(space.id)}`;
   $('invite').value = '';
   qu.bus.on(`qu.record.${space.id}`, scheduleRender);
+  qu.bus.on('qu.record.deleted', scheduleRender);
   qu.bus.on('qu.members.*', scheduleRender);
   qu.bus.on('qu.status.*', scheduleRender);
   await renderGroupList();
@@ -153,6 +154,10 @@ async function renderGroup() {
       if (t) {
         const label = !t.sent ? '…' : t.read.length ? `gelesen ${t.read.length}/${t.members}` : t.delivered.length ? `✓✓ ${t.delivered.length}/${t.members}` : '✓';
         li.append(el('span', label, { className: `tick${t.read.length ? ' read' : ''}` }));
+      }
+      // your own messages - or all of them as owner/admin (moderation)
+      if (m.author === manager.me || manager.isAdmin()) {
+        li.append(el('button', '✕', { className: 'secondary delete', title: 'Löschen - bei allen, auch beim Relay', onclick: () => qu.del(space, m.id).then(scheduleRender) }));
       }
       return li;
     })
@@ -208,7 +213,7 @@ $('window').addEventListener('change', renderGroup);
 $('reveal').addEventListener('click', async () => space && manager.reveal({ name: await me.get('name') }));
 $('chat').addEventListener('click', async (event) => {
   const id = event.target.closest('li')?.dataset.id;
-  if (!id) return;
+  if (!id || event.target.closest('button')) return;
   const bytes = await qu.storage.get(`rec/${space.id}/${id}`);
   $('raw').textContent = `${JSON.stringify(peekEnvelope(bytes), null, 1)}\n${bytes.length} Bytes, so liegen sie lokal und beim Relay:\n${crypto.toHex(bytes).slice(0, 600)}…`;
 });

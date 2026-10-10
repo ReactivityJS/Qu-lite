@@ -8,7 +8,9 @@
  *
  *   ingest:  net.in.<peer>.rec | local write
  *            -> emit('qu.envelope.accept', {header, from})   ctx.stop() refuses (policy)
- *            -> dedupe -> keyring lookup -> verifyEnvelope
+ *            -> dedupe -> gone marker? (dropped before: 'gone', not stored)
+ *            -> keyring lookup -> verifyEnvelope
+ *            -> a public drop list (gc.js) adds its drops to the write set
  *            -> emit('qu.envelope.stored', {..., ws})         a reader adds its indexes
  *                                                             to the write set, may
  *                                                             ctx.stop() (nothing is
@@ -33,9 +35,13 @@
  *            grants are verified (space.js `verifyGrants`) into the keyring
  *            and reported as `qu.grant.accepted`; `qu.grant.offer` can veto.
  *
- * Storage: rec/<sid>/<id> (sealed bytes), sx/<sid>/<shard>/<ts>-<id> (sync index).
+ * Storage: rec/<sid>/<id> (sealed bytes), sx/<sid>/<shard>/<ts>-<id> (sync
+ * index; value 1 = held, 0 = dropped - still counted by reconcile),
+ * gone/<sid>/<id> {gc, author, sx} (dropped by drop list `gc`),
+ * gcs/<sid>/<ts>-<gcId> (drop lists by time, for expiry).
  */
-import { peekEnvelope, verifyEnvelope, envelopeId } from './envelope.js';
+import { peekEnvelope, verifyEnvelope, envelopeId, readPublic } from './envelope.js';
+import { GC_TYPE, isGcPath, decodeEntries, mayDrop, gcCutoff } from './gc.js';
 import { verifyGrants, emptyGrantState } from './space.js';
 import { writeSet } from './writeset.js';
 
@@ -143,6 +149,85 @@ export function envelopes({ acceptGrants = false } = {}) {
       }
     }
 
+    const goneKey = (sid, id) => `gone/${sid}/${id}`;
+    const stateFor = (sid) => keyring.get(sid) ?? registered.get(sid)?.space.grantState();
+
+    /**
+     * Adds the drops of a verified drop list to `ws`.
+     * @returns {Promise<string[]|null>} dropped ids, or null if the list is malformed
+     */
+    async function applyDropList(sid, gcId, header, inner, ws) {
+      const entries = isGcPath(inner.p) ? decodeEntries(inner.v) : null;
+      if (!entries) return null;
+      const dropped = [];
+      for (const entry of entries) {
+        if (entry.id === gcId || !(await mayDrop(stateFor(sid), sid, header.author, entry.author))) continue;
+        if (await storage.has(goneKey(sid, entry.id))) continue;
+        const held = await storage.get(`rec/${sid}/${entry.id}`);
+        let sx;
+        if (held) {
+          const target = peekEnvelope(held);
+          if (target.author !== entry.author || target.shard !== header.shard) continue;
+          sx = sxKey(target, entry.id);
+          ws.remove(`rec/${sid}/${entry.id}`);
+        } else sx = sxKey({ sid, shard: header.shard, ts: entry.ts }, entry.id);
+        ws.set(sx, 0);
+        ws.set(goneKey(sid, entry.id), { gc: gcId, author: entry.author, sx });
+        dropped.push(entry.id);
+      }
+      ws.set(`gcs/${sid}/${pad(header.ts)}-${gcId}`, 1);
+      return dropped;
+    }
+
+    /**
+     * What to send for a wanted id: the envelope, or - if it was dropped -
+     * the drop list that dropped it (the receiver verifies that one itself).
+     * @returns {Promise<{bytes: Uint8Array, id: string, gone: boolean}|null>}
+     */
+    async function bytesFor(sid, id) {
+      const bytes = await storage.get(`rec/${sid}/${id}`);
+      if (bytes) return { bytes, id, gone: false };
+      const marker = await storage.get(goneKey(sid, id));
+      const gc = marker && (await storage.get(`rec/${sid}/${marker.gc}`));
+      return gc ? { bytes: gc, id: marker.gc, gone: true } : null;
+    }
+
+    const isGone = (sid, id) => storage.has(goneKey(sid, id));
+
+    /**
+     * Expires drop lists older than the horizon (gc.js) together with their
+     * gone markers - the same set on every peer, so reconcile stays quiet.
+     * @param {string} sid
+     * @param {number} now - wall-clock ms
+     * @returns {Promise<number>} drop lists expired
+     */
+    async function expire(sid, now) {
+      const base = `gcs/${sid}/`;
+      const due = await storage.range(base, { lt: base + pad(gcCutoff(now)) });
+      for (const { key } of due) {
+        const gcId = key.slice(key.lastIndexOf('-') + 1);
+        const ws = writeSet(storage);
+        await exclusive(sid, async () => {
+          const bytes = await storage.get(`rec/${sid}/${gcId}`);
+          ws.remove(key);
+          ws.remove(`defer/${sid}/${gcId}`);
+          if (bytes) {
+            ws.remove(`rec/${sid}/${gcId}`);
+            ws.remove(sxKey(peekEnvelope(bytes), gcId));
+            for (const { id } of decodeEntries(readPublic(bytes)?.v) ?? []) {
+              const marker = await storage.get(goneKey(sid, id));
+              if (marker?.gc !== gcId) continue;
+              ws.remove(goneKey(sid, id));
+              ws.remove(marker.sx);
+            }
+          }
+          await ws.flush();
+        });
+      }
+      if (due.length) await bus.notify('qu.gc.expired', { sid, count: due.length });
+      return due.length;
+    }
+
     /**
      * The one way an envelope enters this peer - from the network or from a
      * local write.
@@ -176,6 +261,10 @@ export function envelopes({ acceptGrants = false } = {}) {
           await bus.notify('qu.record.duplicate', { from, space: sid, id });
           return finish({ sid, id, status: 'duplicate' });
         }
+        // Dropped before (a stale peer pushing an old version): not taken back.
+        // A marker whose author claim does not match is ignored - and replaced.
+        const marker = await storage.get(goneKey(sid, id));
+        if (marker?.author === header.author) return finish({ sid, id, status: 'gone' });
         // A member's own space may have rotated since it registered: refresh from the Space itself.
         const writePub = ring.get(sid, header.epoch) ?? registered.get(sid)?.space.writeKeys().get(header.epoch);
         if (writePub && !ring.get(sid, header.epoch)) ring.set(sid, header.epoch, writePub);
@@ -189,7 +278,26 @@ export function envelopes({ acceptGrants = false } = {}) {
         }
         const ws = writeSet(storage);
         ws.set(`rec/${sid}/${id}`, bytes);
+        if (marker) {
+          ws.remove(marker.sx);
+          ws.remove(goneKey(sid, id));
+        }
         ws.set(sxKey(header, id), 1);
+        // A drop list for this id may commit while this envelope is in flight.
+        ws.locked(async () => {
+          if ((await storage.get(goneKey(sid, id)))?.author === header.author) throw Object.assign(new Error('dropped meanwhile'), { gone: true });
+        });
+
+        const inner = header.visibility === 'public' ? readPublic(bytes) : null;
+        let dropped = [];
+        if (inner?.t === GC_TYPE) {
+          dropped = await applyDropList(sid, id, header, inner, ws);
+          if (!dropped) {
+            await bus.notify('qu.record.rejected', { from, space: sid, id, reason: 'malformed drop list' });
+            return finish({ sid, id, status: 'rejected', reason: 'malformed drop list' });
+          }
+        }
+        ws.dropped = dropped;
 
         const stored = await bus.emit('qu.envelope.stored', { sid, id, header, bytes, from, sync, local, ws });
         if (stored.stopped) {
@@ -201,10 +309,16 @@ export function envelopes({ acceptGrants = false } = {}) {
         try {
           await exclusive(sid, () => ws.flush());
         } catch (error) {
+          if (error.gone) return finish({ sid, id, status: 'gone' });
           await bus.notify('qu.record.failed', { from, space: sid, id, reason: error.message });
           return finish({ sid, id, status: 'failed', reason: error.message });
         }
         await ws.settle();
+        if (dropped.length) {
+          await bus.notify('qu.envelope.dropped', { sid, ids: dropped, by: header.author, gc: id });
+          // settles anyone waiting for these ids (a resync that wanted them)
+          for (const target of dropped) await bus.notify('qu.record.processed', { sid, id: target, status: 'gone' });
+        }
         // Records fetched by a resync are normally not forwarded (the other peers
         // reconcile themselves). A hub (mirror) forwards them anyway: for its
         // subscribers it is the only path, and the record is new to it.
@@ -246,7 +360,7 @@ export function envelopes({ acceptGrants = false } = {}) {
       await announce(space.id, mirror ? undefined : []);
     }
 
-    const api = { ingest, remove, exclusive, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
+    const api = { ingest, remove, exclusive, bytesFor, isGone, expire, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
     qu.envelopes = api;
     qu.keyring = ring;
     return api;

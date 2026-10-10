@@ -40,6 +40,7 @@
  */
 import * as crypto from './crypto.js';
 import { Space } from './space.js';
+import { GC_TYPE } from './gc.js';
 
 const MEMBERS = '_members';
 const GRANTS = '_grants';
@@ -196,7 +197,8 @@ export function members({ pad = 8 } = {}) {
           return verdict === 'no token' ? 'defer' : verdict; // an admin-written entry may still arrive
         }
         if (record.path === GRANTS || record.path === KEYS) return isAdmin(author) ? 'ok' : 'defer';
-        if (record.path.startsWith(RECEIPTS) && record.key !== author) return 'not your receipt';
+        // drop lists: any active member; each entry is authorised by the blind layer (gc.js mayDrop)
+        if (record.type !== GC_TYPE && record.path.startsWith(RECEIPTS) && record.key !== author) return 'not your receipt';
         if (!entry) return 'defer';
         if (entry.role === 'removed' && record.hlc > entry.removedAt) return 'removed';
         return 'ok';
@@ -216,7 +218,7 @@ export function members({ pad = 8 } = {}) {
           if (!isAdmin(me)) throw new Error('members: admins only');
           return;
         }
-        if (draft.path.startsWith(RECEIPTS) && draft.key !== me) throw new Error('members: receipts only under your own alias');
+        if (draft.type !== GC_TYPE && draft.path.startsWith(RECEIPTS) && draft.key !== me) throw new Error('members: receipts only under your own alias');
         if (!entry || !ACTIVE.has(entry.role)) throw new Error('members: not an active member of this space');
       }
 

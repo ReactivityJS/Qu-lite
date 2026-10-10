@@ -9,7 +9,15 @@
  *   - log entries (no `key`): append-only, e.g. chat messages;
  *   - keyed entries (`key` set): last-write-wins by (hlc, author). Older
  *     versions leave the index but their envelope is KEPT, so every peer
- *     and a key-less mirror hold the same set (pruning: later compaction).
+ *     and a key-less mirror hold the same set - until a drop list removes
+ *     them everywhere (compaction.js). Deleting a keyed entry writes a
+ *     TOMBSTONE version (`deleted`): it stays the head, so an older version
+ *     arriving later cannot bring the value back.
+ *
+ * Drop lists (gc.js) are applied by the blind layer; here they are checked
+ * like any record (`qu.accept`), never indexed (status 'control'), and the
+ * indexes of their targets leave in the same write set
+ * (-> notify('qu.record.deleted')).
  *
  * Both flows are bus processes:
  *
@@ -33,7 +41,9 @@
 import { sealEnvelope, openEnvelope, envelopeId, verifyEnvelope, peekEnvelope } from './envelope.js';
 import { envelopes as envelopeLayer, sxKey } from './envelopes.js';
 import { formatHlc } from './hlc.js';
+import { toHex } from './crypto.js';
 import { writeSet } from './writeset.js';
+import { GC_TYPE, GC_MAX_ENTRIES, isGcPath, gcPath, encodeEntries } from './gc.js';
 
 /** (hlc, author) order - the LWW tiebreak. @returns {number} */
 function compareVersion(a, b) {
@@ -114,14 +124,21 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       ws.set(`loc/${sid}/${id}`, { ...loc, idx: null });
     }
 
-    /** Removes a record's indexes and its envelope. */
-    async function drop(sid, id, ws) {
+    /** Removes a record's indexes. @returns {Promise<boolean>} true if it was readable (indexed) */
+    async function unindex(sid, id, ws) {
       const loc = await storage.get(`loc/${sid}/${id}`);
       if (loc?.idx) ws.remove(loc.idx);
-      if (loc?.head && (await storage.get(loc.head))?.id === id) ws.remove(loc.head);
+      const isHead = loc?.head && (await storage.get(loc.head))?.id === id;
+      if (isHead) ws.remove(loc.head);
       ws.remove(`loc/${sid}/${id}`);
       ws.remove(`defer/${sid}/${id}`);
       ws.after(() => cache.delete(id));
+      return Boolean(loc?.idx || isHead);
+    }
+
+    /** Removes a record's indexes and its envelope. */
+    async function drop(sid, id, ws) {
+      await unindex(sid, id, ws);
       await env.remove(sid, id, ws);
     }
 
@@ -137,11 +154,14 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         if (head?.id === record.id) head = null; // re-indexing the current head itself (scrub)
         if (head && compareVersion(head, record) >= 0) current = false;
         else {
-          if (head) await demote(space.id, head.id, ws);
+          if (head) {
+            await demote(space.id, head.id, ws);
+            ws.after(() => bus.notify('qu.record.superseded', { space: space.id, id: head.id, author: head.author }));
+          }
           ws.set(loc.head, pointer);
         }
       }
-      if (current) {
+      if (current && !record.deleted) {
         loc.idx = `idx/${space.id}/${pathTag}/${record.hlc}-${record.id}`;
         ws.set(loc.idx, pointer);
       }
@@ -158,6 +178,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
      *                            (e.g. author's membership not synced) -
      *                            re-tried by `reindex()`
      *   'blind'                  kept, never readable here (a private field of someone else's user node)
+     *   'control'                a drop list: checked, kept, not indexed
      *   {reject: reason}         refused - the envelope is removed again
      */
     async function admit(space, id, bytes, { from, local = false }, ws) {
@@ -175,7 +196,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         if (accepted.stopped) return { reject: accepted.reason ?? 'hook' };
         if (accepted.defer) return defer(space, id, ws);
       }
+      const control = record.type === GC_TYPE;
+      if (control !== isGcPath(record.path) || (control && record.visibility !== 'public')) return { reject: 'drop list malformed or path reserved' };
       ws.remove(`defer/${space.id}/${id}`);
+      if (control) return 'control';
       // Which version is current is decided against the committed heads, inside the commit lock.
       let current;
       ws.locked(async () => {
@@ -185,7 +209,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       ws.after(async () => {
         remember(record);
         if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: Boolean(local) });
-        else await bus.notify('qu.record.superseded', { from, space: space.id, id });
+        else await bus.notify('qu.record.superseded', { from, space: space.id, id, author: record.author });
       });
       return 'indexed';
     }
@@ -203,6 +227,15 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       if (outcome?.reject) {
         ctx.reason = outcome.reject;
         return ctx.stop();
+      }
+      if (ws.dropped?.length) {
+        const deleted = [];
+        ws.locked(async () => {
+          for (const target of ws.dropped) if (await unindex(sid, target, ws)) deleted.push(target);
+        });
+        ws.after(async () => {
+          for (const target of deleted) await bus.notify('qu.record.deleted', { space: sid, id: target, gc: id });
+        });
       }
       if (outcome !== 'indexed') ctx.status = outcome;
     });
@@ -258,20 +291,53 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
      * @param {import('./space.js').Space|string} spaceRef
      * @param {string} path
      * @param {*} value - Anything JSON-serialisable.
-     * @param {{key?: string, visibility?: 'private'|'public'}} [options]
+     * @param {{key?: string, visibility?: 'private'|'public', deleted?: boolean}} [options]
      *   `key`: last-write-wins entry. `visibility: 'public'`: signed but not
-     *   encrypted (e.g. public fields of a user node).
+     *   encrypted (e.g. public fields of a user node). `deleted`: a tombstone
+     *   for `key` (see `del()` in compaction.js).
      * @returns {Promise<object>} The stored record.
      */
-    async function write(spaceRef, path, value, { key = null, visibility = 'private' } = {}) {
-      const space = spaceOf(spaceRef);
-      const draft = await bus.run('qu.write.before', { space: space.id, path, key, value, visibility });
+    async function write(spaceRef, path, value, { key = null, visibility = 'private', deleted = false } = {}) {
+      if (isGcPath(path)) throw new Error(`records: path ${path} is reserved for drop lists`);
+      if (deleted && key === null) throw new Error('records: only keyed entries take a tombstone');
+      return seal(spaceOf(spaceRef), { path, key, value: deleted ? null : value, visibility, deleted }, 'stored');
+    }
+
+    async function seal(space, fields, expected) {
+      const draft = await bus.run('qu.write.before', { space: space.id, ...fields });
       const signer = await space.authorFor(identity, spaces.get(space.id).author);
-      const { bytes, id } = await sealEnvelope(space, { path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility }, signer);
+      const { bytes, id } = await sealEnvelope(space, { ...fields, path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility }, signer);
       const outcome = await env.ingest(bytes, { local: true });
       // 'failed': the commit failed and nothing was written - the write can be retried.
-      if (outcome.status !== 'stored') throw new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`);
+      if (outcome.status !== expected) throw new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`);
       return read(space, id);
+    }
+
+    /**
+     * Writes drop lists (gc.js) for `targets` - grouped by shard, at most
+     * GC_MAX_ENTRIES per list. Who may drop what is decided by every peer
+     * (gc.js `mayDrop`); compaction.js checks it before calling this.
+     * @param {import('./space.js').Space|string} spaceRef
+     * @param {Array<{id: string, path: string, ts: number, author: string}>} targets
+     * @returns {Promise<string[]>} ids of the drop lists written
+     */
+    async function dropList(spaceRef, targets) {
+      const space = spaceOf(spaceRef);
+      const byPath = new Map();
+      for (const t of targets) {
+        const path = gcPath(t.path);
+        if (!byPath.has(path)) byPath.set(path, []);
+        byPath.get(path).push(t);
+      }
+      const written = [];
+      for (const [path, list] of byPath) {
+        for (let i = 0; i < list.length; i += GC_MAX_ENTRIES) {
+          const value = encodeEntries(list.slice(i, i + GC_MAX_ENTRIES));
+          const record = await seal(space, { path, key: null, value, visibility: 'public', type: GC_TYPE }, 'control');
+          written.push(record?.id);
+        }
+      }
+      return written;
     }
 
     /**
@@ -284,7 +350,8 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       const space = spaceOf(spaceRef);
       const head = await storage.get(`head/${space.id}/${await space.tag(path)}/${await space.tag(`${path}\u0000${key}`)}`);
       if (!head) return null;
-      return (await read(space, head.id))?.value ?? null;
+      const record = await read(space, head.id);
+      return record?.deleted ? null : (record?.value ?? null);
     }
 
     /**
@@ -356,6 +423,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
         } catch {
           continue;
         }
+        if (record.type === GC_TYPE) continue; // drop lists are not indexed
         const loc = await storage.get(`loc/${space.id}/${id}`);
         const intact = loc && (await storage.has(sxKey(peekEnvelope(bytes), id))) && (loc.idx === null || (await storage.has(loc.idx)));
         if (!intact) {
@@ -367,10 +435,11 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
           report.reindexed.push(id);
         }
       }
-      // Orphaned sync-index entries (envelope gone) would make reconcile claim records we don't have.
+      // Orphaned sync-index entries (envelope lost, not dropped by a drop list)
+      // would make reconcile claim records we don't have.
       for (const key of await storage.keys(`sx/${space.id}/`)) {
         const id = key.slice(key.lastIndexOf('-') + 1);
-        if (!(await storage.has(`rec/${space.id}/${id}`))) {
+        if (!(await storage.has(`rec/${space.id}/${id}`)) && !(await env.isGone(space.id, id))) {
           await step(space.id, async (ws) => {
             ws.remove(key);
             await drop(space.id, id, ws);
@@ -382,13 +451,51 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       return report;
     }
 
+    /**
+     * Removes everything this peer stores for a space - envelopes, indexes,
+     * gone markers, unsent outbox entries - and leaves it. Local only: no
+     * drop list is written, the other peers and the mirror keep their copies.
+     * @param {import('./space.js').Space|string} spaceRef
+     * @returns {Promise<number>} keys removed
+     */
+    async function forget(spaceRef) {
+      const sid = typeof spaceRef === 'string' ? spaceRef : spaceRef.id;
+      const ws = writeSet(storage);
+      let count = 0;
+      for (const prefix of ['rec', 'sx', 'idx', 'head', 'loc', 'defer', 'gone', 'gcs', 'sync/out']) {
+        for (const key of await storage.keys(`${prefix}/${sid}/`)) {
+          ws.remove(key);
+          count++;
+        }
+      }
+      await env.exclusive(sid, () => ws.flush());
+      cache.clear();
+      if (spaces.has(sid)) leave(sid);
+      await bus.notify('qu.space.forgotten', { space: sid, keys: count });
+      return count;
+    }
+
     /** Re-announces a space's write keys (after `rotate()`/`acceptEpoch()`). */
     const announce = (spaceRef) => env.announce(spaceOf(spaceRef).id);
 
     /** @param {string} sid @returns {import('./space.js').Space|null} */
     const spaceById = (sid) => spaces.get(sid)?.space ?? null;
 
-    Object.assign(qu, { join, leave, write, get, query, scrub, announce, reindex, space: spaceById });
-    return { join, leave, write, get, query, scrub, announce, reindex, spaceOf };
+    Object.assign(qu, { join, leave, write, get, query, scrub, announce, reindex, forget, space: spaceById });
+    /** @returns {Promise<string>} the key (hex) this peer signs a space's records with - its alias by default */
+    const authorOf = async (spaceRef) => {
+      const space = spaceOf(spaceRef);
+      return toHex((await space.authorFor(identity, spaces.get(space.id).author)).publicKey);
+    };
+
+    /** @returns {Promise<{id: string, hlc: string, author: string}|null>} the head pointer of a keyed entry */
+    const headOf = async (spaceRef, path, key) => {
+      const space = spaceOf(spaceRef);
+      return storage.get(`head/${space.id}/${await space.tag(path)}/${await space.tag(`${path}\u0000${key}`)}`);
+    };
+
+    const api = { join, leave, write, get, query, scrub, announce, reindex, forget, dropList, spaceOf, read, authorOf, headOf };
+    qu.records = api;
+    return api;
   };
 }
