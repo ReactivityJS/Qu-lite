@@ -5,5 +5,6 @@ export { memoryDriver } from './drivers/memory.js';
 export { createClock, formatHlc, parseHlc } from './hlc.js';
 export { Space } from './space.js';
 export { sealEnvelope, openEnvelope, peekEnvelope, verifyOuter, envelopeId } from './envelope.js';
-export { records } from './records.js';
+export { records, sxKey } from './records.js';
 export { connectInProcess } from './net/inproc.js';
+export { sync } from './sync/sync.js';

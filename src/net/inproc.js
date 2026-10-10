@@ -9,7 +9,18 @@
  * budget tests measure against.
  */
 
-const sizeOf = (payload) => (payload?.bytes instanceof Uint8Array ? payload.bytes.length : new TextEncoder().encode(JSON.stringify(payload ?? null)).length);
+/** Wire size estimate: raw length of every Uint8Array field plus the JSON of everything else. */
+const sizeOf = (payload) => {
+  let binary = 0;
+  const json = JSON.stringify(payload ?? null, (_key, value) => {
+    if (value instanceof Uint8Array) {
+      binary += value.length;
+      return 0;
+    }
+    return value;
+  });
+  return binary + new TextEncoder().encode(json).length;
+};
 
 /**
  * Connects two Qu instances. Delivery is asynchronous (one microtask hop),
