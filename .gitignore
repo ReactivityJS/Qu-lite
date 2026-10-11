@@ -1,0 +1,6 @@
+node_modules/
+demo/dist/
+*.sqlite
+*.sqlite-*
+*.log
+.DS_Store

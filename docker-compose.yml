@@ -1,0 +1,25 @@
+# Qu Lite relay/mirror + browser demo. One service, one port:
+#   http://localhost:8787/?name=alice   and   http://localhost:8787/?name=bob
+# The relay only ever stores sealed envelopes (it can verify, never read).
+#
+#   docker compose up --build
+services:
+  qu-lite:
+    build: .
+    image: qu-lite
+    ports:
+      - "8787:8787"
+    environment:
+      # QU_ALLOW: comma-separated sids to restrict this mirror to (empty = any self-certified space)
+      QU_ALLOW: ""
+      # per-space quota (empty = unlimited), max envelope size, inbound frames/s per connection (0 = off)
+      QU_QUOTA_RECORDS: ""
+      QU_QUOTA_BYTES: "1073741824"
+      QU_MAX_ENVELOPE: "262144"
+      QU_RATE: "200"
+    volumes:
+      - qu-lite-data:/data
+    restart: unless-stopped
+
+volumes:
+  qu-lite-data:

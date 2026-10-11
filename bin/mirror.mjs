@@ -5,8 +5,8 @@
  * policy, WebSocket server transport - that stores every granted space's
  * sealed envelopes and serves them. It verifies signatures; it never reads.
  *
- *   node packages/lite/bin/mirror.mjs [--port 8787] [--host 0.0.0.0] [--db ./mirror.sqlite]
- *                                     [--allow sid1,sid2] [--static ./packages/lite/demo] [--quiet]
+ *   node bin/mirror.mjs [--port 8787] [--host 0.0.0.0] [--db ./mirror.sqlite]
+ *                                     [--allow sid1,sid2] [--static ./demo] [--quiet]
  *                                     [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate frames/s]
  *
  * Environment: QU_PORT / QU_HOST / QU_DB / QU_ALLOW / QU_STATIC /

@@ -3,7 +3,7 @@
  * dist/app.js. `platform: 'browser'` makes esbuild refuse Node-only imports
  * (node:sqlite, ws) instead of silently shipping them.
  *
- *   node packages/lite/demo/build.mjs
+ *   node demo/build.mjs
  */
 import * as esbuild from 'esbuild';
 import { dirname, join } from 'node:path';

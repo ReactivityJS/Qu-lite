@@ -1,7 +1,6 @@
 /**
- * REGISTRY - `(slot, name) -> factory`, the same idea as `@qu/bootstrap`'s
- * `AdapterRegistry` (packages/bootstrap/src/adapter-registry.js), kept
- * dependency-free here so `@qu/lite` never pulls in the Yjs-based packages.
+ * REGISTRY - `(slot, name) -> factory` for stores, plugins and transports,
+ * so presets (peer.js) can be built from names and options.
  * Empty by default: nothing is imported unless a caller registers it.
  */
 export class Registry {

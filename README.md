@@ -1,14 +1,30 @@
 # @qu/lite
 
-A small, event-driven, self-contained Qu core (no dependency on the rest of this repo - WebCrypto, `ws` on Node, nothing else). Milestones 1-8: kernel, mounts, spaces and user nodes, a privacy-first
-envelope, robust sync (Negentropy reconciliation, partial sync, resync/repair, durable outbox and
-resumable reconciles), persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket first),
-one peer base for clients and relays/mirrors, a Docker relay, a browser demo, and group membership with
-roles, admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing,
-sent, delivered, read), direct browser-to-browser links over WebRTC, and HTTPS + SSE as a fallback
-where WebSockets are blocked.
+A small, event-driven, offline-first sync core with end-to-end encryption - no runtime dependencies
+besides WebCrypto (and `ws` on Node). Kernel, mounts, spaces and user nodes, a privacy-first envelope,
+robust sync (Negentropy reconciliation, partial sync, resync/repair, durable outbox and resumable
+reconciles), atomic writes, persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket,
+HTTPS + SSE fallback, WebRTC), one peer base for clients and relays/mirrors, group membership with roles,
+admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing, sent,
+delivered, read), deletion and compaction, a hardened mirror (quotas, rate limits, padding, one
+connection per space) and - optional - collaborative text. Started as `packages/lite` in QuV5; it
+shares no code with the rest of Qu.
 
-**Try it:** `npm run lite:demo` (or `docker compose -f docker-compose.lite.yml up --build`), then open
+```sh
+npm install
+npm test                # all tests, including two Playwright browser tests (skipped without Chromium)
+npm run test:unit       # without the browser tests
+npm run demo            # build the demo and serve it with a local mirror on :8787
+npm run mirror -- --port 8787 --db ./mirror.sqlite
+docker compose up --build
+```
+
+**Size** (minified + gzip, browser): core (records, sync, WebSocket, IndexedDB) ~18.5 KB; with members,
+user nodes, inbox, status and compaction ~26.6 KB; everything incl. SSE fallback, WebRTC and
+collaborative text ~31.5 KB. The optional plugins (`text`, `rtc`/`topology`, `relayTransport`/SSE) are
+only bundled when imported.
+
+**Try it:** `npm run demo` (or `docker compose up --build`), then open
 `http://localhost:8787/?name=alice` and `http://localhost:8787/?name=bob` in two browsers, create a group,
 share the invite link, write, disconnect, reload - and watch the event log.
 
@@ -66,7 +82,7 @@ connectWs(qu, 'ws://localhost:8787');                          // reconnects wit
 ```
 
 ```sh
-npm run lite:mirror -- --port 8787 --db ./mirror.sqlite      # or: node packages/lite/bin/mirror.mjs
+npm run mirror -- --port 8787 --db ./mirror.sqlite           # or: npx qu-lite-mirror
 ```
 
 - **Drivers**: `indexedDbDriver()` (browser, one object store, cursor ranges) and `sqliteDriver()`

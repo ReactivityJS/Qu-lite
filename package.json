@@ -1,7 +1,7 @@
 {
   "name": "@qu/lite",
   "version": "0.1.0",
-  "description": "Qu Lite: a small, event-driven Qu core - EventBus-based processes and hooks, unstorage-style mounts and drivers (memory, IndexedDB, SQLite), Space-rooted records sealed in a metadata-hiding envelope, Negentropy reconciliation with partial sync, repair and a durable outbox, WebSocket transport, topology and a key-less mirror.",
+  "description": "Qu Lite: a small, offline-first, end-to-end encrypted sync core - sealed records verifiable by any peer, group encryption with epochs, Negentropy set reconciliation with partial sync, durable outbox, deletion and compaction, presence/receipts, pluggable storage (memory, IndexedDB, SQLite) and transports (WebSocket, HTTPS+SSE, WebRTC), and a key-less mirror/relay built from the same peer.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -10,16 +10,40 @@
     "./sqlite": "./src/drivers/sqlite.js",
     "./ws-server": "./src/net/ws-server.js"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
-  "license": "MIT",
   "bin": {
     "qu-lite-mirror": "./bin/mirror.mjs"
   },
-  "devDependencies": {
-    "fake-indexeddb": "^6.2.5"
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-timeout=240000 test/*.test.js",
+    "test:unit": "node --test --test-timeout=240000 --test-skip-pattern=browsers test/*.test.js",
+    "demo:build": "node demo/build.mjs",
+    "mirror": "node --no-warnings bin/mirror.mjs",
+    "demo": "node demo/build.mjs && node --no-warnings bin/mirror.mjs --static demo --db ./lite-demo.sqlite"
   },
+  "keywords": [
+    "offline-first",
+    "sync",
+    "e2ee",
+    "negentropy",
+    "local-first",
+    "crdt",
+    "relay"
+  ],
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.2.5",
+    "playwright": "^1.63.0"
+  },
+  "license": "MIT",
   "engines": {
     "node": ">=22.5"
   }
