@@ -19,7 +19,7 @@ import { toHex, randomBytes, fromBase64 } from '../crypto.js';
  * @param {string} base - e.g. 'https://relay.example/sse'
  * @param {{fetchImpl?: typeof fetch, minDelayMs?: number, maxDelayMs?: number}} [options]
  */
-export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs = 500, maxDelayMs = 30_000 } = {}) {
+export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs = 500, maxDelayMs = 30_000, localId, scope } = {}) {
   let closed = false;
   let attempt = 0;
   let peer = null;
@@ -67,6 +67,8 @@ export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs 
         },
         close: () => controller.abort(),
         via: 'sse',
+        localId,
+        scope,
         onUp: (remote) => {
           attempt = 0;
           peer = remote;

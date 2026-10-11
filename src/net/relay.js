@@ -5,22 +5,35 @@
  * every `retryWsMs` (a network that blocked it may not block it forever).
  *
  *   qu.use(relayTransport({ url: 'https://relay.example' }))   // -> wss://…/ws, https://…/sse
+ *   qu.use(relayTransport({ url, isolate: true }))               // one connection per space
+ *
+ * `isolate`: every space this peer joins (records.join) gets its own
+ * connection with its own random network id, carrying only that space
+ * (scoped link, link.js) - the relay can't tell which spaces belong to one
+ * device from the protocol. The shared connection carries everything else
+ * (other users' nodes, inbox drops). IP address and timing still connect the
+ * connections; hiding those needs a proxy/Tor in front.
  *
  * `qu.transports.relay` has connect()/disconnect()/status() like the
- * single-transport plugins, plus `via` ('ws' | 'sse').
+ * single-transport plugins, plus `via` ('ws' | 'sse') of the shared connection.
  */
 import { connectWs } from './ws.js';
 import { connectSse } from './sse.js';
+import { netOf } from './link.js';
+
+const randomNetId = () => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 /**
- * @param {{url?: string, wsPath?: string, ssePath?: string, wsAttempts?: number, retryWsMs?: number, minDelayMs?: number, maxDelayMs?: number, prefer?: 'ws'|'sse', WebSocketImpl?: typeof WebSocket, fetchImpl?: typeof fetch}} [options]
+ * @param {{url?: string, wsPath?: string, ssePath?: string, wsAttempts?: number, retryWsMs?: number, minDelayMs?: number, maxDelayMs?: number, prefer?: 'ws'|'sse', isolate?: boolean, WebSocketImpl?: typeof WebSocket, fetchImpl?: typeof fetch}} [options]
  */
-export function relayTransport({ url, wsPath = '/ws', ssePath = '/sse', wsAttempts = 3, retryWsMs = 5 * 60_000, prefer = 'ws', ...connectOptions } = {}) {
+export function relayTransport({ url, wsPath = '/ws', ssePath = '/sse', wsAttempts = 3, retryWsMs = 5 * 60_000, prefer = 'ws', isolate = false, ...connectOptions } = {}) {
   return (qu) => {
-    let current = null; // {via, conn}
+    const net = netOf(qu);
     let base = null;
-    let failures = 0;
-    let retryTimer = null;
+    let shared = null;
+    /** @type {Map<string, ReturnType<typeof channel>>} sid -> its own connection */
+    const isolated = new Map();
+
     const endpoints = (origin) => {
       const u = new URL(origin);
       const secure = u.protocol === 'https:' || u.protocol === 'wss:';
@@ -28,48 +41,75 @@ export function relayTransport({ url, wsPath = '/ws', ssePath = '/sse', wsAttemp
       return { ws: `${secure ? 'wss' : 'ws'}://${host}${wsPath}`, sse: `${secure ? 'https' : 'http'}://${host}${ssePath}` };
     };
 
-    const offUp = qu.bus.on('net.peer.up', ({ via }) => {
-      if (via === 'ws' && current?.via === 'ws') failures = 0;
-    });
-    const offConnecting = qu.bus.on('net.connecting', ({ url: target, attempt, via }) => {
-      if (current?.via !== 'ws' || via === 'sse' || target !== endpoints(base).ws) return;
-      // `attempt` counts consecutive failures of this WebSocket connection
-      failures = attempt;
-      if (failures >= wsAttempts) use('sse');
-    });
+    /** One connection with its own WebSocket -> SSE fallback. */
+    function channel(linkOptions = {}) {
+      let current = null; // {via, conn}
+      let retryTimer = null;
+      const use = (via) => {
+        current?.conn.close();
+        const target = endpoints(base);
+        const options = { ...connectOptions, ...linkOptions };
+        const conn =
+          via === 'ws'
+            ? connectWs(qu, target.ws, { ...options, onConnecting: (attempt) => attempt >= wsAttempts && queueMicrotask(() => current?.conn === conn && use('sse')) })
+            : connectSse(qu, target.sse, options);
+        current = { via, conn };
+        qu.bus.notify('net.relay.transport', { url: base, via, scoped: Boolean(linkOptions.scope) });
+        clearTimeout(retryTimer);
+        if (via === 'sse' && retryWsMs > 0) {
+          retryTimer = setTimeout(() => current && use('ws'), retryWsMs);
+          retryTimer.unref?.();
+        }
+      };
+      use(prefer);
+      return {
+        get via() {
+          return current?.via ?? null;
+        },
+        status: () => ({ url: base, via: current?.via, connected: current?.conn.connected, peer: current?.conn.peer, scope: linkOptions.scope ? [...linkOptions.scope] : null }),
+        close() {
+          clearTimeout(retryTimer);
+          current?.conn.close();
+          current = null;
+        },
+      };
+    }
 
-    function use(via) {
-      current?.conn.close();
-      const target = endpoints(base);
-      current = { via, conn: via === 'ws' ? connectWs(qu, target.ws, connectOptions) : connectSse(qu, target.sse, connectOptions) };
-      qu.bus.notify('net.relay.transport', { url: base, via });
-      clearTimeout(retryTimer);
-      if (via === 'sse' && retryWsMs > 0) {
-        retryTimer = setTimeout(() => base && use('ws'), retryWsMs);
-        retryTimer.unref?.();
-      }
+    function isolateSpace(sid) {
+      net.isolated.add(sid); // synchronously: before the space announces its grants
+      if (base && !isolated.has(sid)) isolated.set(sid, channel({ localId: randomNetId(), scope: [sid] }));
+    }
+    if (isolate) {
+      net.exclusive = true; // every link says exactly what it wants (sync hello `only`)
+      qu.bus.on('qu.space.joined', ({ space }) => isolateSpace(space));
+      qu.bus.on('qu.space.left', ({ space }) => {
+        isolated.get(space)?.close();
+        isolated.delete(space);
+        net.isolated.delete(space);
+      });
+      for (const sid of qu.records?.joined?.() ?? []) isolateSpace(sid);
     }
 
     const api = {
       /** @param {string} origin - http(s):// or ws(s):// origin of the relay */
       connect(origin) {
         base = origin;
-        failures = 0;
-        use(prefer);
+        shared?.close();
+        shared = channel();
+        for (const sid of net.isolated) if (isolate && !isolated.has(sid)) isolated.set(sid, channel({ localId: randomNetId(), scope: [sid] }));
       },
       disconnect() {
-        clearTimeout(retryTimer);
-        current?.conn.close();
-        current = null;
+        shared?.close();
+        shared = null;
+        for (const c of isolated.values()) c.close();
+        isolated.clear();
       },
-      status: () => (current ? [{ url: base, via: current.via, connected: current.conn.connected, peer: current.conn.peer }] : []),
+      status: () => (shared ? [shared.status(), ...[...isolated.values()].map((c) => c.status())] : []),
       get via() {
-        return current?.via ?? null;
+        return shared?.via ?? null;
       },
       close() {
         api.disconnect();
-        offUp();
-        offConnecting();
       },
     };
     if (url) api.connect(url);

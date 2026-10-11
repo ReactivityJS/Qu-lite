@@ -53,11 +53,11 @@ function compareVersion(a, b) {
 }
 
 /**
- * @param {{author?: 'alias'|'identity', cacheSize?: number}} [options]
+ * @param {{author?: 'alias'|'identity', cacheSize?: number, padding?: 'quarter'|'pow2'|'none'}} [options]
  *   `author`: default signing key for group spaces (user nodes always sign
  *   with the identity). Overridable per space in `join()`.
  */
-export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = {}) {
+export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, padding = 'quarter' } = {}) {
   return (qu) => {
     const { bus, storage, clock, identity } = qu;
     const env = envelopeLayer()(qu);
@@ -306,7 +306,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
     async function seal(space, fields, expected) {
       const draft = await bus.run('qu.write.before', { space: space.id, ...fields });
       const signer = await space.authorFor(identity, spaces.get(space.id).author);
-      const { bytes, id } = await sealEnvelope(space, { ...fields, path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility }, signer);
+      const { bytes, id } = await sealEnvelope(space, { ...fields, path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility, padding }, signer);
       const outcome = await env.ingest(bytes, { local: true });
       // 'failed': the commit failed and nothing was written - the write can be retried.
       if (outcome.status !== expected) throw new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`);
@@ -494,7 +494,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000 } = 
       return storage.get(`head/${space.id}/${await space.tag(path)}/${await space.tag(`${path}\u0000${key}`)}`);
     };
 
-    const api = { join, leave, write, get, query, scrub, announce, reindex, forget, dropList, spaceOf, read, authorOf, headOf };
+    /** @returns {string[]} sids of the joined spaces */
+    const joined = () => [...spaces.keys()];
+
+    const api = { join, leave, write, get, query, scrub, announce, reindex, forget, dropList, spaceOf, read, authorOf, headOf, joined };
     qu.records = api;
     return api;
   };

@@ -199,9 +199,10 @@ export function envelopes({ acceptGrants = false } = {}) {
      * gone markers - the same set on every peer, so reconcile stays quiet.
      * @param {string} sid
      * @param {number} now - wall-clock ms
-     * @returns {Promise<number>} drop lists expired
+     * @returns {Promise<number>} drop lists expired (`qu.gc.expired` reports the bytes freed)
      */
     async function expire(sid, now) {
+      let freed = 0;
       const base = `gcs/${sid}/`;
       const due = await storage.range(base, { lt: base + pad(gcCutoff(now)) });
       for (const { key } of due) {
@@ -212,6 +213,7 @@ export function envelopes({ acceptGrants = false } = {}) {
           ws.remove(key);
           ws.remove(`defer/${sid}/${gcId}`);
           if (bytes) {
+            freed += bytes.length;
             ws.remove(`rec/${sid}/${gcId}`);
             ws.remove(sxKey(peekEnvelope(bytes), gcId));
             for (const { id } of decodeEntries(readPublic(bytes)?.v) ?? []) {
@@ -224,7 +226,7 @@ export function envelopes({ acceptGrants = false } = {}) {
           await ws.flush();
         });
       }
-      if (due.length) await bus.notify('qu.gc.expired', { sid, count: due.length });
+      if (due.length) await bus.notify('qu.gc.expired', { sid, count: due.length, bytes: freed });
       return due.length;
     }
 
@@ -248,6 +250,8 @@ export function envelopes({ acceptGrants = false } = {}) {
         return finish({ status: 'rejected', reason: error.message });
       }
       const { sid } = header;
+      // scoped links (one connection per space): a space arriving on the wrong link is ignored, never acked
+      if (from && qu.net && !qu.net.allows(from, sid)) return finish({ sid, status: 'rejected', reason: 'not on this link' });
       const id = await envelopeId(bytes);
       // One ingest per id at a time: a second copy (live push + resync reply)
       // waits for the first, so "processed" always means "settled".
@@ -255,8 +259,13 @@ export function envelopes({ acceptGrants = false } = {}) {
       let settle;
       inFlight.set(id, new Promise((resolve) => (settle = resolve)));
       try {
-        const policy = await bus.emit('qu.envelope.accept', { header, id, from, local });
-        if (policy.stopped) return finish({ sid, id, status: 'rejected', reason: 'policy' });
+        const policy = await bus.emit('qu.envelope.accept', { header, id, bytes, from, local });
+        if (policy.stopped) {
+          const reason = policy.reason ?? 'policy';
+          // tell the sender, so its outbox keeps the record and the app can show why
+          if (from && peers.has(from)) await bus.emit(`net.out.${from}.nack`, { sid, id, reason });
+          return finish({ sid, id, status: 'rejected', reason });
+        }
         if (await storage.has(`rec/${sid}/${id}`)) {
           await bus.notify('qu.record.duplicate', { from, space: sid, id });
           return finish({ sid, id, status: 'duplicate' });
@@ -344,7 +353,7 @@ export function envelopes({ acceptGrants = false } = {}) {
       if (!entry) return;
       const grants = await entry.space.grants();
       keyring.set(sid, entry.space.grantState());
-      const to = targets ?? [...peers].filter((p) => roles.get(p) === 'mirror');
+      const to = (targets ?? [...peers].filter((p) => roles.get(p) === 'mirror')).filter((p) => !qu.net || qu.net.allows(p, sid));
       for (const peer of to) await bus.emit(`net.out.${peer}.grant`, { sid, grants });
     }
 

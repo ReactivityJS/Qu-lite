@@ -266,6 +266,39 @@ qu.forget(space);                           // local only: drop everything store
   dropped entries back.
 - Events: `qu.record.deleted`, `qu.envelope.dropped`, `qu.compact.done`, `qu.gc.expired`.
 
+## Mirror hardening and metadata (milestone 11)
+
+```js
+mirror({ quota: { records: 100_000, bytes: 1 << 30 }, maxEnvelopeBytes: 256 * 1024 })
+qu.use(limits({ frames: { rate: 200, burst: 400 } }))       // per connection, any peer
+qu.use(relayTransport({ url, isolate: true }))               // one connection per space
+records({ padding: 'quarter' })                              // default; 'pow2' | 'none'
+```
+
+- **One reconcile per pair, no sid leaks**: subscriptions travel in `hello`, reconciles start once the other
+  side's hello is known. A mirror never initiates towards a client and never sends it `sub`s - a client learns
+  nothing about the other spaces a mirror serves, and connecting costs the mirror nothing per stored space (it
+  only fetches from a peer that just granted it a NEW space). Between equals, the smaller network id initiates.
+  `maxSessionsPerPeer` (8) caps concurrent responder sessions (`negerr`, retried later).
+- **Quotas** (`mirror.js`): per space `{records, bytes}` and a size limit per envelope. Usage lives in
+  `mirror/usage/<sid>` and moves in the envelope's own atomic write set (minus what a drop list removes, minus
+  expired drop lists). Refused envelopes are answered with `nack` -> `qu.record.refused` at the sender, whose
+  outbox keeps them; drop lists are always accepted (they free space). CLI: `--quota-records`, `--quota-bytes`,
+  `--max-envelope`, `--rate` (or `QU_QUOTA_RECORDS`, ...).
+- **Rate limits** (`limits.js`): token buckets per connection (frames and bytes) on the link's inbound guard;
+  frames above the limit are dropped (`net.limited`), repeated strikes close the connection. Nothing is lost:
+  unacknowledged records stay in the sender's outbox, unfinished reconciles are retried. The mirror CLI uses it
+  by default (200 frames/s).
+- **Padding**: private inners are padded to size steps (`JSON || 0x00 || zeros`) - with `quarter`: min 128 B, then
+  quarter steps of the next power of two (at most +25 %). Old unpadded envelopes stay readable. Reconcile cost is
+  unchanged (~2 KB for 10,000 records + 1 change); tiny records grow to the 128 B minimum.
+- **One connection per space** (`relayTransport({isolate: true})`): every joined space gets its own connection
+  with a random network id and a SCOPED link that carries only that space (subs, records, grants, acks; a record
+  arriving on the wrong link is ignored, never acked). The shared connection carries the rest (other users'
+  nodes, inbox drops). The relay can no longer tie spaces to a device from the protocol - IP address and timing
+  still can (put a proxy/Tor in front for that). Decoy subscriptions were left out: a relay recognises them at
+  once (no grants, no data).
+
 ## Next milestones
 
-11 mirror hardening & metadata padding · 12 collaborative text (optional).
+12 collaborative text (optional).

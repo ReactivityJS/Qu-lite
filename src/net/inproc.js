@@ -9,10 +9,11 @@ import { createLink } from './link.js';
 /**
  * @param {{bus: import('../bus.js').Bus, peerId: string}} a
  * @param {{bus: import('../bus.js').Bus, peerId: string}} b
- * @returns {{stats: {aToB: number, bToA: number, messages: number}, ready: Promise<void>, disconnect: () => Promise<void>}}
+ * @param {{localId?: string, scope?: Iterable<string>}} [options] - make `a`'s end a scoped link (link.js)
+ * @returns {{stats: {aToB: number, bToA: number, messages: number}, ready: Promise<void>, disconnect: () => Promise<void>, peer: () => string|null}}
  *   `ready` resolves once both sides completed the handshake (`net.peer.up`).
  */
-export function connectInProcess(a, b) {
+export function connectInProcess(a, b, { localId, scope } = {}) {
   const stats = { aToB: 0, bToA: 0, messages: 0 };
   let open = true;
   const ends = {};
@@ -26,12 +27,15 @@ export function connectInProcess(a, b) {
   let markReady;
   const ready = new Promise((resolve) => (markReady = resolve));
   const onUp = () => ++up === 2 && markReady();
-  ends.a = createLink(a, { send: channel('b', 'aToB'), via: 'inproc', onUp });
-  ends.b = createLink(b, { send: channel('a', 'bToA'), via: 'inproc', onUp });
+  const close = () => queueMicrotask(() => api.disconnect());
+  ends.a = createLink(a, { send: channel('b', 'aToB'), via: 'inproc', onUp, localId, scope, close });
+  ends.b = createLink(b, { send: channel('a', 'bToA'), via: 'inproc', onUp, close });
 
-  return {
+  const api = {
     stats,
     ready,
+    /** the name `a` uses for `b` on its bus */
+    peer: () => ends.a.peer,
     async disconnect() {
       if (!open) return;
       open = false;
@@ -40,6 +44,7 @@ export function connectInProcess(a, b) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     },
   };
+  return api;
 }
 
 /** Registry-friendly plugin form: `qu.use(inprocTransport({ peers: [otherQu] }))`. */

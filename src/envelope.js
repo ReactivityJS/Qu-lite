@@ -25,7 +25,11 @@
  * INNER: JSON `{p: path, k: key|null, h: hlc, v: value}` plus optional
  * `t` (control type, e.g. 'gc' - see gc.js) and `d: 1` (tombstone: the
  * keyed entry was deleted) - path, key, precise time and value never leave
- * the ciphertext of a private record.
+ * the ciphertext of a private record. A private inner is PADDED
+ * (`JSON || 0x00 || zeros` - JSON text never contains a raw 0x00) to a size
+ * step, so the ciphertext length only roughly reveals the content size:
+ * 'quarter' (default; min 128 B, then quarter steps of the next power of
+ * two: 128, 160, 192, 224, 256, 320, ... - at most +25 %), 'pow2' or 'none'.
  *
  * The record id is `sha256(whole envelope)`: content-addressed.
  */
@@ -36,6 +40,20 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 export const VERSION = 2;
+
+/**
+ * Padded length for an inner of `n` bytes (including the 0x00 terminator).
+ * @param {number} n
+ * @param {'quarter'|'pow2'|'none'} mode
+ */
+export function paddedLength(n, mode = 'quarter') {
+  if (mode === 'none') return n;
+  if (n <= 128) return 128;
+  const pow = 2 ** Math.ceil(Math.log2(n));
+  if (mode === 'pow2') return pow;
+  const step = pow / 8; // quarter steps of the octave (pow/2, pow]
+  return Math.ceil(n / step) * step;
+}
 const FLAG_PUBLIC = 1;
 const HEADER_LEN = 64;
 const ASIG = HEADER_LEN;
@@ -73,7 +91,7 @@ export function peekEnvelope(bytes) {
  * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} author - see `space.authorFor(identity)`.
  * @returns {Promise<{bytes: Uint8Array, id: string}>}
  */
-export async function sealEnvelope(space, { path, key = null, hlc, value, visibility = 'private', type, deleted = false }, author) {
+export async function sealEnvelope(space, { path, key = null, hlc, value, visibility = 'private', type, deleted = false, padding = 'quarter' }, author) {
   const epoch = space.epoch;
   const keys = space.epochKeys(epoch);
   if (!keys.writePriv) throw new Error(`envelope: no write key for space ${space.id}`);
@@ -93,9 +111,14 @@ export async function sealEnvelope(space, { path, key = null, hlc, value, visibi
   const fields = { p: path, k: key, h: hlc, v: value };
   if (type) fields.t = type;
   if (deleted) fields.d = 1;
-  const inner = enc.encode(JSON.stringify(fields));
+  let inner = enc.encode(JSON.stringify(fields));
   let ct = inner;
   if (!isPublic) {
+    if (padding !== 'none') {
+      const padded = new Uint8Array(paddedLength(inner.length + 1, padding)); // zero-filled: 0x00 terminator + padding
+      padded.set(inner);
+      inner = padded;
+    }
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
     const sealed = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: header }, keys.aesKey, inner));
     ct = concat(iv, sealed);
@@ -154,7 +177,8 @@ export async function openEnvelope(space, bytes, { verify = true } = {}) {
       throw new Error('envelope: decryption failed');
     }
   }
-  const { p, k, h, v, t, d } = JSON.parse(dec.decode(inner));
+  const end = inner.indexOf(0);
+  const { p, k, h, v, t, d } = JSON.parse(dec.decode(end === -1 ? inner : inner.subarray(0, end)));
   if (crypto.toHex(await space.shardOf(p)) !== outer.shard) throw new Error('envelope: shard tag does not match path');
 
   const record = { id: await envelopeId(bytes), path: p, key: k, hlc: h, author: outer.author, value: v, epoch: outer.epoch, ts: outer.ts, visibility: outer.visibility };

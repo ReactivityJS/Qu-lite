@@ -17,13 +17,14 @@ const OPEN = 1;
  * Wires one already-created socket into a link.
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {WebSocket} socket
- * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void}} [options]
+ * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} [options]
+ *   `localId`/`scope`: a scoped link (link.js) - one connection per space.
  */
-export function attachSocket(qu, socket, { via = 'ws', onUp, onDown } = {}) {
+export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, scope } = {}) {
   socket.binaryType = 'arraybuffer';
   let link = null;
   const start = () => {
-    link = createLink(qu, { send: (bytes) => socket.readyState === OPEN && socket.send(bytes), close: () => socket.close(), via, onUp, onDown });
+    link = createLink(qu, { send: (bytes) => socket.readyState === OPEN && socket.send(bytes), close: () => socket.close(), via, onUp, onDown, localId, scope });
   };
   if (socket.readyState === OPEN) start();
   else socket.addEventListener('open', start);
@@ -64,10 +65,10 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown } = {}) {
  * One self-healing client connection.
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {string} url
- * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number, connectTimeoutMs?: number}} [options]
+ * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number, connectTimeoutMs?: number, localId?: string, scope?: Iterable<string>, onConnecting?: (attempt: number) => void}} [options]
  * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null, readonly url: string}}
  */
-export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000, connectTimeoutMs = 10_000 } = {}) {
+export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000, connectTimeoutMs = 10_000, localId, scope, onConnecting } = {}) {
   let closed = false;
   let attempt = 0;
   let socket = null;
@@ -78,11 +79,14 @@ export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDe
     clearTimeout(timer);
     if (closed || (socket && socket.readyState === OPEN)) return;
     qu.bus.notify('net.connecting', { url, attempt });
+    onConnecting?.(attempt);
     const current = (socket = new WebSocketImpl(url));
     // A blocked WebSocket often neither opens nor fails (a proxy just holds it): give up after a while.
     const guard = setTimeout(() => current.readyState !== OPEN && attached.fail(), connectTimeoutMs);
     guard.unref?.();
     const attached = attachSocket(qu, socket, {
+      localId,
+      scope,
       onUp: (remote) => {
         clearTimeout(guard);
         attempt = 0;

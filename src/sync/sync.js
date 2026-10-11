@@ -21,10 +21,22 @@
  * peer connects. Live records are only routed to peers that subscribed to
  * their (sid, shard); a peer that never sent `sub` gets everything.
  *
- *   hello         {role}                          'peer' | 'mirror'
+ *   hello         {role, subs, only?}             'peer' | 'mirror', current subscriptions;
+ *                                                 `only`: the list is exhaustive (even if empty)
  *   ack           {sid, ids}                      receiver stored these records
+ *   nack          {sid, id, reason}               receiver refused it (e.g. a mirror's quota)
+ *   negerr        {session, reason}               responder declined a session (busy)
  *
- * A mirror is just a peer that watches whole spaces.
+ * A mirror is just a peer that watches whole spaces. ONE reconcile per pair:
+ * reconciles start when the other side's `hello` (role + subs) arrived; a
+ * mirror never initiates towards a client (the client reconciles its own
+ * watches and pushes what the mirror lacks) and never sends it `sub`s - so a
+ * client never learns which other spaces a mirror serves, and connecting
+ * costs the mirror nothing per stored space. Between equals watching the
+ * same scope only the smaller network id initiates.
+ *
+ * Scoped links (link.js, one connection per space): only what
+ * `qu.net.allows(peer, sid)` permits travels over a link.
  *
  * DURABILITY - pending work survives a reload or a dropped connection,
  * because it lives in storage, not in memory:
@@ -62,7 +74,7 @@ const later = (fn, ms) => {
 };
 
 /**
- * @param {{releaseMs?: number, timeoutMs?: number, sessionTtlMs?: number, retryMs?: number, frameSizeLimit?: number, role?: 'peer'|'mirror', ackFrom?: 'any'|'mirror'}} [options]
+ * @param {{releaseMs?: number, timeoutMs?: number, sessionTtlMs?: number, retryMs?: number, frameSizeLimit?: number, role?: 'peer'|'mirror', ackFrom?: 'any'|'mirror', maxSessionsPerPeer?: number}} [options]
  *   `releaseMs`: how long an unwatched scope stays subscribed (warm release).
  *   `timeoutMs`: how long a reconcile waits for wanted records to arrive.
  *   `retryMs`: how often pending reconciles are retried while connected.
@@ -77,6 +89,7 @@ export function sync({
   frameSizeLimit = 0,
   role = 'peer',
   ackFrom = 'any',
+  maxSessionsPerPeer = 8,
 } = {}) {
   return (qu) => {
     const { bus, storage } = qu;
@@ -93,6 +106,20 @@ export function sync({
     const awaiting = new Map();
     /** @type {Map<string, string>} peer -> announced role. */
     const roles = new Map();
+
+    /** May `sid` travel over the link to `peer`? (scoped links, link.js) */
+    const allows = (peer, sid) => (qu.net ? qu.net.allows(peer, sid) : true);
+    const subKey = (scope) => (scope.shard ? `${scope.sid}/${scope.shard}` : scope.sid);
+    /** A mirror subscribes only at other mirrors: clients must not learn the spaces it serves. */
+    const subscribesAt = (peer, scope) => allows(peer, scope.sid) && !(role === 'mirror' && roles.get(peer) !== 'mirror');
+    /** Who starts the reconcile of `scope` with `peer` after connecting (one per pair). */
+    function initiates(peer, scope) {
+      if (!allows(peer, scope.sid)) return false;
+      if (role === 'mirror' && roles.get(peer) !== 'mirror') return false;
+      const windowed = scope.from != null || scope.to != null;
+      if (!windowed && roles.get(peer) === role && remoteSubs.get(peer)?.has(subKey(scope)) && peer < qu.peerId) return false;
+      return true;
+    }
     /** Pending keys with a reconcile currently running. */
     const active = new Set();
     /** @type {Map<string, Map<string, string[]>>} peer -> sid -> ids to ack (batched per tick). */
@@ -213,7 +240,7 @@ export function sync({
       // being resolved still gets a (failed, therefore pending) session.
       const targets = input.peer ? [input.peer] : [...peers];
       const scope = await resolveScope(input);
-      return Promise.all(targets.map((peer) => reconcileWith(peer, scope)));
+      return Promise.all(targets.filter((peer) => allows(peer, scope.sid)).map((peer) => reconcileWith(peer, scope)));
     }
 
     /**
@@ -234,9 +261,10 @@ export function sync({
       } else {
         entry = { scope, refs: 1 };
         watches.set(key, entry);
-        for (const peer of peers) await send(peer, 'sub', { sid: scope.sid, shard: scope.shard });
+        for (const peer of peers) if (subscribesAt(peer, scope)) await send(peer, 'sub', { sid: scope.sid, shard: scope.shard });
       }
-      await Promise.all([...peers].map((peer) => reconcileWith(peer, scope)));
+      // new interest: reconcile now with every peer that may carry it (and that we'd talk to as a mirror)
+      await Promise.all([...peers].filter((peer) => allows(peer, scope.sid) && !(role === 'mirror' && roles.get(peer) !== 'mirror')).map((peer) => reconcileWith(peer, scope)));
 
       let released = false;
       return () => {
@@ -246,7 +274,7 @@ export function sync({
         const release = () => {
           if (entry.refs > 0) return;
           watches.delete(key);
-          for (const peer of peers) send(peer, 'unsub', { sid: scope.sid, shard: scope.shard });
+          for (const peer of peers) if (subscribesAt(peer, scope)) send(peer, 'unsub', { sid: scope.sid, shard: scope.shard });
         };
         if (releaseMs > 0) entry.timer = later(release, releaseMs);
         else release();
@@ -257,6 +285,7 @@ export function sync({
     /** A peer that never subscribed gets everything; otherwise only its (sid[, shard]) subscriptions. */
     function wants(peer, sid, shard) {
       const subs = remoteSubs.get(peer);
+      if (!allows(peer, sid)) return false;
       return !subs || subs.has(sid) || subs.has(`${sid}/${shard}`);
     }
     bus.on('qu.route', ({ sid, shard, peers: candidates }) => ({ peers: candidates.filter((peer) => wants(peer, sid, shard)) }));
@@ -267,12 +296,17 @@ export function sync({
     });
 
     // --- peers ------------------------------------------------------------
+    // Subscriptions travel inside `hello`; reconciles start once the other
+    // side's hello (its role and subs) is known - see `initiates()`.
     bus.on('net.peer.up', async ({ peer }) => {
       peers.add(peer);
-      await send(peer, 'hello', { role });
-      for (const { scope } of watches.values()) await send(peer, 'sub', { sid: scope.sid, shard: scope.shard });
-      const resumed = new Set(await resumePending(peer));
-      for (const { scope } of watches.values()) if (!resumed.has(pendingKey(peer, scope))) reconcileWith(peer, scope);
+      const subs = role === 'mirror' ? [] : [...watches.values()].filter(({ scope }) => allows(peer, scope.sid)).map(({ scope }) => ({ sid: scope.sid, shard: scope.shard }));
+      // A scoped link (one connection per space) subscribes exactly its space;
+      // with isolation on, every link's list is exhaustive - nothing else may arrive on it.
+      const scoped = qu.net?.scopes.get(peer);
+      for (const sid of scoped ?? []) if (!subs.some((sub) => sub.sid === sid && !sub.shard)) subs.push({ sid });
+      const only = Boolean(scoped || qu.net?.exclusive);
+      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}) });
     });
     bus.on('net.peer.down', ({ peer }) => {
       peers.delete(peer);
@@ -302,10 +336,20 @@ export function sync({
     // The outbox is flushed to a peer only once it has said it wants the data:
     // a mirror (hello) gets everything, any other peer what it subscribed to.
     // Partial sync stays partial even for unacknowledged writes.
-    bus.on('net.in.*.hello', async ({ role: remoteRole }, ctx) => {
+    bus.on('net.in.*.hello', async ({ role: remoteRole, subs, only }, ctx) => {
       const peer = ctx.topic.split('.')[2];
+      if (!peers.has(peer)) return;
       roles.set(peer, remoteRole);
+      if (Array.isArray(subs) && (subs.length || only)) {
+        if (!remoteSubs.has(peer)) remoteSubs.set(peer, new Set());
+        for (const sub of subs) if (typeof sub?.sid === 'string') remoteSubs.get(peer).add(sub.shard ? `${sub.sid}/${sub.shard}` : sub.sid);
+      }
+      // mirror <-> mirror: subscribe now that we know it is one
+      if (role === 'mirror' && remoteRole === 'mirror') for (const { scope } of watches.values()) if (allows(peer, scope.sid)) await send(peer, 'sub', { sid: scope.sid, shard: scope.shard });
       if (remoteRole === 'mirror') await flushOutbox(peer, () => true);
+      else if (Array.isArray(subs)) for (const sub of subs) await flushOutbox(peer, (sid, shard) => sid === sub.sid && (!sub.shard || shard === sub.shard));
+      const resumed = new Set(await resumePending(peer));
+      for (const { scope } of watches.values()) if (!resumed.has(pendingKey(peer, scope)) && initiates(peer, scope)) reconcileWith(peer, scope);
     });
 
     // A record dropped before it was acknowledged needs no upload any more
@@ -324,7 +368,7 @@ export function sync({
       for (const key of await storage.keys('sync/out/')) {
         const [, , sid, id] = key.split('/');
         const entry = await storage.get(key);
-        if (!wanted(sid, entry?.shard)) continue;
+        if (!allows(peer, sid) || !wanted(sid, entry?.shard)) continue;
         if (!(await sendRecord(peer, sid, id, false))) await storage.remove(key);
       }
     }
@@ -336,6 +380,11 @@ export function sync({
         if (active.has(key)) continue;
         const scope = await storage.get(key);
         if (!scope) continue;
+        if (!initiates(peer, scope) && allows(peer, scope.sid)) {
+          await storage.remove(key); // the other side reconciles this pair
+          continue;
+        }
+        if (!allows(peer, scope.sid)) continue;
         started.push(key);
         reconcileWith(peer, scope);
       }
@@ -387,15 +436,25 @@ export function sync({
       const key = `${peer}:${session}`;
       let entry = responding.get(key);
       if (!entry) {
-        const ne = new Negentropy(await loadItems({ sid, shard, from, to }), frameSizeLimit);
-        ne.wantUint8ArrayOutput = true;
-        entry = { ne, sid };
+        let open = 0;
+        for (const k of responding.keys()) if (k.startsWith(`${peer}:`)) open++;
+        if (open >= maxSessionsPerPeer) {
+          bus.notify('sync.busy', { peer, sid });
+          return send(peer, 'negerr', { session, reason: 'busy' });
+        }
+        // registered before the first await, so concurrent sessions count
+        const ready = loadItems({ sid, shard, from, to }).then((items) => {
+          const ne = new Negentropy(items, frameSizeLimit);
+          ne.wantUint8ArrayOutput = true;
+          return ne;
+        });
+        entry = { ready, sid };
         responding.set(key, entry);
       }
       clearTimeout(entry.timer);
       entry.timer = later(() => responding.delete(key), sessionTtlMs);
       try {
-        const [out] = await entry.ne.reconcile(msg);
+        const [out] = await (await entry.ready).reconcile(msg);
         await send(peer, 'negr', { session, msg: out });
       } catch (error) {
         responding.delete(key);
@@ -448,6 +507,13 @@ export function sync({
       const ids = new Uint8Array(wanted.length * 32);
       wanted.forEach((id, i) => ids.set(crypto.fromHex(id), i * 32));
       await send(state.peer, 'want', { session, sid: state.scope.sid, ids });
+    });
+    bus.on('net.in.*.negerr', ({ session, reason }) => {
+      const state = initiating.get(session);
+      if (state) finish(state, new Error(`declined: ${reason}`)); // stays pending, retried later
+    });
+    bus.on('net.in.*.nack', ({ sid, id, reason }, ctx) => {
+      if (typeof sid === 'string' && typeof id === 'string') bus.notify('qu.record.refused', { sid, id, reason, peer: ctx.topic.split('.')[2] });
     });
     bus.on('net.in.*.wantmiss', ({ session, ids }) => {
       const state = initiating.get(session);
