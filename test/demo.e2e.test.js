@@ -91,6 +91,14 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await alice.click('#chat li:has-text("Versehen") button.delete');
     await bob.waitForFunction(() => !document.getElementById('chat').textContent.includes('Versehen'), null, { timeout: 40_000 });
 
+    step('shared note: both type, both see the merged text');
+    await alice.type('#note', 'Einkauf: Brot');
+    await bob.waitForFunction(() => document.getElementById('note').value === 'Einkauf: Brot', null, { timeout: 40_000 });
+    await bob.focus('#note');
+    await bob.press('#note', 'End');
+    await bob.type('#note', ', Milch');
+    await alice.waitForFunction(() => document.getElementById('note').value === 'Einkauf: Brot, Milch', null, { timeout: 40_000 });
+
     step('carol (over HTTPS + SSE) is invited by pubkey through her inbox');
     const carol = await open('carol');
     await carol.goto(`${base}?name=carol&transport=sse`); // carol is behind a "WebSocket-blocking proxy"

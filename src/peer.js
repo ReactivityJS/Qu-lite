@@ -26,6 +26,7 @@ import { signals } from './signals.js';
 import { status } from './status.js';
 import { compaction } from './compaction.js';
 import { limits } from './limits.js';
+import { text } from './text.js';
 import { rtc } from './net/webrtc.js';
 import { topology } from './net/topology.js';
 import { wsTransport } from './net/ws.js';
@@ -47,6 +48,7 @@ export function defaultRegistry() {
     .register('plugin', 'status', (options) => status(options))
     .register('plugin', 'compaction', (options) => compaction(options))
     .register('plugin', 'limits', (options) => limits(options))
+    .register('plugin', 'text', (options) => text(options))
     .register('transport', 'webrtc', (options) => rtc(options))
     .register('plugin', 'topology', (options) => topology(options))
     .register('transport', 'ws', (options) => wsTransport(options))

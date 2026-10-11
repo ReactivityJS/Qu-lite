@@ -24,6 +24,7 @@
     .pill.on { color: var(--ok); border-color: var(--ok); } .pill.off { color: var(--bad); border-color: var(--bad); }
     .muted { color: var(--muted); font-size: 12px; }
     code, .mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+    #note { width: 100%; box-sizing: border-box; font: inherit; }
     #chat { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; }
     #chat li { padding: 4px 6px; border-bottom: 1px solid var(--line); cursor: pointer; }
     #chat li:hover { background: var(--bg); }
@@ -78,6 +79,8 @@
       <div id="typing" class="muted"></div>
       <div class="muted">Klick auf eine Nachricht zeigt ihren gespeicherten, verschlüsselten Umschlag.</div>
       <pre id="raw" class="mono"></pre>
+      <h2>Gemeinsame Notiz <span class="muted">CRDT, verschlüsselt, offline-fähig</span></h2>
+      <textarea id="note" rows="5" placeholder="Alle Mitglieder schreiben gleichzeitig hier hinein …"></textarea>
     </section>
     <section>
       <h2>Mitglieder <span class="muted" id="epoch"></span></h2>

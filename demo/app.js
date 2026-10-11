@@ -24,7 +24,7 @@ const fromUrl = (text) => JSON.parse(atob(text.replace(/-/g, '+').replace(/_/g, 
 
 const qu = await createPeer({
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
-  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction'],
+  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction', 'text'],
   transports: [
     ['relay', { url: params.has('offline') ? undefined : relayUrl, prefer: params.get('transport') === 'sse' ? 'sse' : 'ws', minDelayMs: 300 }],
     ['webrtc', { mode: params.get('rtc') ?? localStorage.getItem('qu-demo-rtc') ?? 'auto' }],
@@ -123,6 +123,7 @@ async function openGroup(target) {
   if (location.hash !== `#g=${space.id}`) history.replaceState(null, '', `#g=${space.id}`);
   $('sid').textContent = `sid ${short(space.id)}`;
   $('invite').value = '';
+  await openNote();
   qu.bus.on(`qu.record.${space.id}`, scheduleRender);
   qu.bus.on('qu.record.deleted', scheduleRender);
   qu.bus.on('qu.members.*', scheduleRender);
@@ -130,6 +131,28 @@ async function openGroup(target) {
   await renderGroupList();
   await renderGroup();
 }
+
+// ---------------------------------------------------------------- shared note (text CRDT)
+let note = null;
+let offNote = null;
+let caret = [null, null]; // anchors of the selection: they survive remote edits
+const rememberCaret = () => note && (caret = [note.anchor($('note').selectionStart), note.anchor($('note').selectionEnd)]);
+async function openNote() {
+  offNote?.();
+  note = await qu.text(space, 'notes/main');
+  $('note').value = note.value();
+  offNote = note.on(({ text, remote }) => {
+    if (!remote) return;
+    const area = $('note');
+    area.value = text;
+    if (document.activeElement === area) area.setSelectionRange(note.indexOf(caret[0]), note.indexOf(caret[1]));
+  });
+}
+$('note').addEventListener('input', () => {
+  note?.set($('note').value);
+  rememberCaret();
+});
+for (const type of ['select', 'keyup', 'click']) $('note').addEventListener(type, rememberCaret);
 
 let renderTimer = null;
 function scheduleRender() {

@@ -299,6 +299,32 @@ records({ padding: 'quarter' })                              // default; 'pow2' 
   still can (put a proxy/Tor in front for that). Decoy subscriptions were left out: a relay recognises them at
   once (no grants, no data).
 
+## Collaborative text (milestone 12)
+
+```js
+qu.use(text({ batchMs: 300, snapshotEvery: 200 }));   // registry name 'text'
+const doc = await qu.text(space, 'notes/main');
+doc.insert(0, 'Hallo'); doc.delete(0, 2); doc.set(textarea.value);   // set(): smallest single edit
+doc.on(({ text, remote }) => ...);
+const caret = doc.anchor(i); /* remote edits */ doc.indexOf(caret);  // positions that survive remote edits
+await doc.compact();
+```
+
+- **CRDT** (`src/text.js`, `TextCrdt`): RGA with Lamport-ordered char ids `(counter, site)`; a char is inserted
+  after its reference char, skipping every char with a greater id. Concurrent runs never interleave; replicas
+  that see the same ops in any order (out-of-order ops wait for their reference) end with the same text.
+- **Records**: keystrokes within `batchMs` become ONE ordinary encrypted, padded record at the doc's path
+  (`{site, ops}`), synced and reconciled like any other - offline edits merge on reconnect. A site is the
+  author's alias prefix plus a random per-session suffix (two devices of one identity don't collide); ops of a
+  batch must carry its author's site, forgeries are ignored.
+- **Compaction**: `<path>/_snap`, keyed by the author's alias (a hook refuses anyone else's key), holds the
+  author's full state as runs - with tombstone ids but without deleted text. Snapshots are op unions, so they
+  merge: each member snapshots its own state and drops its own batches (drop lists, M10). Nothing is lost,
+  whoever compacts when; superseded own snapshots are compacted by `compaction()`.
+- Limits: the whole state lives in memory (fine for notes up to ~100k chars; positions are linear scans); a
+  member can still vandalise a shared text (delete it, or collide future char ids of another site) - the same
+  trust as in any group space. The demo has a shared note per group (caret kept across remote edits).
+
 ## Next milestones
 
-12 collaborative text (optional).
+All planned milestones (1-12) are done.
