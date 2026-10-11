@@ -17,7 +17,8 @@
     "src/",
     "bin/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/"
   ],
   "scripts": {
     "test": "node --test --test-timeout=240000 test/*.test.js",

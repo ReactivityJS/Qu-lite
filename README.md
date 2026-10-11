@@ -8,7 +8,7 @@ HTTPS + SSE fallback, WebRTC), one peer base for clients and relays/mirrors, gro
 admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing, sent,
 delivered, read), deletion and compaction, a hardened mirror (quotas, rate limits, padding, one
 connection per space) and - optional - collaborative text. Started as `packages/lite` in QuV5; it
-shares no code with the rest of Qu.
+shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ```sh
 npm install
