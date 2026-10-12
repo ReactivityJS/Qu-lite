@@ -7,7 +7,7 @@ reconciles), atomic writes, persistent drivers (IndexedDB, SQLite), transports a
 HTTPS + SSE fallback, WebRTC), one peer base for clients and relays/mirrors, group membership with roles,
 admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing, sent,
 delivered, read), deletion and compaction, a hardened mirror (quotas, rate limits, padding, one
-connection per space) and - optional - collaborative text. Started as `packages/lite` in QuV5; it
+connection per space) and - optional - collaborative text. Started as `packages/lite` in [QuV5](https://github.com/ReactivityJS/QuV5); it
 shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ```sh

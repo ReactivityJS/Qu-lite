@@ -2,6 +2,14 @@
   "name": "@qu/lite",
   "version": "0.1.0",
   "description": "Qu Lite: a small, offline-first, end-to-end encrypted sync core - sealed records verifiable by any peer, group encryption with epochs, Negentropy set reconciliation with partial sync, durable outbox, deletion and compaction, presence/receipts, pluggable storage (memory, IndexedDB, SQLite) and transports (WebSocket, HTTPS+SSE, WebRTC), and a key-less mirror/relay built from the same peer.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ReactivityJS/Qu-lite.git"
+  },
+  "homepage": "https://github.com/ReactivityJS/Qu-lite#readme",
+  "bugs": {
+    "url": "https://github.com/ReactivityJS/Qu-lite/issues"
+  },
   "type": "module",
   "main": "src/index.js",
   "exports": {
