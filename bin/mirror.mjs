@@ -6,13 +6,18 @@
  * sealed envelopes and serves them. It verifies signatures; it never reads.
  *
  *   node bin/mirror.mjs [--port 8787] [--host 0.0.0.0] [--db ./mirror.sqlite]
- *                                     [--allow sid1,sid2] [--static ./demo] [--quiet]
+ *                                     [--allow sid1,sid2] [--static ./web] [--quiet]
  *                                     [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate frames/s]
  *
  * Environment: QU_PORT / QU_HOST / QU_DB / QU_ALLOW / QU_STATIC /
  * QU_QUOTA_RECORDS / QU_QUOTA_BYTES / QU_MAX_ENVELOPE / QU_RATE (0 = no rate limit).
  * Its identity and network id live in the database, so clients can resume
  * pending syncs across restarts.
+ *
+ * With `--static ./web` (Docker: always) the same port also serves the
+ * client start page (/), the demo (/demo.html) and the browser bundle
+ * (/dist/qu-lite.js); /healthz and /info are always there. Put a reverse
+ * proxy in front for TLS (docs/DEPLOY.md).
  */
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';

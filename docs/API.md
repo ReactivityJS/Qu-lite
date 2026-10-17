@@ -540,11 +540,11 @@ of them unchanged.
 | `connectInProcess(a, b, {scope?}?)` | two peers in one process (tests, examples); `{ready, disconnect(), stats, peer()}` |
 | `connectWs(qu, url, opts?)` | one WebSocket with reconnect (backoff + jitter, `online` event); `{close(), connected, peer, url}` |
 | `wsTransport({connect: [url], …})` | plugin form: `qu.transports.ws.{connect(url), disconnect(url?), status()}` |
-| `relayTransport({url, isolate?, prefer?, wsAttempts?, retryWsMs?, wsPath?, ssePath?})` | WebSocket first (`wss://…/ws`), falls back to HTTPS + SSE (`https://…/sse`); `qu.transports.relay.{via, status(), disconnect()}`. `isolate: true` gives each space its own connection and network id. |
+| `relayTransport({url, isolate?, prefer?, wsAttempts?, retryWsMs?, wsPath?, ssePath?})` | WebSocket first (`wss://…/ws`), falls back to HTTPS + SSE (`https://…/sse`); a path in `url` is kept (`https://example.org/qu` → `wss://example.org/qu/ws`), for relays behind a proxy prefix; `qu.transports.relay.{via, status(), disconnect()}`. `isolate: true` gives each space its own connection and network id. |
 | `connectSse(qu, base, opts?)` / `sseTransport({connect: [url]})` | SSE only |
 | `rtc({mode, iceServers, maxMesh, fanout})` | WebRTC between members; signaling sealed through the space; `await qu.rtc.track(space)`, `qu.rtc.setMode('auto'\|'mesh'\|'relay-only')`. Needs `status`. |
 | `topology({mode, mirrors, peers, maxMesh, fanout, connect})` | `star`, `mesh` or `auto` over URL endpoints; `qu.topology.{setPeers, setMode, endpoints(), close()}` |
-| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true})` (Node) | one port for WebSocket upgrades, `/sse` and static files; `{port, close()}`. `listenWs` is the same without SSE. |
+| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/info` and static files; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
 | `httpServerTransport(opts)` / registry `ws-server`, `http-server` (Node) | plugin form; `qu.transports['ws-server'].{ready, close()}` |
 | `createLink(qu, {send, close?, onUp?, onDown?, scope?})` | write your own transport: call `receive(bytes)` for incoming data and `closed()` on disconnect |
 
@@ -556,7 +556,7 @@ Example: [03-mirror-websocket.mjs](../examples/03-mirror-websocket.mjs).
 ## Mirror CLI and Docker
 
 ```sh
-npx qu-lite-mirror --port 8787 --db ./mirror.sqlite [--host 0.0.0.0] [--allow sid1,sid2] [--static ./public]
+npx qu-lite-mirror --port 8787 --db ./mirror.sqlite [--host 0.0.0.0] [--allow sid1,sid2] [--static ./web]
                    [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate 200] [--quiet]
 docker compose up --build                       # same, port 8787, data in a volume
 ```
@@ -565,6 +565,11 @@ Every flag also has an environment variable: `QU_PORT`, `QU_HOST`, `QU_DB`, `QU_
 `QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE` and `QU_RATE` (`0` disables
 rate limiting). The mirror keeps its identity in its database, so clients resume after a
 restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
+
+With `--static ./web` (the Docker image always sets it) the same port also serves the client start page
+(`/`: connection check and how an app connects), the demo (`/demo.html`) and the library as one browser
+module (`/dist/qu-lite.js`, built by `node web/build.mjs`). `/healthz` and `/info` are always served.
+TLS and reverse proxy setups (nginx, Caddy, path prefix): [DEPLOY.md](DEPLOY.md).
 
 ---
 

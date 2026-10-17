@@ -7,7 +7,7 @@ npm ci
 npm test               # full suite (node:test), incl. 2 Playwright browser tests
 npm run test:unit      # without browser tests
 node --test --test-timeout=240000 test/sync.test.js   # one file
-npm run demo           # demo + local mirror on :8787
+npm run demo           # relay + start page (/) + demo (/demo.html) on :8787
 ```
 
 Run the full suite **twice** before pushing a non-trivial change - several tests are

@@ -11,9 +11,9 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startMirror } from '../bin/mirror.mjs';
-import { buildDemo } from '../demo/build.mjs';
+import { buildWeb } from '../web/build.mjs';
 
-const demoDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'demo');
+const demoDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 let chromium = null;
 try {
   ({ chromium } = await import('playwright'));
@@ -34,7 +34,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
   }
   if (!browser) return t.skip('no Chromium available');
   const dir = mkdtempSync(join(tmpdir(), 'qu-lite-e2e-'));
-  await buildDemo();
+  await buildWeb();
   const relay = await startMirror({ port: 0, db: join(dir, 'relay.sqlite'), static: demoDir, log: () => {} });
   const base = `http://127.0.0.1:${relay.port}/`;
 
@@ -59,9 +59,19 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
       await chatHas(page, text);
     };
 
+    step('start page: connects to the relay that serves it and gets a test record stored');
+    const start = await open('start');
+    await start.goto(base);
+    await ready(start);
+    await connected(start);
+    assert.match(await start.textContent('#snippet'), new RegExp(`${base}dist/qu-lite.js`));
+    await start.click('#storeTest');
+    await start.waitForFunction(() => document.getElementById('store').dataset.ok === 'true', null, { timeout: 15_000 });
+    await start.close();
+
     step('alice founds a group, bob joins by link');
     const alice = await open('alice');
-    await alice.goto(`${base}?name=alice`);
+    await alice.goto(`${base}demo.html?name=alice`);
     await ready(alice);
     await connected(alice);
     await alice.click('#newGroup');
@@ -72,7 +82,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     const link = await alice.inputValue('#invite');
 
     const bob = await open('bob');
-    await bob.goto(`${base}?name=bob${link.slice(link.indexOf('#'))}`);
+    await bob.goto(`${base}demo.html?name=bob${link.slice(link.indexOf('#'))}`);
     await ready(bob);
     await connected(bob);
     await send(alice, 'Hallo Bob');
@@ -92,16 +102,16 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await bob.waitForFunction(() => !document.getElementById('chat').textContent.includes('Versehen'), null, { timeout: 40_000 });
 
     step('shared note: both type, both see the merged text');
-    await alice.type('#note', 'Einkauf: Brot');
-    await bob.waitForFunction(() => document.getElementById('note').value === 'Einkauf: Brot', null, { timeout: 40_000 });
-    await bob.focus('#note');
-    await bob.press('#note', 'End');
-    await bob.type('#note', ', Milch');
-    await alice.waitForFunction(() => document.getElementById('note').value === 'Einkauf: Brot, Milch', null, { timeout: 40_000 });
+    await alice.type('#sharedNote', 'Einkauf: Brot');
+    await bob.waitForFunction(() => document.getElementById('sharedNote').value === 'Einkauf: Brot', null, { timeout: 40_000 });
+    await bob.focus('#sharedNote');
+    await bob.press('#sharedNote', 'End');
+    await bob.type('#sharedNote', ', Milch');
+    await alice.waitForFunction(() => document.getElementById('sharedNote').value === 'Einkauf: Brot, Milch', null, { timeout: 40_000 });
 
     step('carol (over HTTPS + SSE) is invited by pubkey through her inbox');
     const carol = await open('carol');
-    await carol.goto(`${base}?name=carol&transport=sse`); // carol is behind a "WebSocket-blocking proxy"
+    await carol.goto(`${base}demo.html?name=carol&transport=sse`); // carol is behind a "WebSocket-blocking proxy"
     await ready(carol);
     await connected(carol);
     assert.equal(await carol.textContent('#via'), 'sse');
@@ -124,7 +134,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await alice.waitForFunction(() => document.getElementById('conn').textContent === 'getrennt');
     await send(alice, 'vor dem Reload geschrieben');
     await alice.waitForFunction(() => Number(document.getElementById('outbox').textContent) > 0);
-    await alice.goto(`${base}?name=alice&offline#g=${sid}`);
+    await alice.goto(`${base}demo.html?name=alice&offline#g=${sid}`);
     await ready(alice);
     await chatHas(alice, 'vor dem Reload geschrieben');
     await alice.waitForFunction(() => Number(document.getElementById('outbox').textContent) > 0);
@@ -175,7 +185,7 @@ test('two browsers connect directly (WebRTC) and keep chatting when the relay go
   }
   if (!browser) return t.skip('no Chromium available');
   const dir = mkdtempSync(join(tmpdir(), 'qu-lite-rtc-'));
-  await buildDemo();
+  await buildWeb();
   const relay = await startMirror({ port: 0, db: join(dir, 'relay.sqlite'), static: demoDir, log: () => {} });
   const base = `http://127.0.0.1:${relay.port}/`;
   const errors = [];
@@ -189,7 +199,7 @@ test('two browsers connect directly (WebRTC) and keep chatting when the relay go
     const chatHas = (page, text) => page.waitForFunction((x) => document.getElementById('chat').textContent.includes(x), text, { timeout: 40_000 });
 
     const alice = await open('alice');
-    await alice.goto(`${base}?name=alice`);
+    await alice.goto(`${base}demo.html?name=alice`);
     await ready(alice);
     await alice.waitForFunction(() => document.getElementById('conn').textContent === 'verbunden');
     await alice.click('#newGroup');
@@ -198,7 +208,7 @@ test('two browsers connect directly (WebRTC) and keep chatting when the relay go
     await alice.waitForFunction(() => document.getElementById('invite').value.includes('#i='));
     const link = await alice.inputValue('#invite');
     const bob = await open('bob');
-    await bob.goto(`${base}?name=bob${link.slice(link.indexOf('#'))}`);
+    await bob.goto(`${base}demo.html?name=bob${link.slice(link.indexOf('#'))}`);
     await ready(bob);
 
     for (const page of [alice, bob]) await page.waitForFunction(() => document.getElementById('direct').textContent === '1', null, { timeout: 40_000 });

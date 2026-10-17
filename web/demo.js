@@ -1,13 +1,14 @@
 /**
- * Qu Lite browser demo: one profile per `?name=` (own IndexedDB, own
- * identity), a relay on the same origin (`/ws`), a user node with public
+ * Qu Lite browser demo (demo.html): one profile per `?name=` (own IndexedDB,
+ * own identity), the relay that serves this page (`./ws`, also under a
+ * reverse-proxy path prefix), a user node with public
  * and private fields, encrypted groups with members and roles, invites by
  * link or by pubkey (inbox), removing members (new epoch), a live event log
  * and the raw stored envelope.
  *
  *   ?name=alice      profile (default "default")
  *   &offline         start without connecting
- *   &relay=https://… another relay (origin; WebSocket at /ws, SSE fallback at /sse)
+ *   &relay=https://… another relay (base URL; WebSocket at <base>/ws, SSE fallback at <base>/sse)
  *   &transport=sse   force HTTPS + SSE instead of WebSocket
  *   #g=<sid>         open a known group      #i=<invite>  accept an invite link
  */
@@ -15,7 +16,8 @@ import { createPeer, peekEnvelope, crypto } from '../src/index.js';
 
 const params = new URLSearchParams(location.search);
 const profile = params.get('name') || 'default';
-const relayUrl = params.get('relay') || location.origin;
+// the relay serving this page - its base URL, path prefix included (reverse proxy)
+const relayUrl = params.get('relay') || new URL('.', location.href).href;
 const $ = (id) => document.getElementById(id);
 const short = (hex) => (hex ? `${hex.slice(0, 8)}…` : '–');
 const el = (tag, text, attrs = {}) => Object.assign(document.createElement(tag), { textContent: text ?? '', ...attrs });
@@ -140,25 +142,25 @@ let caret = [null, null]; // anchors of the selection: they survive remote edits
 const toPoints = (text, units) => [...text.slice(0, units)].length;
 const toUnits = (text, points) => [...text].slice(0, points).join('').length;
 const rememberCaret = () => {
-  const area = $('note');
+  const area = $('sharedNote');
   if (note) caret = [note.anchor(toPoints(area.value, area.selectionStart)), note.anchor(toPoints(area.value, area.selectionEnd))];
 };
 async function openNote() {
   offNote?.();
   note = await qu.text(space, 'notes/main');
-  $('note').value = note.value();
+  $('sharedNote').value = note.value();
   offNote = note.on(({ text, remote }) => {
     if (!remote) return;
-    const area = $('note');
+    const area = $('sharedNote');
     area.value = text;
     if (document.activeElement === area) area.setSelectionRange(toUnits(text, note.indexOf(caret[0])), toUnits(text, note.indexOf(caret[1])));
   });
 }
-$('note').addEventListener('input', () => {
-  note?.set($('note').value);
+$('sharedNote').addEventListener('input', () => {
+  note?.set($('sharedNote').value);
   rememberCaret();
 });
-for (const type of ['select', 'keyup', 'click']) $('note').addEventListener(type, rememberCaret);
+for (const type of ['select', 'keyup', 'click']) $('sharedNote').addEventListener(type, rememberCaret);
 
 let renderTimer = null;
 function scheduleRender() {

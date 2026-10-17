@@ -22,3 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t qu-lite .
+      - name: smoke test - API, start page, demo and bundle on one port
+        run: |
+          docker run -d --name relay -p 8787:8787 qu-lite
+          for i in $(seq 1 30); do curl -fsS http://localhost:8787/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8787/info
+          curl -fsS http://localhost:8787/ | grep -q 'Qu Lite Relay'
+          curl -fsS http://localhost:8787/demo.html | grep -q 'dist/demo.js'
+          curl -fsS -o /dev/null http://localhost:8787/dist/qu-lite.js
+          test "$(docker inspect -f '{{.State.Running}}' relay)" = true
+          docker logs relay

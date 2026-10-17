@@ -83,4 +83,5 @@ don't undo a deliberate choice by accident.
 persistence, WebSocket, mirror · 4 privacy model, one peer base, Docker relay + demo ·
 5 members, epochs, inbox · 6 status · 7 WebRTC · 8 HTTPS+SSE fallback · 9 atomic writes
 · 10 deletion and compaction · 11 mirror hardening and metadata · 12 collaborative text
-(optional) · 13 stale devices (offline past the horizon) · 14 attachments (optional).
+(optional) · 13 stale devices (offline past the horizon) · 14 attachments (optional) · 15 relay,
+client page and demo on one port, behind a TLS reverse proxy.

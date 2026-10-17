@@ -33,9 +33,9 @@
   "scripts": {
     "test": "node --test --test-timeout=240000 test/*.test.js",
     "test:unit": "node --test --test-timeout=240000 --test-skip-pattern=browsers test/*.test.js",
-    "demo:build": "node demo/build.mjs",
+    "build:web": "node web/build.mjs",
     "mirror": "node --no-warnings bin/mirror.mjs",
-    "demo": "node demo/build.mjs && node --no-warnings bin/mirror.mjs --static demo --db ./lite-demo.sqlite"
+    "demo": "node web/build.mjs && node --no-warnings bin/mirror.mjs --static web --db ./lite-demo.sqlite"
   },
   "keywords": [
     "offline-first",

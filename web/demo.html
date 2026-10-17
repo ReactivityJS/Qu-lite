@@ -24,7 +24,7 @@
     .pill.on { color: var(--ok); border-color: var(--ok); } .pill.off { color: var(--bad); border-color: var(--bad); }
     .muted { color: var(--muted); font-size: 12px; }
     code, .mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
-    #note { width: 100%; box-sizing: border-box; font: inherit; }
+    #sharedNote { width: 100%; box-sizing: border-box; font: inherit; }
     #chat { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; }
     #chat li { padding: 4px 6px; border-bottom: 1px solid var(--line); cursor: pointer; }
     #chat li:hover { background: var(--bg); }
@@ -42,7 +42,7 @@
 </head>
 <body>
   <header>
-    <h1>Qu Lite</h1>
+    <h1><a href="./" style="color:inherit;text-decoration:none">Qu Lite</a> Demo</h1>
     <span>Profil <b id="profile"></b></span>
     <span id="conn" class="pill off">getrennt</span>
     <span class="muted">über <b id="via">–</b></span>
@@ -80,7 +80,7 @@
       <div class="muted">Klick auf eine Nachricht zeigt ihren gespeicherten, verschlüsselten Umschlag.</div>
       <pre id="raw" class="mono"></pre>
       <h2>Gemeinsame Notiz <span class="muted">CRDT, verschlüsselt, offline-fähig</span></h2>
-      <textarea id="note" rows="5" placeholder="Alle Mitglieder schreiben gleichzeitig hier hinein …"></textarea>
+      <textarea id="sharedNote" rows="5" placeholder="Alle Mitglieder schreiben gleichzeitig hier hinein …"></textarea>
     </section>
     <section>
       <h2>Mitglieder <span class="muted" id="epoch"></span></h2>
@@ -94,6 +94,6 @@
       <pre id="log"></pre>
     </section>
   </main>
-  <script type="module" src="./dist/app.js"></script>
+  <script type="module" src="./dist/demo.js"></script>
 </body>
 </html>

@@ -17,4 +17,5 @@ Each file is a complete program: `node examples/<file>` (Node ≥ 22.5, after `n
 
 `_group.mjs` is shared setup for 05-07 (a mirror and two group members in one process).
 In the browser, use the same code with `store: ['indexeddb', …]` and `transports: [['relay', { url }]]` -
-see [demo/app.js](../demo/app.js) for a complete app.
+see [web/demo.js](../web/demo.js) for a complete app and [web/client.js](../web/client.js) for the
+minimal connection a relay's start page makes.

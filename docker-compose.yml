@@ -1,5 +1,7 @@
-# Qu Lite relay/mirror + browser demo. One service, one port:
-#   http://localhost:8787/?name=alice   and   http://localhost:8787/?name=bob
+# Qu Lite relay/mirror + client start page + demo. One service, one port:
+#   http://localhost:8787/                      start page: connection check, how apps connect
+#   http://localhost:8787/demo.html?name=alice  and  ?name=bob
+# Behind a TLS reverse proxy bind it to localhost only, e.g. "127.0.0.1:8787:8787" (docs/DEPLOY.md).
 # The relay only ever stores sealed envelopes (it can verify, never read).
 #
 #   docker compose up --build

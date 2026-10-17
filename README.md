@@ -19,7 +19,7 @@ npm install
 npm test                # all tests, including two Playwright browser tests (skipped without Chromium)
 npm run test:unit       # without the browser tests
 node examples/02-sync.mjs   # any example from examples/
-npm run demo            # build the demo and serve it with a local mirror on :8787
+npm run demo            # relay on :8787 with start page (/), demo (/demo.html) and browser bundle
 npm run mirror -- --port 8787 --db ./mirror.sqlite
 docker compose up --build
 ```
@@ -29,9 +29,10 @@ user nodes, inbox, status and compaction ~26.6 KB; everything incl. SSE fallback
 collaborative text ~31.5 KB. The optional plugins (`text`, `blobs`, `rtc`/`topology`, `relayTransport`/SSE) are
 only bundled when imported.
 
-**Try it:** `npm run demo` (or `docker compose up --build`), then open
-`http://localhost:8787/?name=alice` and `http://localhost:8787/?name=bob` in two browsers, create a group,
-share the invite link, write, disconnect, reload - and watch the event log.
+**Try it:** `npm run demo` (or `docker compose up --build`). `http://localhost:8787/` checks the connection and
+shows how an app connects. Then open `http://localhost:8787/demo.html?name=alice` and `…/demo.html?name=bob` in
+two browsers, create a group, share the invite link, write, disconnect, reload - and watch the event log.
+Production behind a TLS reverse proxy: [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```js
 import { createQu, records, sync, Space, connectInProcess } from '@qu/lite';
@@ -138,7 +139,7 @@ const browser = await createPeer({ store: ['indexeddb', { name: 'me' }], plugins
                                    transports: [['ws', { connect: ['wss://relay.example/ws'] }]] });
 const relay = await createPeer({ registry: nodeRegistry(), store: ['sqlite', { path: 'relay.sqlite' }],
                                  plugins: [['sync', { role: 'mirror' }], 'mirror'],
-                                 transports: [['ws-server', { port: 8787, static: './demo' }]] });
+                                 transports: [['ws-server', { port: 8787, static: './web' }]] });
 ```
 
 - `net/link.js` holds handshake, framing and bus wiring once; a transport only moves bytes
@@ -393,6 +394,27 @@ qu.bus.on('qu.blob.progress', ({ direction, done, total }) => ...);
   re-acquired when the page becomes visible again; released while offline) and closing the tab asks first - a sleeping phone or a closed tab would stop the sync.
 - Cost: base64 inside the record (+33 %) plus padding (≤ +25 %), ~2 KB of code. Limit: a blob is assembled in memory
   (`maxBytes`, default 64 MiB).
+
+## Relay, client page and demo on one port (milestone 15)
+
+```sh
+node web/build.mjs && npx qu-lite-mirror --port 8787 --static ./web     # Docker: always
+```
+
+| Path | |
+|---|---|
+| `/` | start page (`web/index.html` + `web/client.js`): connection check from this browser (WebSocket or SSE, relay id, a store test), how an app connects |
+| `/demo.html` | the demo |
+| `/dist/qu-lite.js` | the browser-safe library as one ES module - `import { createPeer } from 'https://relay.example/dist/qu-lite.js'` |
+| `/ws`, `/sse/<session>` | the API: WebSocket, HTTPS + SSE fallback |
+| `/healthz`, `/info` | health check (proxy, container), `{name, version, transports, uptime}` |
+
+- **Made for a TLS reverse proxy** ([docs/DEPLOY.md](docs/DEPLOY.md): Caddy, nginx). WebSocket clients are pinged every
+  25 s, so idle connections survive proxy timeouts and dead ones are closed. SSE streams have their own keep-alive
+  and disable proxy buffering. Static files are sent with `nosniff` and `no-referrer`.
+- **Path prefix**: the pages compute the relay URL from their own location, and `relayTransport({ url })` keeps a
+  path (`https://example.org/qu` → `wss://example.org/qu/ws`). Tested through a prefix-stripping proxy for WebSocket
+  and SSE.
 
 ## Next milestones
 

@@ -5,6 +5,7 @@
  * every `retryWsMs` (a network that blocked it may not block it forever).
  *
  *   qu.use(relayTransport({ url: 'https://relay.example' }))   // -> wss://…/ws, https://…/sse
+ *   qu.use(relayTransport({ url: 'https://example.org/qu' }))   // behind a proxy prefix: wss://…/qu/ws
  *   qu.use(relayTransport({ url, isolate: true }))               // one connection per space
  *
  * `isolate`: every space this peer joins (records.join) gets its own
@@ -34,11 +35,12 @@ export function relayTransport({ url, wsPath = '/ws', ssePath = '/sse', wsAttemp
     /** @type {Map<string, ReturnType<typeof channel>>} sid -> its own connection */
     const isolated = new Map();
 
-    const endpoints = (origin) => {
-      const u = new URL(origin);
+    /** Endpoints under the url's path, so a relay behind a reverse-proxy prefix works as well. */
+    const endpoints = (url) => {
+      const u = new URL(url);
       const secure = u.protocol === 'https:' || u.protocol === 'wss:';
-      const host = u.host;
-      return { ws: `${secure ? 'wss' : 'ws'}://${host}${wsPath}`, sse: `${secure ? 'https' : 'http'}://${host}${ssePath}` };
+      const base = `${u.host}${u.pathname.replace(/\/+$/, '')}`;
+      return { ws: `${secure ? 'wss' : 'ws'}://${base}${wsPath}`, sse: `${secure ? 'https' : 'http'}://${base}${ssePath}` };
     };
 
     /** One connection with its own WebSocket -> SSE fallback. */

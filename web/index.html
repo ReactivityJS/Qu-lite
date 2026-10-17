@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qu Lite Relay</title>
+  <style>
+    :root { --bg: #f6f7f9; --card: #fff; --ink: #1d2330; --muted: #677085; --line: #dfe3ea; --accent: #2f6fde; --ok: #1f8a4c; --bad: #c0392b; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #14171d; --card: #1c2029; --ink: #e6e9ef; --muted: #98a0b3; --line: #2c3240; --accent: #6b9cff; --ok: #4cc27f; --bad: #ff6b5b; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+    main { max-width: 760px; margin: 0 auto; padding: 16px; display: grid; gap: 12px; }
+    h1 { font-size: 20px; margin: 8px 0 0; }
+    section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+    h2 { font-size: 14px; margin: 0 0 8px; }
+    dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+    dt { color: var(--muted); } dd { margin: 0; min-width: 0; }
+    code, pre { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+    pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; white-space: pre; word-break: normal; margin: 8px 0 0; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+    button, select { font: inherit; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+    .pill { padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid var(--line); }
+    .pill.on { color: var(--ok); border-color: var(--ok); } .pill.off { color: var(--bad); border-color: var(--bad); }
+    .muted { color: var(--muted); font-size: 12px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Qu Lite Relay</h1>
+    <p class="muted">Dieses Relay speichert und verteilt nur versiegelte, signierte Umschläge: es prüft Signaturen, liest aber nie
+      Inhalte - Schlüssel haben nur die Mitglieder eines Space.</p>
+
+    <section>
+      <h2>Verbindung von diesem Browser</h2>
+      <dl>
+        <dt>Status</dt><dd><span id="conn" class="pill off">getrennt</span> <span class="muted">über <b id="via">–</b></span></dd>
+        <dt>Relay-URL</dt><dd><code id="base"></code></dd>
+        <dt>Endpunkte</dt><dd><code id="endpoints"></code></dd>
+        <dt>Relay-Netz-ID</dt><dd><code id="relay">–</code></dd>
+        <dt>Server</dt><dd><code id="info">–</code></dd>
+        <dt>Speichertest</dt><dd id="store" class="muted">noch nicht ausgeführt</dd>
+      </dl>
+      <div class="row">
+        <select id="transport" title="WebSocket zuerst, sonst HTTPS + SSE">
+          <option value="auto">automatisch (WebSocket, sonst SSE)</option><option value="sse">nur HTTPS + SSE</option></select>
+        <button id="reconnect">Neu verbinden</button>
+        <button id="storeTest" class="primary" title="Schreibt einen Test-Datensatz in einen neuen, leeren Space und wartet, bis das Relay ihn gespeichert hat">Speichertest</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Aus einer App verbinden</h2>
+      <p class="muted">Die Bibliothek liegt als ein ES-Modul auf diesem Relay. WebSocket (<code>/ws</code>) und HTTPS + SSE
+        (<code>/sse</code>) laufen auf demselben Port wie diese Seite - hinter einem Reverse Proxy also über dieselbe
+        https-Adresse.</p>
+      <pre id="snippet"></pre>
+    </section>
+
+    <section>
+      <h2>Ausprobieren</h2>
+      <p>Die <a id="demo" href="./demo.html?name=alice">Demo</a> zeigt Gruppen, Einladungen, Status, Offline-Betrieb und eine
+        gemeinsame Notiz. Zweites Profil in einem anderen Browser oder Fenster:
+        <a id="demo2" href="./demo.html?name=bob">?name=bob</a>.</p>
+      <p class="muted">Health-Check für Proxy/Container: <a href="./healthz">healthz</a> · Server-Info: <a href="./info">info</a></p>
+    </section>
+  </main>
+  <script type="module" src="./client.js"></script>
+</body>
+</html>

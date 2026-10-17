@@ -14,8 +14,15 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
 - Attachments: `blobs()` plugin - chunked, encrypted, content-addressed blobs as ordinary records, fetched on demand,
   upload/download progress (`qu.blob.progress`, `qu.blob.done`), uploads tracked across reloads, screen wake lock and
   unload warning while transfers run. Example `examples/08-blobs.mjs`.
+- One port for everything: the relay serves a client start page (`/`, connection check and connect snippet), the demo
+  (`/demo.html`), the library as one browser module (`/dist/qu-lite.js`), `/healthz` and `/info` next to `/ws` and
+  `/sse`. WebSocket heartbeat (`pingMs`, 25 s) for reverse proxies; `relayTransport` keeps a URL path prefix.
+  Deployment guide with Caddy and nginx: `docs/DEPLOY.md`.
 
 ### Changed
+
+- The web files moved from `demo/` to `web/` (`index.html` = start page, `demo.html` = demo); `npm run build:web`
+  replaces `npm run demo:build`. The Docker healthcheck uses `/healthz`.
 
 - Text CRDT keeps chars as runs (split where an edit lands, extended while typing): 100k typed chars in ~10 ms
   instead of ~12 s, snapshot load instantly instead of ~1.7 s. Ops and snapshot format are unchanged.
@@ -23,6 +30,7 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
 ### Fixed
 
 - `doc.set()` and the end anchor now count code points like every other text position (emoji were split).
+- Demo: the shared note was bound to the private-note input (two elements with `id="note"`).
 
 ## [0.1.0] - 2026-10-17
 
