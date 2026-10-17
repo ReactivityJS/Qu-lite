@@ -147,11 +147,11 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     assert.equal((await bob.textContent('#chat')).includes('nach dem Entfernen'), false);
 
     step('event log, relay contents, no page errors');
-    const log = await alice.textContent('#log');
-    assert.ok(log.includes('net.peer.up'));
-    assert.ok(log.includes('sync.done'));
-    assert.ok(log.includes('qu.members.epoch'));
-    assert.ok(log.includes('qu.signal.'));
+    // The log shows only its newest 300 lines, so look each topic up through the log's own filter.
+    for (const topic of ['net.peer.up', 'sync.done', 'qu.members.epoch', 'qu.signal.']) {
+      await alice.fill('#filter', topic);
+      assert.ok((await alice.textContent('#log')).includes(topic), `event log shows ${topic}`);
+    }
     for (const key of await relay.qu.storage.keys('rec/')) {
       assert.equal(Buffer.from(await relay.qu.storage.get(key)).includes('Hallo Bob'), false);
     }
