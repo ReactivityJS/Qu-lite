@@ -24,7 +24,9 @@
   "files": [
     "src/",
     "bin/",
+    "examples/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "docs/"
   ],

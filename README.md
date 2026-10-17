@@ -10,10 +10,15 @@ delivered, read), deletion and compaction, a hardened mirror (quotas, rate limit
 connection per space) and - optional - collaborative text. Started as `packages/lite` in [QuV5](https://github.com/ReactivityJS/QuV5); it
 shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).
 
+**Documentation:** [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
+WebSocket, groups, status, deleting, collaborative text - each one runs with `node examples/<file>`) ·
+[changelog](CHANGELOG.md).
+
 ```sh
 npm install
 npm test                # all tests, including two Playwright browser tests (skipped without Chromium)
 npm run test:unit       # without the browser tests
+node examples/02-sync.mjs   # any example from examples/
 npm run demo            # build the demo and serve it with a local mirror on :8787
 npm run mirror -- --port 8787 --db ./mirror.sqlite
 docker compose up --build
@@ -77,7 +82,7 @@ import { createQu, records, sync, Space, connectWs, indexedDbDriver } from '@qu/
 const qu = await createQu({ root: indexedDbDriver() });       // browser; Node: sqliteDriver from '@qu/lite/sqlite'
 qu.use(records());
 qu.use(sync({ ackFrom: 'mirror' }));                           // outbox clears only once a mirror stored it
-const space = qu.join(await Space.open(secret));
+const space = qu.join(await Space.open(invite));                // invite = {secret, owner}, see space.invite
 connectWs(qu, 'ws://localhost:8787');                          // reconnects with backoff, and on `online`
 ```
 

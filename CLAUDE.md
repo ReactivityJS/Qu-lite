@@ -38,6 +38,8 @@ timing-based (presence, reconnects) and a single green run can hide flakiness.
 - Wait with `until(check, ms, label)` instead of fixed sleeps.
 - New behaviour gets a test in the matching file (or a new `*.test.js`); privacy-relevant
   changes also in `test/privacy.test.js`.
+- Public API changes also update `docs/API.md` and, where it helps, an example in
+  `examples/` (run by `test/examples.test.js`); note user-visible changes in `CHANGELOG.md`.
 
 ## Commits
 
