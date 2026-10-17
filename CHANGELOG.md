@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
 
 ## [Unreleased]
 
+### Added
+
+- Stale-device check: a device whose last complete sync of a space is older than the 90-day drop-list horizon no
+  longer pushes old records the network lacks (they may have been deleted meanwhile) - it retires them locally.
+  `qu.staleSpaces()`, `qu.lastSync()`, event `sync.stale`, option `sync({ stale: 'retire' | 'push' })`,
+  `qu.envelopes.retire()`.
+
 ## [0.1.0] - 2026-10-17
 
 First release as a standalone repository (previously `packages/lite` in

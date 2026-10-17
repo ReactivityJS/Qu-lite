@@ -283,8 +283,8 @@ qu.forget(space);                           // local only: drop everything store
 - **Auto-compaction**: your own superseded versions (profile fields, `_receipts` cursors, settings) are collected
   and dropped in one drop list after `delayMs` (60 s). `qu.compact.candidate` can veto; `_keys`/`_grants` are kept.
 - **Horizon**: drop lists and their gone markers expire after `GC_HORIZON_MS` (90 days, a protocol constant cut at
-  day boundaries, so every peer and the mirror expire the same set). Limit: a device offline for longer can bring
-  dropped entries back.
+  day boundaries, so every peer and the mirror expire the same set). A device offline for longer is handled by the
+  stale-device check (below).
 - Events: `qu.record.deleted`, `qu.envelope.dropped`, `qu.compact.done`, `qu.gc.expired`.
 
 ## Mirror hardening and metadata (milestone 11)
@@ -345,6 +345,26 @@ await doc.compact();
 - Limits: the whole state lives in memory (fine for notes up to ~100k chars; positions are linear scans); a
   member can still vandalise a shared text (delete it, or collide future char ids of another site) - the same
   trust as in any group space. The demo has a shared note per group (caret kept across remote edits).
+
+## Devices offline longer than 90 days (milestone 13)
+
+```js
+await qu.staleSpaces();          // [{sid, last}] - spaces whose last complete sync is older than the horizon
+await qu.lastSync(space.id);     // start of the last complete reconcile (ms) or null
+qu.bus.on('sync.stale', ({ sid, since, retired }) => warnUser(sid, since, retired));
+sync({ stale: 'retire' })        // default; 'push' = old behaviour (e.g. to refill a mirror that lost its data)
+```
+
+- **The problem**: drop lists expire after 90 days. A device that was away longer still holds records the others
+  deleted meanwhile, and nobody remembers the deletion - a plain reconcile would push them back everywhere.
+- **Last complete sync** (`sync/last/<sid>[/<shard>]`): every complete reconcile of a whole space or shard records its
+  start time. A scope whose last one is older than the horizon (minus a day of margin) is *stale*.
+- **What a stale device pushes**: its outbox (own unsent writes, however old) and every record younger than the
+  horizon - a peer lacking those really lost them, a deletion would have left a gone marker. A record *older* than the
+  horizon that the peer lacks is ambiguous: it is retired locally (`envelopes.retire`, one write set with the reader's
+  indexes, `qu.record.deleted {stale: true}`) instead of pushed - also when another peer asks for it (`want`).
+- After that reconcile the device is current again. A mirror never retires; a device that never synced a space is not
+  stale (nothing old to doubt).
 
 ## Next milestones
 

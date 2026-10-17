@@ -35,6 +35,12 @@
  *            grants are verified (space.js `verifyGrants`) into the keyring
  *            and reported as `qu.grant.accepted`; `qu.grant.offer` can veto.
  *
+ *   retire:  `retire(sid, ids)` removes envelopes from THIS peer only - no drop
+ *            list, nothing is sent (sync.js: a device back after the drop-list
+ *            horizon must not resurrect what the network dropped meanwhile).
+ *            Readers remove their indexes via `qu.envelope.retire` in the same
+ *            write set; `qu.envelope.retired` reports it.
+ *
  * Storage: rec/<sid>/<id> (sealed bytes), sx/<sid>/<shard>/<ts>-<id> (sync
  * index; value 1 = held, 0 = dropped - still counted by reconcile),
  * gone/<sid>/<id> {gc, author, sx} (dropped by drop list `gc`),
@@ -193,6 +199,24 @@ export function envelopes({ acceptGrants = false } = {}) {
     }
 
     const isGone = (sid, id) => storage.has(goneKey(sid, id));
+
+    /**
+     * Removes envelopes from this peer only (no drop list, nothing sent), in
+     * one write set together with the readers' indexes (`qu.envelope.retire`).
+     * @param {string} sid
+     * @param {string[]} ids
+     * @returns {Promise<number>} envelopes removed
+     */
+    async function retire(sid, ids) {
+      if (!ids.length) return 0;
+      const ws = writeSet(storage);
+      for (const id of ids) await remove(sid, id, ws);
+      await bus.emit('qu.envelope.retire', { sid, ids, ws });
+      await exclusive(sid, () => ws.flush());
+      await ws.settle();
+      await bus.notify('qu.envelope.retired', { sid, ids });
+      return ids.length;
+    }
 
     /**
      * Expires drop lists older than the horizon (gc.js) together with their
@@ -369,7 +393,7 @@ export function envelopes({ acceptGrants = false } = {}) {
       await announce(space.id, mirror ? undefined : []);
     }
 
-    const api = { ingest, remove, exclusive, bytesFor, isGone, expire, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
+    const api = { ingest, remove, retire, exclusive, bytesFor, isGone, expire, register, announce, keyring: ring, acceptGrants, forwardSynced: false, roles };
     qu.envelopes = api;
     qu.keyring = ring;
     return api;

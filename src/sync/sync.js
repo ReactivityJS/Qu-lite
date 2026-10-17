@@ -50,10 +50,30 @@
  *
  * Everything is content-addressed and idempotent, so re-sending after an
  * interruption can only produce duplicates, which receivers drop.
+ *
+ * STALE DEVICES - drop lists and their gone markers expire after the
+ * horizon (gc.js, 90 days). A device that was away longer still holds
+ * records the others dropped meanwhile; pushing them in a reconcile would
+ * bring them back everywhere. So every complete reconcile is remembered:
+ *
+ *   sync/last/<sid>[/<shard>]      start time of the last complete reconcile
+ *                                  of that (whole-space or shard) scope
+ *
+ * A scope whose last complete reconcile is older than the horizon (minus a
+ * day of margin) is STALE. Its reconcile still pushes the outbox (own
+ * unsent writes) and every record younger than the horizon - a peer lacking
+ * those really lost them, since a deletion would have left a gone marker -
+ * but a record OLDER than the horizon that the peer lacks is ambiguous and
+ * is retired locally (envelopes.js `retire`) instead of pushed: `sync.stale`
+ * reports it, `qu.record.deleted {stale: true}` tells the app. The same
+ * applies when another peer asks a stale device for such records (`want`).
+ * `stale: 'push'` restores the old behaviour (e.g. to repair a mirror that
+ * lost its data); a mirror never retires.
  */
 import * as crypto from '../crypto.js';
 import { Negentropy, NegentropyStorageVector } from './negentropy.js';
 import { peekEnvelope } from '../envelope.js';
+import { gcCutoff } from '../gc.js';
 
 /**
  * Ingest outcomes after which a record counts as delivered (acked, and a
@@ -63,6 +83,7 @@ import { peekEnvelope } from '../envelope.js';
 const SETTLED = new Set(['stored', 'duplicate', 'superseded', 'deferred', 'blind', 'gone', 'control']);
 
 const MINUTE = 60_000;
+const DAY = 24 * 60 * MINUTE;
 const pad = (ms) => String(ms).padStart(13, '0');
 const floorMinute = (ms) => Math.floor(ms / MINUTE) * MINUTE;
 const randomId = () => crypto.toHex(globalThis.crypto.getRandomValues(new Uint8Array(8)));
@@ -74,12 +95,14 @@ const later = (fn, ms) => {
 };
 
 /**
- * @param {{releaseMs?: number, timeoutMs?: number, sessionTtlMs?: number, retryMs?: number, frameSizeLimit?: number, role?: 'peer'|'mirror', ackFrom?: 'any'|'mirror', maxSessionsPerPeer?: number}} [options]
+ * @param {{releaseMs?: number, timeoutMs?: number, sessionTtlMs?: number, retryMs?: number, frameSizeLimit?: number, role?: 'peer'|'mirror', ackFrom?: 'any'|'mirror', maxSessionsPerPeer?: number, stale?: 'retire'|'push'}} [options]
  *   `releaseMs`: how long an unwatched scope stays subscribed (warm release).
  *   `timeoutMs`: how long a reconcile waits for wanted records to arrive.
  *   `retryMs`: how often pending reconciles are retried while connected.
  *   `role`: announced to peers; `ackFrom: 'mirror'` keeps outbox entries
  *   until a MIRROR has stored them (a plain peer's ack is not enough).
+ *   `stale`: what a stale scope does with old records the peer lacks
+ *   (see STALE DEVICES above) - 'retire' (default) or 'push'.
  */
 export function sync({
   releaseMs = 30_000,
@@ -90,6 +113,7 @@ export function sync({
   role = 'peer',
   ackFrom = 'any',
   maxSessionsPerPeer = 8,
+  stale = 'retire',
 } = {}) {
   return (qu) => {
     const { bus, storage } = qu;
@@ -128,6 +152,43 @@ export function sync({
     const pendingKey = (peer, { sid, shard, from, to }) => `sync/pending/${peer}/${encodeURIComponent(JSON.stringify([sid, shard, from, to]))}`;
 
     const scopeKey = (scope) => (scope.shard ? `${scope.sid}/${scope.shard}` : scope.sid);
+
+    // --- stale devices (see header) -------------------------------------------
+    /** @returns {Promise<number|null>} start of the last complete reconcile covering (sid[, shard]) */
+    async function lastSync(sid, shard) {
+      const times = [await storage.get(`sync/last/${sid}`), shard ? await storage.get(`sync/last/${sid}/${shard}`) : undefined];
+      const known = times.filter((t) => typeof t === 'number');
+      return known.length ? Math.max(...known) : null;
+    }
+    /** Unknown (never reconciled) is not stale: there is nothing old to doubt. */
+    async function isStale(sid, shard) {
+      if (role === 'mirror' || stale !== 'retire') return false;
+      const last = await lastSync(sid, shard);
+      return last !== null && last < gcCutoff(qu.clock.now()) + DAY;
+    }
+    /**
+     * Splits ids a peer lacks: what may still be pushed, and what is older
+     * than the horizon, not an own unsent write and in a stale shard
+     * (-> retire locally).
+     * @param {(shard: string) => Promise<boolean>} [staleShard] - default: the whole scope is stale
+     * @returns {Promise<{push: string[], retire: string[]}>}
+     */
+    async function sortStale(sid, ids, staleShard = async () => true) {
+      const cutoff = gcCutoff(qu.clock.now());
+      const out = { push: [], retire: [] };
+      for (const id of ids) {
+        const bytes = await storage.get(`rec/${sid}/${id}`);
+        const header = bytes && peekEnvelope(bytes);
+        const old = header && header.ts < cutoff && !(await storage.has(`sync/out/${sid}/${id}`)) && (await staleShard(header.shard));
+        out[old ? 'retire' : 'push'].push(id);
+      }
+      return out;
+    }
+    async function retireStale(peer, scope, ids, since) {
+      if (!ids.length) return;
+      await qu.envelopes?.retire(scope.sid, ids);
+      await bus.notify('sync.stale', { peer, sid: scope.sid, shard: scope.shard ?? null, since, retired: ids.length });
+    }
 
     /**
      * @param {{space: import('../space.js').Space|{sid: string, shard?: string}, path?: string, from?: number, to?: number}} input
@@ -198,11 +259,15 @@ export function sync({
         sent: state.have.length,
         received: state.received,
         missing: [...state.missing, ...state.waiting],
+        ...(state.retired ? { retired: state.retired } : {}),
         ...(error ? { error: error.message } : {}),
       };
       active.delete(state.pending);
       const complete = !error && summary.missing.length === 0;
-      Promise.resolve(complete ? storage.remove(state.pending) : undefined).then(() => {
+      // a complete reconcile of a whole space or shard (not a time window) proves this device current
+      const windowed = state.scope.from != null || state.scope.to != null;
+      const current = complete && !windowed && role !== 'mirror' ? storage.set(`sync/last/${scopeKey(state.scope)}`, state.startedAt) : undefined;
+      Promise.all([complete ? storage.remove(state.pending) : undefined, current]).then(() => {
         bus.notify(error ? 'sync.error' : 'sync.done', summary);
         state.resolve(summary);
       });
@@ -216,12 +281,14 @@ export function sync({
       const pending = pendingKey(peer, scope);
       await storage.set(pending, scope);
       active.add(pending);
+      const startedAt = qu.clock.now();
+      const stale = (await isStale(scope.sid, scope.shard)) ? await lastSync(scope.sid, scope.shard) : null;
       const ne = new Negentropy(await loadItems(scope), frameSizeLimit);
       ne.wantUint8ArrayOutput = true;
       const msg = await ne.initiate();
       const session = randomId();
       return new Promise((resolve) => {
-        const state = { session, peer, scope, pending, ne, have: [], need: [], waiting: new Set(), received: 0, missing: [], resolve, closed: false };
+        const state = { session, peer, scope, pending, ne, have: [], need: [], waiting: new Set(), received: 0, missing: [], retired: 0, startedAt, stale, resolve, closed: false };
         state.timer = later(() => finish(state, new Error('timeout')), timeoutMs);
         initiating.set(session, state);
         // The link may have dropped while the item set was being loaded.
@@ -470,10 +537,16 @@ export function sync({
       const peer = ctx.topic.split('.')[2];
       const missing = [];
       const sent = new Set();
-      for (let i = 0; i < ids.length; i += 32) {
-        const id = crypto.toHex(ids.subarray(i, i + 32));
-        if (!(await sendOrDropList(peer, sid, id, sent))) missing.push(id);
+      let wanted = [];
+      for (let i = 0; i < ids.length; i += 32) wanted.push(crypto.toHex(ids.subarray(i, i + 32)));
+      // a stale device does not hand out old records the asking peer lacks (see header)
+      if (role !== 'mirror' && stale === 'retire') {
+        const { push, retire } = await sortStale(sid, wanted, (shard) => isStale(sid, shard));
+        wanted = push;
+        missing.push(...retire);
+        await retireStale(peer, { sid }, retire, await lastSync(sid));
       }
+      for (const id of wanted) if (!(await sendOrDropList(peer, sid, id, sent))) missing.push(id);
       if (missing.length) await send(peer, 'wantmiss', { session, ids: missing });
     });
 
@@ -492,6 +565,13 @@ export function sync({
       if (next !== null) return send(state.peer, 'neg', { session, msg: next });
 
       await send(state.peer, 'negend', { session });
+      // A stale scope keeps old records the peer lacks to itself (see header).
+      if (state.stale !== null) {
+        const { push, retire } = await sortStale(state.scope.sid, state.have);
+        state.have = push;
+        state.retired = retire.length;
+        await retireStale(state.peer, state.scope, retire, state.stale);
+      }
       // Push what the peer lacks - but only what it subscribed to: a mirror
       // reconciling a whole space must not fill a partially-syncing peer.
       // A dropped id the peer still lacks gets the drop list instead.
@@ -545,8 +625,23 @@ export function sync({
      */
     const syncState = async (sid, id) => ((await storage.has(`sync/out/${sid}/${id}`)) ? 'pending' : 'sent');
 
-    const api = { watch, resync, reconcileWith, status, syncState };
-    Object.assign(qu, { watch, resync, syncStatus: status, syncState });
+    /**
+     * Joined/known spaces whose last complete reconcile is older than the
+     * horizon - e.g. to tell the user at start-up before anything syncs.
+     * @returns {Promise<Array<{sid: string, last: number}>>}
+     */
+    async function staleSpaces() {
+      const out = [];
+      for (const key of await storage.keys('sync/last/')) {
+        const [, , sid, shard] = key.split('/');
+        if (shard || !(await isStale(sid))) continue;
+        out.push({ sid, last: await lastSync(sid) });
+      }
+      return out;
+    }
+
+    const api = { watch, resync, reconcileWith, status, syncState, lastSync, staleSpaces };
+    Object.assign(qu, { watch, resync, syncStatus: status, syncState, lastSync, staleSpaces });
     return api;
   };
 }

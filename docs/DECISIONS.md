@@ -56,11 +56,15 @@ don't undo a deliberate choice by accident.
 | Isolation | opt-in one connection per space (`relayTransport({isolate: true})`) | relay can't link spaces to a device via the protocol |
 | Decoy subscriptions | not built | a relay recognises them at once (no grants, no data) |
 | Text | optional RGA CRDT plugin, per-member mergeable snapshots | collaborative notes in small groups; not part of the core |
+| Stale devices | remember the last complete reconcile per scope; past the horizon, old records the peer lacks are retired locally, not pushed | no resurrection of deleted records without a protocol change or a mirror-side guess |
 
 ## Known limits
 
 - IP address and timing still link connections (use a proxy/Tor in front).
-- A device offline longer than the 90-day drop-list horizon can bring dropped entries back.
+- A device offline longer than the 90-day drop-list horizon retires its records older than the
+  horizon that the network lacks (`sync.stale`) - they may have been deleted. If a mirror lost
+  its data instead, such a device does not refill those old records (`sync({stale: 'push'})`
+  does); devices synced within the horizon still do.
 - Group members are trusted not to vandalise shared data (they can delete or, in a
   text document, pre-empt another site's char ids).
 - Text CRDT keeps the whole document in memory (fine up to ~100k chars).
@@ -72,4 +76,4 @@ don't undo a deliberate choice by accident.
 persistence, WebSocket, mirror · 4 privacy model, one peer base, Docker relay + demo ·
 5 members, epochs, inbox · 6 status · 7 WebRTC · 8 HTTPS+SSE fallback · 9 atomic writes
 · 10 deletion and compaction · 11 mirror hardening and metadata · 12 collaborative text
-(optional).
+(optional) · 13 stale devices (offline past the horizon).

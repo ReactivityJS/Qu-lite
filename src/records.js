@@ -17,7 +17,8 @@
  * Drop lists (gc.js) are applied by the blind layer; here they are checked
  * like any record (`qu.accept`), never indexed (status 'control'), and the
  * indexes of their targets leave in the same write set
- * (-> notify('qu.record.deleted')).
+ * (-> notify('qu.record.deleted')). Envelopes a stale device retires locally
+ * (sync.js) leave their indexes the same way (`deleted` with `stale: true`).
  *
  * Both flows are bus processes:
  *
@@ -238,6 +239,18 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
         });
       }
       if (outcome !== 'indexed') ctx.status = outcome;
+    });
+
+    // Envelopes retired locally (envelopes.js `retire`): their indexes leave in the same write set.
+    bus.on('qu.envelope.retire', ({ sid, ids, ws }) => {
+      if (!spaces.has(sid)) return;
+      const deleted = [];
+      ws.locked(async () => {
+        for (const id of ids) if (await unindex(sid, id, ws)) deleted.push(id);
+      });
+      ws.after(async () => {
+        for (const id of deleted) await bus.notify('qu.record.deleted', { space: sid, id, stale: true });
+      });
     });
 
     /**

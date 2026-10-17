@@ -313,6 +313,7 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `sessionTtlMs` | `60000` | responder session lifetime |
 | `maxSessionsPerPeer` | `8` | concurrent responder sessions per peer |
 | `frameSizeLimit` | `0` | Negentropy frame size limit (0 = none) |
+| `stale` | `'retire'` | a scope not completely synced for longer than the drop-list horizon retires old records the peer lacks instead of pushing them (they may have been deleted meanwhile); `'push'`: push anyway |
 
 | Method | |
 |---|---|
@@ -320,8 +321,15 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `qu.resync({space, path?, from?, to?, peer?}) → result[]` | reconciles now; result: `{peer, sid, shard, sent, received, missing, error?}` |
 | `qu.syncStatus() → {outbox, pending}` | what still waits |
 | `qu.syncState(sid, id) → 'pending' \| 'sent'` | whether a local write left the outbox |
+| `qu.lastSync(sid, shard?) → ms \| null` | start of the last complete reconcile of the space (or shard) |
+| `qu.staleSpaces() → [{sid, last}]` | spaces this device has not completely synced within the horizon - check at start-up to warn the user |
 
 `members()`, `user()` and `inbox()` call `watch()` for their spaces themselves.
+
+**Devices offline longer than 90 days**: a stale scope still pushes its outbox and every record
+younger than the horizon. Older records the peer lacks are removed locally: `sync.stale {peer, sid,
+shard, since, retired}`, then `qu.record.deleted {space, id, stale: true}` for each one. After that
+reconcile the device is current again.
 
 Example: [02-sync.mjs](../examples/02-sync.mjs).
 
@@ -523,7 +531,7 @@ restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
 |---|---|---|
 | `qu.record.<sid>` | record | a record is stored and indexed (local or remote) |
 | `qu.record.superseded` | `{space, id, author}` | a keyed version was replaced |
-| `qu.record.deleted` | `{space, id, gc}` | removed by a drop list |
+| `qu.record.deleted` | `{space, id, gc}` or `{space, id, stale: true}` | removed by a drop list, or retired by a stale device |
 | `qu.record.deferred` | `{space, id}` | waiting for membership or key data |
 | `qu.record.rejected` | `{from, space?, id?, reason}` | refused (signature, rules, …) |
 | `qu.record.failed` | `{from, space, id, reason}` | storage commit failed |
@@ -536,6 +544,8 @@ restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
 | `qu.status.presence` / `typing` / `receipts` | see [status](#status) | |
 | `qu.compact.done`, `qu.envelope.dropped`, `qu.gc.expired`, `qu.scrub.done` | | maintenance |
 | `sync.start`, `sync.done`, `sync.error`, `sync.busy` | `{peer, sid, …}` | reconcile sessions |
+| `sync.stale` | `{peer, sid, shard, since, retired}` | a stale device retired old records instead of pushing them |
+| `qu.envelope.retired` | `{sid, ids}` | envelopes removed locally (blind layer) |
 | `net.peer.up` / `net.peer.down` | `{peer, via}` | |
 | `net.limited` | `{peer, type, size, closed}` | rate limit hit |
 | `mirror.grant` / `mirror.quota` | `{sid, …}` | |
@@ -556,7 +566,8 @@ These are exported for tools, tests and custom plugins. Apps rarely need them.
   `openEnvelope(space, bytes, {verify?})`, `peekEnvelope(bytes)` (public header),
   `verifyEnvelope(bytes, writePub)`, `envelopeId(bytes)`, `readPublic(bytes)`,
   `paddedLength(n, mode)`.
-- **Blind layer**: `envelopes({acceptGrants?})` (installed by `records()`/`mirror()`), `sxKey(header, id)`.
+- **Blind layer**: `envelopes({acceptGrants?})` (installed by `records()`/`mirror()`), `sxKey(header, id)`;
+  `qu.envelopes.retire(sid, ids)` removes envelopes locally (no drop list), with the readers' indexes.
 - **Grants**: `verifyGrants(sid, grants, state)`, `grantMessage`, `emptyGrantState`, `sidOf`,
   `userSidOf`, `inboxSidOf`, `encodeGrant`, `decodeGrant`.
 - **Crypto** (`import { crypto } from '@qu/lite'`, WebCrypto only): `generateIdentity()`,

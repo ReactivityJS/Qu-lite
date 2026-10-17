@@ -20,7 +20,9 @@
  *
  * Drop lists and their markers expire after `GC_HORIZON_MS` - a protocol
  * constant, the same everywhere, cut at day boundaries so every peer drops
- * the same set. A device offline for longer may bring dropped entries back.
+ * the same set. A device offline for longer would bring dropped entries
+ * back - sync.js recognises such a STALE device and retires its old records
+ * locally instead of pushing them.
  */
 import * as crypto from './crypto.js';
 import { inboxSidOf } from './space.js';
