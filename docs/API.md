@@ -459,8 +459,9 @@ const caret = doc.anchor(i); doc.indexOf(caret);   // positions that survive rem
 await doc.flush(); await doc.compact(); doc.stats(); await doc.close();
 ```
 
-`TextCrdt` is exported for use without records. The whole document lives in memory, which is
-fine up to about 100k characters. Example: [07-text.mjs](../examples/07-text.mjs).
+`TextCrdt` is exported for use without records. Positions count Unicode code points. The
+document lives in memory as runs (one node per stretch typed in one go), so cost grows with the
+number of edits, not of characters. Example: [07-text.mjs](../examples/07-text.mjs).
 
 ## mirror
 

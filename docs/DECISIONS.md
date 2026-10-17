@@ -55,7 +55,7 @@ don't undo a deliberate choice by accident.
 | Padding | private inners padded to quarter steps (min 128 B, ≤ +25 %) | content size only roughly visible; owner chose the volume-friendly default |
 | Isolation | opt-in one connection per space (`relayTransport({isolate: true})`) | relay can't link spaces to a device via the protocol |
 | Decoy subscriptions | not built | a relay recognises them at once (no grants, no data) |
-| Text | optional RGA CRDT plugin, per-member mergeable snapshots | collaborative notes in small groups; not part of the core |
+| Text | optional RGA CRDT plugin, per-member mergeable snapshots; chars kept as runs (split/extended), same per-char RGA order and wire format | collaborative notes in small groups; not part of the core; lean without a tree or a second format |
 | Stale devices | remember the last complete reconcile per scope; past the horizon, old records the peer lacks are retired locally, not pushed | no resurrection of deleted records without a protocol change or a mirror-side guess |
 
 ## Known limits
@@ -67,7 +67,9 @@ don't undo a deliberate choice by accident.
   does); devices synced within the horizon still do.
 - Group members are trusted not to vandalise shared data (they can delete or, in a
   text document, pre-empt another site's char ids).
-- Text CRDT keeps the whole document in memory (fine up to ~100k chars).
+- Text CRDT keeps the whole document in memory as runs: cost grows with the number of edits,
+  not of chars; heavily fragmented documents (many scattered single-char edits) grow
+  accordingly until compacted.
 - Size per mirror envelope defaults to 256 KiB (`maxEnvelopeBytes`).
 
 ## Milestones (all done)

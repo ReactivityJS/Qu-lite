@@ -342,8 +342,12 @@ await doc.compact();
   author's full state as runs - with tombstone ids but without deleted text. Snapshots are op unions, so they
   merge: each member snapshots its own state and drops its own batches (drop lists, M10). Nothing is lost,
   whoever compacts when; superseded own snapshots are compacted by `compaction()`.
-- Limits: the whole state lives in memory (fine for notes up to ~100k chars; positions are linear scans); a
-  member can still vandalise a shared text (delete it, or collide future char ids of another site) - the same
+- **Runs, not chars**: in memory a document is a list of runs - one node per stretch a site typed in one go - that are
+  split only where an edit lands inside and extended when their author keeps typing. Memory and every scan grow with
+  the number of edits, not of chars: 100k typed chars are a handful of nodes, typing and loading a snapshot take
+  milliseconds (the per-char version: ~12 s and ~1.7 s). Same ops and snapshot format; a fuzz test checks it against
+  the per-char reference. Positions count code points (an emoji is one char).
+- Limits: the whole state lives in memory; a member can still vandalise a shared text (delete it, or collide future char ids of another site) - the same
   trust as in any group space. The demo has a shared note per group (caret kept across remote edits).
 
 ## Devices offline longer than 90 days (milestone 13)

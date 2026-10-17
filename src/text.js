@@ -19,12 +19,16 @@
  *                    but without deleted text (applying ops twice is harmless:
  *                    ids are deduplicated, deletes idempotent)
  *
+ * Positions (insert/delete indexes, anchors) count Unicode code points.
+ *
  * A char id is (counter, site); site = the author's alias prefix + a random
  * per-session suffix (one identity on two devices must not collide), and
  * every op of a batch must carry its author's site - forgeries are ignored.
  * Insertion follows RGA: after its reference char, skipping every char with
  * a greater id. Applying ops in counter order (refs always have smaller
- * counters) gives the same result on every peer.
+ * counters) gives the same result on every peer. In memory, chars live in
+ * runs (see TextCrdt), so a long note costs as much as its edit history,
+ * not one object per char.
  *
  * Compaction: snapshots are unions of ops (each char keeps its reference),
  * so any set of them merges. Each member snapshots its OWN state and then
@@ -36,63 +40,180 @@ const SNAP = '_snap';
 const idKey = (c, s) => `${c}@${s}`;
 /** RGA order: higher counter first, then site. @returns {boolean} a sorts after b's position (a > b) */
 const greater = (a, b) => a.c > b.c || (a.c === b.c && a.s > b.s);
+/** Code-point length and slicing (positions count code points, so an emoji is one char). */
+const cpLength = (str) => {
+  let n = 0;
+  for (let i = 0; i < str.length; i++) if ((str.charCodeAt(i) & 0xfc00) !== 0xdc00) n++;
+  return n;
+};
+const cpSlice = (str, from, to) => (str.length === cpLength(str) ? str.slice(from, to) : [...str].slice(from, to).join(''));
 
 /**
  * The CRDT itself, independent of storage - exported for tests and tools.
+ *
+ * Chars are kept as RUNS (like Yjs items): one node per stretch of chars of
+ * one site with consecutive counters, each char referencing the one before
+ * - which is what typing produces. A node is split only where an edit lands
+ * inside it, and extended in place when its author keeps typing at its end,
+ * so memory and every scan grow with the number of edits, not of chars.
+ * The order is exactly the per-char RGA order: a node's later chars have
+ * greater ids than its first, so "skip every greater id" skips whole nodes.
+ * Deleted nodes keep their ids (tombstones) but drop their text.
+ *
+ *   node: {c, s, len, text (null when deleted), rc, rs}   (rc, rs) = reference of its first char
  */
 export class TextCrdt {
-  /** @type {Array<{c: number, s: string, ch: string, del: boolean, rc: number|null, rs: string|null}>} */
-  chars = [];
-  #byId = new Map();
-  #pending = []; // inserts whose reference is not known yet
-  #pendingDeletes = new Set();
+  /** @type {Array<{c: number, s: string, len: number, text: string|null, rc: number|null, rs: string|null}>} document order */
+  nodes = [];
+  /** @type {Map<string, Array<object>>} site -> its nodes, sorted by counter */
+  #bySite = new Map();
+  #pending = []; // runs whose reference is not known yet
+  #pendingDeletes = []; // [c, s, n] of chars not known yet
+  #cache = '';
+  #dirty = false;
   clock = 0;
-
-  get size() {
-    return this.chars.length;
-  }
+  /** chars including tombstones */
+  size = 0;
 
   /** @returns {string} */
   value() {
-    let out = '';
-    for (const el of this.chars) if (!el.del) out += el.ch;
-    return out;
+    if (this.#dirty) {
+      let out = '';
+      for (const node of this.nodes) if (node.text !== null) out += node.text;
+      this.#cache = out;
+      this.#dirty = false;
+    }
+    return this.#cache;
+  }
+
+  /** The node holding char (c, s), or undefined. */
+  #find(c, s) {
+    const list = this.#bySite.get(s);
+    if (!list) return undefined;
+    let lo = 0;
+    let hi = list.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const node = list[mid];
+      if (c < node.c) hi = mid - 1;
+      else if (c >= node.c + node.len) lo = mid + 1;
+      else return node;
+    }
+    return undefined;
+  }
+
+  /** First node of site `s` with a counter above `c` (to measure gaps), or undefined. */
+  #next(c, s) {
+    const list = this.#bySite.get(s) ?? [];
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid].c <= c) lo = mid + 1;
+      else hi = mid;
+    }
+    return list[lo];
+  }
+
+  #addToSite(node) {
+    if (!this.#bySite.has(node.s)) this.#bySite.set(node.s, []);
+    const list = this.#bySite.get(node.s);
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid].c < node.c) lo = mid + 1;
+      else hi = mid;
+    }
+    list.splice(lo, 0, node);
+  }
+
+  /** Splits `node` before its char at offset k (0 < k < len). @returns {object} the right part */
+  #split(node, k) {
+    const right = { c: node.c + k, s: node.s, len: node.len - k, text: node.text === null ? null : cpSlice(node.text, k), rc: node.c + k - 1, rs: node.s };
+    node.len = k;
+    if (node.text !== null) node.text = cpSlice(node.text, 0, k);
+    this.nodes.splice(this.nodes.indexOf(node) + 1, 0, right);
+    this.#addToSite(right);
+    return right;
   }
 
   /** @returns {boolean} false if its reference is still missing (kept pending) */
-  #integrate(el) {
-    const key = idKey(el.c, el.s);
-    if (this.#byId.has(key)) return true;
-    let i = 0;
-    if (el.rc !== null) {
-      const ref = this.#byId.get(idKey(el.rc, el.rs));
-      if (!ref) return false;
-      i = this.chars.indexOf(ref) + 1;
+  #integrate(run) {
+    let { c, s, len, text, rc, rs } = run;
+    // a run whose prefix is known already (a snapshot overlapping batches): keep only the new tail
+    for (let known = this.#find(c, s); known && len > 0; known = this.#find(c, s)) {
+      const skip = Math.min(known.c + known.len - c, len);
+      text = cpSlice(text, skip);
+      c += skip;
+      len -= skip;
+      rc = c - 1;
+      rs = s;
     }
-    while (i < this.chars.length && greater(this.chars[i], el)) i++;
-    if (this.#pendingDeletes.delete(key)) el.del = true;
-    this.chars.splice(i, 0, el);
-    this.#byId.set(key, el);
-    if (el.c > this.clock) this.clock = el.c;
+    if (len === 0) return true;
+    let i = 0;
+    let ref = null;
+    if (rc !== null) {
+      ref = this.#find(rc, rs);
+      if (!ref) return false;
+      if (rc < ref.c + ref.len - 1) this.#split(ref, rc - ref.c + 1);
+      i = this.nodes.indexOf(ref) + 1;
+    }
+    const el = { c, s };
+    const start = i;
+    while (i < this.nodes.length && greater(this.nodes[i], el)) i++;
+    if (ref && i === start && ref.s === s && rs === s && ref.c + ref.len === c && ref.text !== null) {
+      ref.text += text; // the author kept typing at the end of its own run
+      ref.len += len;
+    } else {
+      const node = { c, s, len, text, rc, rs };
+      this.nodes.splice(i, 0, node);
+      this.#addToSite(node);
+    }
+    this.size += len;
+    if (c + len - 1 > this.clock) this.clock = c + len - 1;
+    this.#dirty = true;
+    if (this.#pendingDeletes.length) {
+      const waiting = this.#pendingDeletes;
+      this.#pendingDeletes = [];
+      for (const [dc, ds, dn] of waiting) this.#delete(dc, ds, dn);
+    }
     return true;
+  }
+
+  /** Marks chars (c..c+n-1, s) deleted; unknown ones are remembered until they arrive. */
+  #delete(c, s, n) {
+    while (n > 0) {
+      let node = this.#find(c, s);
+      if (!node) {
+        const next = this.#next(c, s);
+        const gap = next ? Math.min(n, next.c - c) : n;
+        this.#pendingDeletes.push([c, s, gap]);
+        c += gap;
+        n -= gap;
+        continue;
+      }
+      if (c > node.c) node = this.#split(node, c - node.c);
+      if (n < node.len) this.#split(node, n);
+      if (node.text !== null) {
+        node.text = null;
+        this.#dirty = true;
+      }
+      c += node.len;
+      n -= node.len;
+    }
   }
 
   /** Applies one op (from any site). */
   apply(op) {
     if (op[0] === 'i') {
       const [, c, rc, rs, text, site] = op;
-      [...text].forEach((ch, k) => {
-        const el = { c: c + k, s: site, ch, del: false, rc: k === 0 ? rc : c + k - 1, rs: k === 0 ? rs : site };
-        if (!this.#integrate(el)) this.#pending.push(el);
-      });
-      this.#retry();
+      const run = { c, s: site, len: cpLength(text), text, rc, rs };
+      if (run.len && !this.#integrate(run)) this.#pending.push(run);
+      else this.#retry();
     } else if (op[0] === 'd') {
       const [, c, s, n] = op;
-      for (let k = 0; k < n; k++) {
-        const el = this.#byId.get(idKey(c + k, s));
-        if (el) el.del = true;
-        else this.#pendingDeletes.add(idKey(c + k, s));
-      }
+      this.#delete(c, s, n);
       if (c + n - 1 > this.clock) this.clock = c + n - 1;
     }
   }
@@ -101,21 +222,20 @@ export class TextCrdt {
     let progress = true;
     while (progress && this.#pending.length) {
       progress = false;
-      this.#pending = this.#pending.filter((el) => {
-        const done = this.#integrate(el);
+      this.#pending = this.#pending.filter((run) => {
+        const done = this.#integrate(run);
         if (done) progress = true;
         return !done;
       });
     }
   }
 
-  /** Visible index -> the element there (null past the end). */
+  /** Visible index -> {node, off} (null past the end). */
   #visible(index) {
-    let seen = 0;
-    for (const el of this.chars) {
-      if (el.del) continue;
-      if (seen === index) return el;
-      seen++;
+    for (const node of this.nodes) {
+      if (node.text === null) continue;
+      if (index < node.len) return { node, off: index };
+      index -= node.len;
     }
     return null;
   }
@@ -125,7 +245,7 @@ export class TextCrdt {
     if (!text) return null;
     const left = index > 0 ? this.#visible(index - 1) : null;
     if (index > 0 && !left) throw new RangeError('text: insert position out of range');
-    const op = ['i', this.clock + 1, left?.c ?? null, left?.s ?? null, text, site];
+    const op = ['i', this.clock + 1, left ? left.node.c + left.off : null, left?.node.s ?? null, text, site];
     this.apply(op);
     return op;
   }
@@ -134,33 +254,37 @@ export class TextCrdt {
   delete(index, length) {
     const ops = [];
     let seen = 0;
-    for (const el of this.chars) {
-      if (el.del) continue;
+    for (const node of this.nodes) {
       if (seen >= index + length) break;
-      if (seen >= index) {
-        el.del = true;
-        const last = ops.at(-1);
-        if (last && last[2] === el.s && last[1] + last[3] === el.c) last[3]++;
-        else ops.push(['d', el.c, el.s, 1]);
-      }
-      seen++;
+      if (node.text === null) continue;
+      const from = Math.max(0, index - seen);
+      const to = Math.min(node.len, index + length - seen);
+      seen += node.len;
+      if (from >= to) continue;
+      const last = ops.at(-1);
+      if (last && last[2] === node.s && last[1] + last[3] === node.c + from) last[3] += to - from;
+      else ops.push(['d', node.c + from, node.s, to - from]);
     }
+    for (const [, c, s, n] of ops) this.#delete(c, s, n);
     return ops;
   }
 
   /** A position that survives remote edits: the id of the char at `index` (or the end). */
   anchor(index) {
-    const el = this.#visible(index);
-    return el ? idKey(el.c, el.s) : null;
+    const at = this.#visible(index);
+    return at ? idKey(at.node.c + at.off, at.node.s) : null;
   }
 
   /** @returns {number} the visible index of an anchor (a deleted char: where it was) */
   indexOf(anchor) {
-    if (anchor === null) return this.value().length;
+    if (anchor === null) return cpLength(this.value());
+    const split = anchor.indexOf('@');
+    const c = Number(anchor.slice(0, split));
+    const target = this.#find(c, anchor.slice(split + 1));
     let seen = 0;
-    for (const el of this.chars) {
-      if (idKey(el.c, el.s) === anchor) return seen;
-      if (!el.del) seen++;
+    for (const node of this.nodes) {
+      if (node === target) return seen + (node.text === null ? 0 : c - node.c);
+      if (node.text !== null) seen += node.len;
     }
     return seen;
   }
@@ -168,20 +292,16 @@ export class TextCrdt {
   /** Runs for a snapshot: [c, s, rc, rs, text | deletedLength]. */
   runs() {
     const runs = [];
-    for (const el of this.chars) {
+    let end = null;
+    for (const node of this.nodes) {
       const last = runs.at(-1);
-      const chained = last && last[1] === el.s && el.rc === last.end && el.rs === el.s && el.c === last.end + 1 && (typeof last[4] === 'number') === el.del;
-      if (chained) {
-        if (el.del) last[4]++;
-        else last[4] += el.ch;
-        last.end = el.c;
-      } else {
-        const run = [el.c, el.s, el.rc, el.rs, el.del ? 1 : el.ch];
-        run.end = el.c;
-        runs.push(run);
-      }
+      const deleted = node.text === null;
+      const chained = last && last[1] === node.s && node.rc === end && node.rs === node.s && node.c === end + 1 && (typeof last[4] === 'number') === deleted;
+      if (chained) last[4] = deleted ? last[4] + node.len : last[4] + node.text;
+      else runs.push([node.c, node.s, node.rc, node.rs, deleted ? node.len : node.text]);
+      end = node.c + node.len - 1;
     }
-    return runs.map(([c, s, rc, rs, body]) => [c, s, rc, rs, body]);
+    return runs;
   }
 
   /** Loads runs (a snapshot) - in counter order, like any ops. */
@@ -335,14 +455,15 @@ export function text({ batchMs = 300, snapshotEvery = 200 } = {}) {
           }
         },
         /** Replaces the whole text by `next`, as the smallest single edit (common prefix/suffix kept). */
-        set(next) {
-          const prev = crdt.value();
+        set(text) {
+          const prev = [...crdt.value()]; // positions are code points
+          const next = [...text];
           let start = 0;
           while (start < prev.length && start < next.length && prev[start] === next[start]) start++;
           let end = 0;
           while (end < prev.length - start && end < next.length - start && prev[prev.length - 1 - end] === next[next.length - 1 - end]) end++;
           if (prev.length - start - end > 0) doc.delete(start, prev.length - start - end);
-          if (next.length - start - end > 0) doc.insert(start, next.slice(start, next.length - end));
+          if (next.length - start - end > 0) doc.insert(start, next.slice(start, next.length - end).join(''));
         },
         anchor: (index) => crdt.anchor(index),
         indexOf: (anchor) => crdt.indexOf(anchor),

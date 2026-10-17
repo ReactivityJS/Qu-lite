@@ -12,6 +12,15 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
   `qu.staleSpaces()`, `qu.lastSync()`, event `sync.stale`, option `sync({ stale: 'retire' | 'push' })`,
   `qu.envelopes.retire()`.
 
+### Changed
+
+- Text CRDT keeps chars as runs (split where an edit lands, extended while typing): 100k typed chars in ~10 ms
+  instead of ~12 s, snapshot load instantly instead of ~1.7 s. Ops and snapshot format are unchanged.
+
+### Fixed
+
+- `doc.set()` and the end anchor now count code points like every other text position (emoji were split).
+
 ## [0.1.0] - 2026-10-17
 
 First release as a standalone repository (previously `packages/lite` in

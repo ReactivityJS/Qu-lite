@@ -136,7 +136,13 @@ async function openGroup(target) {
 let note = null;
 let offNote = null;
 let caret = [null, null]; // anchors of the selection: they survive remote edits
-const rememberCaret = () => note && (caret = [note.anchor($('note').selectionStart), note.anchor($('note').selectionEnd)]);
+// the textarea counts UTF-16 units, the text CRDT code points (an emoji is one char there)
+const toPoints = (text, units) => [...text.slice(0, units)].length;
+const toUnits = (text, points) => [...text].slice(0, points).join('').length;
+const rememberCaret = () => {
+  const area = $('note');
+  if (note) caret = [note.anchor(toPoints(area.value, area.selectionStart)), note.anchor(toPoints(area.value, area.selectionEnd))];
+};
 async function openNote() {
   offNote?.();
   note = await qu.text(space, 'notes/main');
@@ -145,7 +151,7 @@ async function openNote() {
     if (!remote) return;
     const area = $('note');
     area.value = text;
-    if (document.activeElement === area) area.setSelectionRange(note.indexOf(caret[0]), note.indexOf(caret[1]));
+    if (document.activeElement === area) area.setSelectionRange(toUnits(text, note.indexOf(caret[0])), toUnits(text, note.indexOf(caret[1])));
   });
 }
 $('note').addEventListener('input', () => {

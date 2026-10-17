@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TextCrdt, text, compaction, createQu, sync, mirror } from '../src/index.js';
 import { fullClient, connectInProcess, until } from './helpers.js';
+import { ReferenceCrdt } from './text-reference.js';
 
 /** Deterministic pseudo-random numbers, so a failing fuzz run can be replayed. */
 function rng(seed) {
@@ -48,6 +49,113 @@ test('CRDT: a snapshot (runs, without deleted text) rebuilds the same text and m
   const later = a.insert(a.value().length, '!', 'a.1');
   b.apply(later);
   assert.equal(b.value(), a.value());
+});
+
+test('CRDT: the run-based TextCrdt matches the per-char reference exactly (text, runs, anchors)', () => {
+  const pieces = ['a', 'bc', 'def', '😀', 'x😀y', 'ä', ' '];
+  for (let seed = 1; seed <= 60; seed++) {
+    const random = rng(seed * 7919);
+    const sites = ['a.1', 'b.2', 'c.3'];
+    const docs = sites.map(() => ({ run: new TextCrdt(), ref: new ReferenceCrdt() }));
+    const log = sites.map(() => []);
+    const same = (d, label) => {
+      assert.equal(d.run.value(), d.ref.value(), `${label}: text`);
+      assert.deepEqual(d.run.runs(), d.ref.runs(), `${label}: runs`);
+    };
+    for (let step = 0; step < 80; step++) {
+      const r = Math.floor(random() * 3);
+      const d = docs[r];
+      const length = [...d.ref.value()].length;
+      if (length && random() < 0.35) {
+        const at = Math.floor(random() * length);
+        const n = 1 + Math.floor(random() * 4);
+        const ops = d.run.delete(at, n);
+        assert.deepEqual(ops, d.ref.delete(at, n), `seed ${seed}: delete ops`);
+        log[r].push(...ops);
+      } else {
+        // typing: often right after the previous own insert, so runs get extended
+        const at = random() < 0.5 ? length : Math.floor(random() * (length + 1));
+        const piece = pieces[Math.floor(random() * pieces.length)];
+        const op = d.run.insert(at, piece, sites[r]);
+        assert.deepEqual(op, d.ref.insert(at, piece, sites[r]), `seed ${seed}: insert op`);
+        log[r].push(op);
+      }
+      if (random() < 0.3) {
+        const from = Math.floor(random() * 3);
+        const batch = [...log[from]].sort(() => random() - 0.5);
+        for (const op of batch) {
+          d.run.apply(op);
+          d.ref.apply(op);
+        }
+      }
+      if (random() < 0.1) {
+        // a newcomer loads a snapshot of this replica, then the rest of the log
+        const fresh = { run: new TextCrdt(), ref: new ReferenceCrdt() };
+        for (const op of TextCrdt.opsOfRuns(d.run.runs())) {
+          fresh.run.apply(op);
+          fresh.ref.apply(op);
+        }
+        same(fresh, `seed ${seed} step ${step} snapshot`);
+        docs.push(fresh);
+        log.push([]);
+        sites.push(`n.${docs.length}`);
+      }
+      same(d, `seed ${seed} step ${step}`);
+      const len = [...d.ref.value()].length;
+      const i = Math.floor(random() * (len + 1));
+      const anchor = d.run.anchor(i);
+      assert.equal(anchor, d.ref.anchor(i), `seed ${seed}: anchor`);
+      // (the reference returned the UTF-16 length for the end anchor - positions are code points)
+      assert.equal(d.run.indexOf(anchor), anchor === null ? len : d.ref.indexOf(anchor), `seed ${seed}: indexOf`);
+    }
+    const everything = log.flat();
+    for (const d of docs) {
+      for (const op of [...everything].sort(() => random() - 0.5)) {
+        d.run.apply(op);
+        d.ref.apply(op);
+      }
+      same(d, `seed ${seed} final`);
+    }
+    const texts = docs.map((d) => d.run.value());
+    for (const t of texts) assert.equal(t, texts[0], `seed ${seed}: converged`);
+  }
+});
+
+test('CRDT: 100k chars stay fast - typing, editing in the middle, loading a snapshot', () => {
+  const doc = new TextCrdt();
+  const t0 = performance.now();
+  for (let i = 0; i < 20_000; i++) doc.insert(doc.value().length, 'Hallo', 'a.1'); // 100k chars, typed in 5-char bursts
+  for (let i = 0; i < 2_000; i++) doc.insert(50_000 + i, 'x', 'b.2');               // someone edits in the middle
+  doc.delete(10_000, 30_000);
+  const typed = performance.now() - t0;
+  assert.equal([...doc.value()].length, 100_000 + 2_000 - 30_000);
+  assert.ok(doc.nodes.length < 20, `runs, not chars: ${doc.nodes.length} nodes`);
+
+  const t1 = performance.now();
+  const copy = new TextCrdt();
+  for (const op of TextCrdt.opsOfRuns(doc.runs())) copy.apply(op);
+  const loaded = performance.now() - t1;
+  assert.equal(copy.value(), doc.value());
+  // generous bounds (the per-char version needed ~12 s to type and ~1.7 s to load this; runs: ~10 ms)
+  assert.ok(typed < 5000, `typing took ${typed.toFixed(0)} ms`);
+  assert.ok(loaded < 500, `snapshot load took ${loaded.toFixed(0)} ms`);
+});
+
+test('doc.set() works in code points: emoji are one char, nothing is split', async () => {
+  const doc = new TextCrdt();
+  doc.insert(0, 'a😀b', 'a.1');
+  assert.equal(doc.anchor(2), '3@a.1'); // 'b' is the third char
+  const m = await createQu();
+  m.use(sync({ role: 'mirror', timeoutMs: 5000, retryMs: 0 }));
+  m.use(mirror());
+  const alice = await member(m);
+  const space = await alice.createGroup();
+  const note = await alice.text(space, 'notes/emoji');
+  note.set('Hi 😀!');
+  note.set('Hi 😀😁!');
+  note.set('Hi 😁!');
+  assert.equal(note.value(), 'Hi 😁!');
+  await note.close();
 });
 
 const fast = { batchMs: 20, snapshotEvery: 0 };
