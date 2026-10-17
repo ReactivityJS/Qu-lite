@@ -56,6 +56,7 @@ don't undo a deliberate choice by accident.
 | Isolation | opt-in one connection per space (`relayTransport({isolate: true})`) | relay can't link spaces to a device via the protocol |
 | Decoy subscriptions | not built | a relay recognises them at once (no grants, no data) |
 | Text | optional RGA CRDT plugin, per-member mergeable snapshots; chars kept as runs (split/extended), same per-char RGA order and wire format | collaborative notes in small groups; not part of the core; lean without a tree or a second format |
+| Attachments | optional `blobs` plugin: manifest + 64 KiB chunks as ordinary records, content-addressed and hash-verified, one shard per blob; wake lock + unload warning while transfers run | everything (encryption, mirror, quotas, deletion, sync) reused; no binary side channel for the blind mirror; fetch on demand |
 | Stale devices | remember the last complete reconcile per scope; past the horizon, old records the peer lacks are retired locally, not pushed | no resurrection of deleted records without a protocol change or a mirror-side guess |
 
 ## Known limits
@@ -71,6 +72,10 @@ don't undo a deliberate choice by accident.
   not of chars; heavily fragmented documents (many scattered single-char edits) grow
   accordingly until compacted.
 - Size per mirror envelope defaults to 256 KiB (`maxEnvelopeBytes`).
+- Attachments travel as base64 inside records (+33 %, plus padding) and are assembled in
+  memory (`maxBytes`, 64 MiB). The mirror can tell which records form one attachment (one
+  shard) and roughly its size. Wake Lock and `beforeunload` only help while the page is
+  open; a browser that kills a background tab still stops the transfer (it resumes later).
 
 ## Milestones (all done)
 
@@ -78,4 +83,4 @@ don't undo a deliberate choice by accident.
 persistence, WebSocket, mirror · 4 privacy model, one peer base, Docker relay + demo ·
 5 members, epochs, inbox · 6 status · 7 WebRTC · 8 HTTPS+SSE fallback · 9 atomic writes
 · 10 deletion and compaction · 11 mirror hardening and metadata · 12 collaborative text
-(optional) · 13 stale devices (offline past the horizon).
+(optional) · 13 stale devices (offline past the horizon) · 14 attachments (optional).

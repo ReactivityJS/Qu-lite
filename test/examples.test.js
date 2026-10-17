@@ -16,7 +16,7 @@ const run = (file) =>
     execFile(process.execPath, ['--no-warnings', file], { cwd: dir, timeout: 60_000 }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
   });
 
-test('examples/ has scripts', () => assert.ok(scripts.length >= 7));
+test('examples/ has scripts', () => assert.ok(scripts.length >= 8));
 
 for (const file of scripts) {
   test(`example ${file} runs to completion`, async () => {

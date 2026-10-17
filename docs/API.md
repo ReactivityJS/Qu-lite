@@ -13,7 +13,7 @@ they always match this API. To learn why things work the way they do, read
 - [Space](#space)
 - Plugins: [records](#records) · [sync](#sync) · [user](#user) · [inbox](#inbox) ·
   [members](#members) · [signals](#signals) · [status](#status) · [compaction](#compaction) ·
-  [text](#text) · [mirror](#mirror) · [limits](#limits)
+  [text](#text) · [blobs](#blobs) · [mirror](#mirror) · [limits](#limits)
 - [Transports](#transports): in-process, WebSocket, relay with SSE fallback, SSE, WebRTC, topology, server, `createLink`
 - [Mirror CLI and Docker](#mirror-cli-and-docker)
 - [Events](#events)
@@ -58,11 +58,11 @@ Typical plugin sets:
 | Use | Plugins (in this order) |
 |---|---|
 | Minimal client | `records`, `sync` |
-| Chat/group app | `records`, `user`, `members`, `inbox`, `sync`, `status`, `compaction` (+ `text`) |
+| Chat/group app | `records`, `user`, `members`, `inbox`, `sync`, `status`, `compaction` (+ `text`, `blobs`) |
 | Mirror/relay | `limits`, `sync({ role: 'mirror' })`, `mirror` |
 
 Dependencies: `user` needs `records`. `inbox` needs `records` and `user`. `status` needs
-`records` and `members`, and installs `signals` itself. `text` and `compaction` need `records`.
+`records` and `members`, and installs `signals` itself. `text`, `blobs` and `compaction` need `records`.
 `sync` is optional for everything, but without it nothing leaves the device.
 
 ---
@@ -139,7 +139,7 @@ await registry.create('store', 'memory');
 
 - stores: `memory`, `indexeddb`
 - plugins: `records`, `sync`, `mirror`, `user`, `members`, `inbox`, `signals`, `status`,
-  `compaction`, `limits`, `text`, `topology`
+  `compaction`, `limits`, `text`, `blobs`, `topology`
 - transports: `ws`, `sse`, `relay`, `webrtc`
 
 `nodeRegistry()` adds the store `sqlite` and the transports `http-server` and `ws-server`.
@@ -463,6 +463,48 @@ await doc.flush(); await doc.compact(); doc.stats(); await doc.close();
 document lives in memory as runs (one node per stretch typed in one go), so cost grows with the
 number of edits, not of characters. Example: [07-text.mjs](../examples/07-text.mjs).
 
+## blobs
+
+`qu.use(blobs(options?))` – attachments as chunked, encrypted records, fetched on demand.
+
+| Option | Default | |
+|---|---|---|
+| `chunkSize` | `65536` | raw bytes per chunk record (~96 KiB envelopes, under a mirror's 256 KiB limit) |
+| `maxBytes` | `67108864` | largest blob (64 MiB) |
+| `keepAwake` | `true` | hold a Screen Wake Lock while uploads or downloads run and a peer is connected (re-acquired when the page is visible again) |
+| `warnOnUnload` | `true` | `beforeunload` asks before leaving the page while uploads are unfinished |
+| `wakeLock` | `navigator.wakeLock` | the WakeLock API to use (tests inject one) |
+
+```js
+const ref = await qu.blobs.put(space, file, { name: 'a.jpg', type: 'image/jpeg' }); // Uint8Array, ArrayBuffer or Blob/File
+await qu.write(space, 'chat', { text: 'look', file: ref });     // the app links it in its own record
+const bytes = await qu.blobs.get(space, ref, { timeoutMs: 30_000 }); // waits for and fetches missing chunks
+img.src = URL.createObjectURL(new Blob([bytes], { type: ref.type }));
+await qu.blobs.has(space, ref);      // {have, total, complete}
+qu.blobs.pending();                  // [{space, blob, direction: 'up'|'down', done, total}]
+await qu.blobs.del(space, ref);      // drop lists: your records (owner/admin: all of them)
+```
+
+| Method | |
+|---|---|
+| `put(space, data, {type?, name?}) → ref` | `ref = {blob, size, chunks, type?, name?}`. Content-addressed: the same bytes give the same ref, and chunks already held are not written again. `name` stays in the ref only. |
+| `get(space, ref \| id, {wait = true, timeoutMs = 0}) → Uint8Array` | reads what is held; otherwise watches the blob's own shard until it is complete (`timeoutMs` 0: no limit) |
+| `has(space, ref)` | what this peer holds |
+| `del(space, ref) → number` | records listed for dropping |
+| `pending()` | transfers running; uploads survive a reload (`await qu.blobs.ready` restores them) |
+| `awake` | whether a wake lock is held |
+| `path(blobId)` | the record path (`_blob-<id>`) |
+
+Records under `_blob-<id>`: a manifest `{v: 1, size, chunkSize, hashes, type?}` and chunks `{i, d}`.
+Readers accept only a manifest whose hash is the blob id and only chunks matching their hash, so
+junk under the path changes nothing. Each blob has its own shard: a peer that syncs only some
+paths fetches exactly the blobs it opens. The mirror sees that a group of records belongs
+together (roughly the attachment's size), never its content, name or type.
+
+Events: `qu.blob.progress {space, blob, direction, done, total}` (uploads count records until they
+left the outbox, downloads count chunks) and `qu.blob.done {space, blob, direction}`. Example:
+[08-blobs.mjs](../examples/08-blobs.mjs).
+
 ## mirror
 
 `qu.use(mirror({ allow = null, quota = null, maxEnvelopeBytes = 262144, expireEveryMs }))` on a
@@ -543,6 +585,7 @@ restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
 | `qu.inbox.message` | `{id, at, payload}` | |
 | `qu.signal.<sid>.<type>` | `{sid, type, author, value, at, from}` | |
 | `qu.status.presence` / `typing` / `receipts` | see [status](#status) | |
+| `qu.blob.progress` / `qu.blob.done` | `{space, blob, direction, done?, total?}` | attachment transfers |
 | `qu.compact.done`, `qu.envelope.dropped`, `qu.gc.expired`, `qu.scrub.done` | | maintenance |
 | `sync.start`, `sync.done`, `sync.error`, `sync.busy` | `{peer, sid, …}` | reconcile sessions |
 | `sync.stale` | `{peer, sid, shard, since, retired}` | a stale device retired old records instead of pushing them |

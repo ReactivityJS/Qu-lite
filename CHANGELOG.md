@@ -11,6 +11,9 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
   longer pushes old records the network lacks (they may have been deleted meanwhile) - it retires them locally.
   `qu.staleSpaces()`, `qu.lastSync()`, event `sync.stale`, option `sync({ stale: 'retire' | 'push' })`,
   `qu.envelopes.retire()`.
+- Attachments: `blobs()` plugin - chunked, encrypted, content-addressed blobs as ordinary records, fetched on demand,
+  upload/download progress (`qu.blob.progress`, `qu.blob.done`), uploads tracked across reloads, screen wake lock and
+  unload warning while transfers run. Example `examples/08-blobs.mjs`.
 
 ### Changed
 

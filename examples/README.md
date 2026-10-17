@@ -13,6 +13,7 @@ Each file is a complete program: `node examples/<file>` (Node ≥ 22.5, after `n
 | [05-status.mjs](05-status.mjs) | presence, typing, sent/delivered/read, custom signals, clean leave |
 | [06-delete-compact.mjs](06-delete-compact.mjs) | deleting log entries and keyed entries, compaction, `forget` |
 | [07-text.mjs](07-text.mjs) | collaborative text: concurrent offline edits merge, anchors, snapshots |
+| [08-blobs.mjs](08-blobs.mjs) | attachments: offline put, upload progress, fetch on demand, delete |
 
 `_group.mjs` is shared setup for 05-07 (a mirror and two group members in one process).
 In the browser, use the same code with `store: ['indexeddb', …]` and `transports: [['relay', { url }]]` -

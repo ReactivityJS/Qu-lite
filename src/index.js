@@ -26,6 +26,7 @@ export { status } from './status.js';
 export { compaction } from './compaction.js';
 export { limits } from './limits.js';
 export { text, TextCrdt } from './text.js';
+export { blobs } from './blobs.js';
 export { netOf } from './net/link.js';
 export { paddedLength } from './envelope.js';
 export { GC_HORIZON_MS, gcCutoff, encodeEntries, decodeEntries, mayDrop } from './gc.js';

@@ -11,7 +11,7 @@ connection per space) and - optional - collaborative text. Started as `packages/
 shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 **Documentation:** [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
-WebSocket, groups, status, deleting, collaborative text - each one runs with `node examples/<file>`) ·
+WebSocket, groups, status, deleting, collaborative text, attachments - each one runs with `node examples/<file>`) ·
 [changelog](CHANGELOG.md).
 
 ```sh
@@ -26,7 +26,7 @@ docker compose up --build
 
 **Size** (minified + gzip, browser): core (records, sync, WebSocket, IndexedDB) ~18.5 KB; with members,
 user nodes, inbox, status and compaction ~26.6 KB; everything incl. SSE fallback, WebRTC and
-collaborative text ~31.5 KB. The optional plugins (`text`, `rtc`/`topology`, `relayTransport`/SSE) are
+collaborative text ~31.5 KB. The optional plugins (`text`, `blobs`, `rtc`/`topology`, `relayTransport`/SSE) are
 only bundled when imported.
 
 **Try it:** `npm run demo` (or `docker compose up --build`), then open
@@ -369,6 +369,30 @@ sync({ stale: 'retire' })        // default; 'push' = old behaviour (e.g. to ref
   indexes, `qu.record.deleted {stale: true}`) instead of pushed - also when another peer asks for it (`want`).
 - After that reconcile the device is current again. A mirror never retires; a device that never synced a space is not
   stale (nothing old to doubt).
+
+## Attachments (milestone 14)
+
+```js
+qu.use(blobs());                                              // registry name 'blobs'
+const ref = await qu.blobs.put(space, file, { name: 'a.jpg' }); // Uint8Array | ArrayBuffer | Blob/File
+await qu.write(space, 'chat', { text: 'look', file: ref });
+const bytes = await qu.blobs.get(space, ref);                 // fetches and waits for missing chunks
+qu.bus.on('qu.blob.progress', ({ direction, done, total }) => ...);
+```
+
+- **Ordinary records**: a manifest `{size, chunkSize, hashes, type}` and one record per 64 KiB chunk under
+  `_blob-<id>`: encrypted, signed, padded, stored locally, synced, mirrored, quota-checked and deletable like any
+  record. Nothing new for the blind mirror, no protocol change.
+- **Content-addressed and verified**: the id is a hash over size, chunk size and the chunk hashes; readers accept only a
+  matching manifest and matching chunks (junk under the path changes nothing). The same file twice writes nothing new;
+  an interrupted `put()` writes only the missing chunks when repeated. Files are hashed and read chunk by chunk.
+- **On demand**: each blob is its own shard, so a peer that syncs only its chat fetches exactly the attachments it
+  opens (`get()` watches that shard while it waits).
+- **Getting it there**: an upload is tracked until every record left the outbox (with `ackFrom: 'mirror'`: a mirror
+  stored it), across reloads. While a transfer runs and a peer is connected, the screen is kept on (Screen Wake Lock,
+  re-acquired when the page becomes visible again; released while offline) and closing the tab asks first - a sleeping phone or a closed tab would stop the sync.
+- Cost: base64 inside the record (+33 %) plus padding (≤ +25 %), ~2 KB of code. Limit: a blob is assembled in memory
+  (`maxBytes`, default 64 MiB).
 
 ## Next milestones
 

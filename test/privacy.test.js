@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as crypto from '../src/crypto.js';
-import { createQu, records, sync, user, mirror, Space, connectInProcess, encodeFrame, sealEnvelope, formatHlc } from '../src/index.js';
+import { createQu, records, sync, user, mirror, blobs, Space, connectInProcess, encodeFrame, sealEnvelope, formatHlc } from '../src/index.js';
 
 const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, ms = 5000) {
@@ -69,6 +69,22 @@ test('nothing on the wire, at the mirror or in local storage reveals identity, p
     for (const text of ['Treffen', 'Geheimer', 'private-group', 'chat', 'title', 'meta']) assert.equal(haystack.includes(Buffer.from(text)), false, `"${text}" visible`);
     for (const needle of [...needles(alice.identity), ...needles(bob.identity)]) assert.equal(haystack.includes(needle), false, 'identity visible');
   }
+});
+
+test('attachments: neither content, name, type nor blob id appear on the wire or at the mirror', async () => {
+  const m = await mirrorPeer();
+  const alice = await client();
+  alice.use(blobs({ chunkSize: 4096, wakeLock: null, warnOnUnload: false }));
+  const sa = alice.join(await Space.create(alice.identity));
+  const wire = [tap(alice), tap(m)];
+  connectInProcess(alice, m);
+  const content = Buffer.from('Vertraulicher Vertrag '.repeat(1000));
+  const ref = await alice.blobs.put(sa, content, { type: 'application/x-contract', name: 'vertrag.pdf' });
+  await until(async () => (await alice.syncStatus()).outbox === 0);
+
+  const haystacks = [Buffer.concat(wire.flat()), await dump(m)];
+  const hidden = ['Vertraulicher', 'vertrag.pdf', 'x-contract', ref.blob, '_blob'];
+  for (const haystack of haystacks) for (const text of hidden) assert.equal(haystack.includes(Buffer.from(text)), false, `"${text}" visible`);
 });
 
 test('the network id is random and rotatable, never derived from the identity', async () => {
