@@ -59,6 +59,9 @@ Findings of the security review (docs/SECURITY-REVIEW.md), all fixed with regres
 
 - `doc.set()` and the end anchor now count code points like every other text position (emoji were split).
 - Demo: the shared note was bound to the private-note input (two elements with `id="note"`).
+- Presence: a member-list change right after an announce dropped the re-announce, so a newcomer whose first
+  heartbeat had arrived before its member entry stayed invisible until the next interval (up to 20 s); the
+  re-announce is now postponed instead (also the cause of an occasionally failing status test).
 
 ## [0.1.0] - 2026-10-17
 

@@ -112,10 +112,19 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
       });
 
       // A newcomer's first heartbeat may arrive before its member entry (it is
-      // then refused); once the member list changes, everyone re-announces
-      // (throttled), and the newcomer answers - so both sides see each other.
+      // then refused); once the member list changes, everyone re-announces,
+      // and the newcomer answers - so both sides see each other. Throttled to
+      // one announce per 250 ms, but POSTPONED, never dropped: a change right
+      // after an announce would otherwise leave both sides blind until the
+      // next heartbeat interval.
+      let reannounce = null;
       bus.on('qu.members.changed', ({ space: changed }) => {
-        if (changed === sid && Date.now() - lastAnnounce > 250) announce('online', { auto: true }).catch(() => {});
+        if (changed !== sid || reannounce) return;
+        reannounce = setTimeout(() => {
+          reannounce = null;
+          announce('online', { auto: true }).catch(() => {});
+        }, Math.max(0, lastAnnounce + 250 - Date.now()));
+        reannounce.unref?.();
       });
 
       bus.on(`qu.signal.${sid}.typing`, async ({ author, value }) => {
