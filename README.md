@@ -26,7 +26,7 @@ docker compose up --build
 
 **Size** (minified + gzip, browser): core (records, sync, WebSocket, IndexedDB) ~18.5 KB; with members,
 user nodes, inbox, status and compaction ~26.6 KB; everything incl. SSE fallback, WebRTC and
-collaborative text ~31.5 KB. The optional plugins (`text`, `blobs`, `rtc`/`topology`, `relayTransport`/SSE) are
+collaborative text ~31.5 KB. The optional plugins (`text`, `blobs`, `stats`, `rtc`/`topology`, `relayTransport`/SSE) are
 only bundled when imported.
 
 **Try it:** `npm run demo` (or `docker compose up --build`). `http://localhost:8787/` checks the connection and
@@ -415,6 +415,26 @@ node web/build.mjs && npx qu-lite-mirror --port 8787 --static ./web     # Docker
 - **Path prefix**: the pages compute the relay URL from their own location, and `relayTransport({ url })` keeps a
   path (`https://example.org/qu` → `wss://example.org/qu/ws`). Tested through a prefix-stripping proxy for WebSocket
   and SSE.
+
+## Operating figures (milestone 16)
+
+```js
+qu.use(stats());                       // optional, any peer - registry name 'stats'
+qu.stats.snapshot();                   // traffic in/out (total + per connection), throughput, connections, record outcomes
+await qu.stats.storage();              // spaces, records, bytes, outbox, database size / browser estimate
+```
+
+```sh
+npx qu-lite-mirror --stats-token "$(openssl rand -hex 24)"     # relay: /stats (JSON) and /metrics (Prometheus)
+curl -H "Authorization: Bearer $TOKEN" https://relay.example/stats
+```
+
+- **No cost unless installed**: every link already counts bytes and frames (two additions per frame); open links are
+  listed in `qu.net.links`, `net.peer.down` carries the final counters. The plugin reads those and bus events, and
+  samples once a second for throughput (bytes/s over the last 10 s).
+- **Local**: per open connection `bytesIn/bytesOut/framesIn/framesOut/inBps/outBps` - the demo shows it in its header.
+- **Relay**: the same report over HTTP, only with a token (behind a reverse proxy every request comes from localhost, so
+  an address check would mean nothing). Figures name peers by random network id only - no identities, no space ids.
 
 ## Next milestones
 

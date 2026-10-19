@@ -57,6 +57,7 @@ don't undo a deliberate choice by accident.
 | Decoy subscriptions | not built | a relay recognises them at once (no grants, no data) |
 | Text | optional RGA CRDT plugin, per-member mergeable snapshots; chars kept as runs (split/extended), same per-char RGA order and wire format | collaborative notes in small groups; not part of the core; lean without a tree or a second format |
 | Attachments | optional `blobs` plugin: manifest + 64 KiB chunks as ordinary records, content-addressed and hash-verified, one shard per blob; wake lock + unload warning while transfers run | everything (encryption, mirror, quotas, deletion, sync) reused; no binary side channel for the blind mirror; fetch on demand |
+| Operating figures | optional `stats` plugin reading the per-link byte/frame counters links keep anyway (`qu.net.links`, final values in `net.peer.down`) plus bus events; relay endpoints only with a token | no per-frame hook, nothing counted unless installed; a localhost check is meaningless behind a proxy |
 | Stale devices | remember the last complete reconcile per scope; past the horizon, old records the peer lacks are retired locally, not pushed | no resurrection of deleted records without a protocol change or a mirror-side guess |
 
 ## Known limits
@@ -84,4 +85,4 @@ persistence, WebSocket, mirror · 4 privacy model, one peer base, Docker relay +
 5 members, epochs, inbox · 6 status · 7 WebRTC · 8 HTTPS+SSE fallback · 9 atomic writes
 · 10 deletion and compaction · 11 mirror hardening and metadata · 12 collaborative text
 (optional) · 13 stale devices (offline past the horizon) · 14 attachments (optional) · 15 relay,
-client page and demo on one port, behind a TLS reverse proxy.
+client page and demo on one port, behind a TLS reverse proxy · 16 operating figures (optional).

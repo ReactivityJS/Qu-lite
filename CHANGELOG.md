@@ -18,6 +18,11 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
   (`/demo.html`), the library as one browser module (`/dist/qu-lite.js`), `/healthz` and `/info` next to `/ws` and
   `/sse`. WebSocket heartbeat (`pingMs`, 25 s) for reverse proxies; `relayTransport` keeps a URL path prefix.
   Deployment guide with Caddy and nginx: `docs/DEPLOY.md`.
+- Operating figures: optional `stats()` plugin - traffic in/out (total, per connection, throughput), connections,
+  record outcomes, sync counters, storage (spaces, records, bytes, database size). The relay serves it as `/stats`
+  (JSON) and `/metrics` (Prometheus) with `--stats-token` / `QU_STATS_TOKEN`. Links now also count frames, list
+  open links in `qu.net.links` and pass their final counters with `net.peer.down`; the SQLite driver has `size()`.
+  The demo header shows live traffic. Example `examples/09-stats.mjs`.
 
 ### Changed
 

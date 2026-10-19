@@ -84,6 +84,12 @@ export function sqliteDriver({ path = ':memory:' } = {}) {
     async clear() {
       q.clear.run();
     },
+    /** @returns {Promise<number>} bytes the database file uses (pages, incl. free ones) */
+    async size() {
+      const { page_count: pages } = db.prepare('PRAGMA page_count').get();
+      const { page_size: pageSize } = db.prepare('PRAGMA page_size').get();
+      return pages * pageSize;
+    },
     close() {
       db.close();
     },

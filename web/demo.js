@@ -26,13 +26,20 @@ const fromUrl = (text) => JSON.parse(atob(text.replace(/-/g, '+').replace(/_/g, 
 
 const qu = await createPeer({
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
-  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction', 'text'],
+  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction', 'text', ['stats', { emitMs: 1000 }]],
   transports: [
     ['relay', { url: params.has('offline') ? undefined : relayUrl, prefer: params.get('transport') === 'sse' ? 'sse' : 'ws', minDelayMs: 300 }],
     ['webrtc', { mode: params.get('rtc') ?? localStorage.getItem('qu-demo-rtc') ?? 'auto' }],
   ],
 });
 globalThis.qu = qu; // for the console and the e2e test
+
+// live traffic (stats plugin): throughput of the last 10 s and totals, per peer in the tooltip
+const kb = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+qu.bus.on('qu.stats', ({ traffic: t, peers }) => {
+  $('traffic').textContent = `↓ ${kb(t.inBps)}/s ↑ ${kb(t.outBps)}/s · ${kb(t.bytesIn)} / ${kb(t.bytesOut)}`;
+  $('traffic').title = peers.map((p) => `${p.via} ${p.peer.slice(0, 8)}: ↓ ${kb(p.bytesIn)} ↑ ${kb(p.bytesOut)}`).join('\n') || 'keine Verbindung';
+});
 
 // ---------------------------------------------------------------- event log
 const lines = [];

@@ -6,7 +6,11 @@
  *   - the `hi {peer}` handshake (the network id - never the identity),
  *   - framing (frame.js: binary, no base64),
  *   - `net.out.<remote>.<type>` -> send, received frames -> `net.in.<remote>.<type>`,
- *   - `net.peer.up` / `net.peer.down`, byte counters,
+ *   - `net.peer.up` / `net.peer.down`, byte and frame counters per link -
+ *     plain additions, always on; open links are listed in `qu.net.links`
+ *     (remote -> {via, since, stats}) and `net.peer.down` carries the final
+ *     counters, so an optional plugin (stats.js) can report traffic without
+ *     a hook on the hot path,
  *   - the inbound guard `qu.net.guard(peer, type, size)` (limits.js): false
  *     drops a frame, 'close' closes the link,
  *   - SCOPED links (`scope`: a set of sids, own `localId`): one connection
@@ -24,7 +28,7 @@ import { encodeFrame, decodeFrame } from './frame.js';
 /**
  * The per-Qu network registry (created on first use): which link may carry
  * which space, plus the optional inbound guard.
- * @returns {{scopes: Map<string, Set<string>>, isolated: Set<string>, allows: (peer: string, sid: string) => boolean, guard?: Function, exclusive?: boolean}}
+ * @returns {{scopes: Map<string, Set<string>>, isolated: Set<string>, links: Map<string, {via: string, since: number, stats: {sent: number, received: number, framesOut: number, framesIn: number}}>, allows: (peer: string, sid: string) => boolean, guard?: Function, exclusive?: boolean}}
  */
 export function netOf(qu) {
   if (!qu.net) {
@@ -33,6 +37,7 @@ export function netOf(qu) {
     qu.net = {
       scopes,
       isolated,
+      links: new Map(),
       /** A scoped link carries only its sids; a shared link no isolated sid. */
       allows: (peer, sid) => (scopes.has(peer) ? scopes.get(peer).has(sid) : !isolated.has(sid)),
     };
@@ -45,11 +50,11 @@ const xorHex = (a, b) => Array.from({ length: a.length }, (_, i) => (parseInt(a[
 /**
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {{send: (bytes: Uint8Array) => void, close?: () => void, via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} transport
- * @returns {{receive: (bytes: Uint8Array) => void, closed: () => void, close: () => void, stats: {sent: number, received: number}, readonly peer: string|null}}
+ * @returns {{receive: (bytes: Uint8Array) => void, closed: () => void, close: () => void, stats: {sent: number, received: number, framesOut: number, framesIn: number}, readonly peer: string|null}}
  */
 export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onDown, localId, scope }) {
   const net = netOf(qu);
-  const stats = { sent: 0, received: 0 };
+  const stats = { sent: 0, received: 0, framesOut: 0, framesIn: 0 };
   let remote = null;
   let off = null;
   let open = true;
@@ -58,6 +63,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
     if (!open) return;
     const frame = encodeFrame(type, payload);
     stats.sent += frame.length;
+    stats.framesOut++;
     send(frame);
   };
   sendFrame('hi', { peer: localId ?? qu.peerId });
@@ -70,6 +76,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
     receive(bytes) {
       if (!open) return;
       stats.received += bytes.length;
+      stats.framesIn++;
       let frame;
       try {
         frame = decodeFrame(bytes);
@@ -82,6 +89,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
         if (!/^[0-9a-f]{16}$/.test(peer)) return close();
         remote = localId ? xorHex(peer, localId) : peer;
         if (scope) net.scopes.set(remote, new Set(scope));
+        net.links.set(remote, { via, since: Date.now(), stats });
         off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
         onUp?.(remote);
         qu.bus.notify('net.peer.up', { peer: remote, via });
@@ -99,7 +107,8 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       off?.();
       if (remote) {
         if (scope) net.scopes.delete(remote);
-        qu.bus.notify('net.peer.down', { peer: remote, via });
+        if (net.links.get(remote)?.stats === stats) net.links.delete(remote);
+        qu.bus.notify('net.peer.down', { peer: remote, via, stats: { ...stats } });
       }
       remote = null;
       onDown?.();

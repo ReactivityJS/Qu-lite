@@ -28,7 +28,7 @@ timing-based (presence, reconnects) and a single green run can hide flakiness.
   check is decidable from the public header (+ public drop lists).
 - Browser-safe barrel (`src/index.js`) must never import Node-only modules
   (`node:sqlite`, `ws`) - those live behind `@qu/lite/node`, `/sqlite`, `/ws-server`.
-- Optional features stay optional: nothing in the core may import `text.js`, `blobs.js`,
+- Optional features stay optional: nothing in the core may import `text.js`, `blobs.js`, `stats.js`,
   `net/webrtc.js`, `net/topology.js` or the SSE modules.
 
 ## Tests

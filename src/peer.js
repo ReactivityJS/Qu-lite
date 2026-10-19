@@ -28,6 +28,7 @@ import { compaction } from './compaction.js';
 import { limits } from './limits.js';
 import { text } from './text.js';
 import { blobs } from './blobs.js';
+import { stats } from './stats.js';
 import { rtc } from './net/webrtc.js';
 import { topology } from './net/topology.js';
 import { wsTransport } from './net/ws.js';
@@ -51,6 +52,7 @@ export function defaultRegistry() {
     .register('plugin', 'limits', (options) => limits(options))
     .register('plugin', 'text', (options) => text(options))
     .register('plugin', 'blobs', (options) => blobs(options))
+    .register('plugin', 'stats', (options) => stats(options))
     .register('transport', 'webrtc', (options) => rtc(options))
     .register('plugin', 'topology', (options) => topology(options))
     .register('transport', 'ws', (options) => wsTransport(options))

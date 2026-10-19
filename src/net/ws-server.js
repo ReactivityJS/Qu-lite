@@ -5,6 +5,11 @@
  *   GET/POST /sse/<session>                  -> peers via HTTPS + SSE (sse-server.js)
  *   GET /healthz                             -> 200 "ok" (reverse proxy / container health)
  *   GET /info                                -> {name, version, transports, uptime} (no space data)
+ *   GET /stats, /metrics                     -> operating figures as JSON / Prometheus text
+ *                                               (stats.js), only with `statsToken` - sent as
+ *                                               `Authorization: Bearer <token>` or `?token=`;
+ *                                               behind a proxy every request comes from
+ *                                               localhost, so an address check would mean nothing
  *   anything else                            -> static files (`static`): the client start
  *                                               page, the demo, the browser bundle (web/)
  *
@@ -20,6 +25,7 @@
  * package, never in browsers.
  */
 import { createServer } from 'node:http';
+import { timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
@@ -57,9 +63,10 @@ function staticHandler(dir) {
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, ws?: boolean, sse?: boolean|object, pingMs?: number}} [options]
  *   `pingMs`: WebSocket heartbeat (0 = off); a client that did not answer the previous ping is closed.
+ *   `statsToken`: enables /stats and /metrics (needs the stats plugin) for requests carrying this token.
  * @returns {Promise<{port: number, close: () => Promise<void>, wss: WebSocketServer|null}>}
  */
-export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000 } = {}) {
+export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken } = {}) {
   const ownServer = !server;
   const sseHandler = sse ? createSseHandler(qu, typeof sse === 'object' ? sse : {}) : null;
   const files = dir ? staticHandler(dir) : null;
@@ -73,9 +80,28 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, ws =
       const info = { name: 'qu-lite', version: VERSION, transports, uptime: Math.round((Date.now() - started) / 1000) };
       return res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(info));
     }
+    if (req.method === 'GET' && (path === '/stats' || path === '/metrics')) return serveStats(req, res, path);
     if (files) return files(req, res);
     res.writeHead(ws ? 426 : 404, { 'content-type': 'text/plain' }).end(ws ? 'websocket or sse only' : 'not found');
   };
+  // constant-time token check (hashes have equal length)
+  const digest = (text) => createHash('sha256').update(String(text)).digest();
+  const authorized = (req) => {
+    const header = req.headers.authorization ?? '';
+    const given = header.startsWith('Bearer ') ? header.slice(7) : (new URL(req.url, 'http://x').searchParams.get('token') ?? '');
+    return timingSafeEqual(digest(given), digest(statsToken));
+  };
+  async function serveStats(req, res, path) {
+    const headers = { 'cache-control': 'no-store' };
+    if (!statsToken || !qu.stats) return res.writeHead(404, { ...headers, 'content-type': 'text/plain' }).end('not found');
+    if (!authorized(req)) return res.writeHead(401, { ...headers, 'content-type': 'text/plain', 'www-authenticate': 'Bearer' }).end('token required');
+    try {
+      if (path === '/metrics') return res.writeHead(200, { ...headers, 'content-type': 'text/plain; version=0.0.4; charset=utf-8' }).end(await qu.stats.prometheus());
+      return res.writeHead(200, { ...headers, 'content-type': 'application/json' }).end(JSON.stringify(await qu.stats.report()));
+    } catch (error) {
+      return res.writeHead(500, { ...headers, 'content-type': 'text/plain' }).end(error.message);
+    }
+  }
   server = server ?? createServer();
   server.on('request', onRequest);
   const wss = ws ? new WebSocketServer({ server, perMessageDeflate: false }) : null;

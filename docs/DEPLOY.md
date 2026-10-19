@@ -11,6 +11,7 @@ One process, one port (default 8787) serves everything:
 | `/sse/<session>` | HTTPS + SSE fallback for networks that block WebSocket - the same API |
 | `/healthz` | `200 ok` for the proxy or the container (GET and HEAD) |
 | `/info` | `{name, version, transports, uptime}` - nothing about spaces |
+| `/stats`, `/metrics` | operating figures as JSON / Prometheus text - only with `--stats-token` (`QU_STATS_TOKEN`), for requests carrying the token |
 
 The web files are served only with `--static ./web` (`QU_STATIC`). The Docker image always sets it. The relay
 speaks plain HTTP. **TLS is the reverse proxy's job**: clients then use `https://` and `wss://` on the same origin.
@@ -93,6 +94,38 @@ server {
 # under a path prefix: the trailing slashes make nginx strip /qu/
 #   location /qu/ { proxy_pass http://127.0.0.1:8787/; ...same settings as above... }
 ```
+
+## Operating figures
+
+Start the relay with a token (`QU_STATS_TOKEN` in `docker-compose.yml`, or `--stats-token`). `/stats` and
+`/metrics` then answer requests that send `Authorization: Bearer <token>` (or `?token=<token>`). Without a
+token they don't exist (404). Behind the proxy every request arrives from localhost, so the token is the only
+protection. Use a long random one: `openssl rand -hex 24`.
+
+```sh
+curl -fsS -H "Authorization: Bearer $QU_STATS_TOKEN" https://relay.example.org/stats | jq
+```
+
+The report covers:
+- traffic in/out (total, per open connection, throughput over 10 s) and connections (open, total, peak);
+- envelopes processed by outcome, reconciles, rate-limit drops and quota refusals;
+- storage: spaces, envelopes, bytes and the SQLite file size.
+
+Peers appear by random network id only. There are no identities and no space ids.
+
+Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: qu-lite
+    scheme: https
+    metrics_path: /metrics
+    authorization: { credentials: <QU_STATS_TOKEN> }
+    static_configs: [{ targets: ['relay.example.org'] }]
+```
+
+You can also keep `/stats` and `/metrics` off the public address entirely, for example in nginx:
+`location ~ ^/(stats|metrics)$ { allow 10.0.0.0/8; deny all; proxy_pass http://127.0.0.1:8787; }`.
 
 ## Check
 

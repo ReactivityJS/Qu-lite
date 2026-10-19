@@ -13,7 +13,7 @@ they always match this API. To learn why things work the way they do, read
 - [Space](#space)
 - Plugins: [records](#records) · [sync](#sync) · [user](#user) · [inbox](#inbox) ·
   [members](#members) · [signals](#signals) · [status](#status) · [compaction](#compaction) ·
-  [text](#text) · [blobs](#blobs) · [mirror](#mirror) · [limits](#limits)
+  [text](#text) · [blobs](#blobs) · [stats](#stats) · [mirror](#mirror) · [limits](#limits)
 - [Transports](#transports): in-process, WebSocket, relay with SSE fallback, SSE, WebRTC, topology, server, `createLink`
 - [Mirror CLI and Docker](#mirror-cli-and-docker)
 - [Events](#events)
@@ -59,7 +59,7 @@ Typical plugin sets:
 |---|---|
 | Minimal client | `records`, `sync` |
 | Chat/group app | `records`, `user`, `members`, `inbox`, `sync`, `status`, `compaction` (+ `text`, `blobs`) |
-| Mirror/relay | `limits`, `sync({ role: 'mirror' })`, `mirror` |
+| Mirror/relay | `limits`, `sync({ role: 'mirror' })`, `mirror` (+ `stats`) |
 
 Dependencies: `user` needs `records`. `inbox` needs `records` and `user`. `status` needs
 `records` and `members`, and installs `signals` itself. `text`, `blobs` and `compaction` need `records`.
@@ -139,7 +139,7 @@ await registry.create('store', 'memory');
 
 - stores: `memory`, `indexeddb`
 - plugins: `records`, `sync`, `mirror`, `user`, `members`, `inbox`, `signals`, `status`,
-  `compaction`, `limits`, `text`, `blobs`, `topology`
+  `compaction`, `limits`, `text`, `blobs`, `stats`, `topology`
 - transports: `ws`, `sse`, `relay`, `webrtc`
 
 `nodeRegistry()` adds the store `sqlite` and the transports `http-server` and `ws-server`.
@@ -505,6 +505,31 @@ Events: `qu.blob.progress {space, blob, direction, done, total}` (uploads count 
 left the outbox, downloads count chunks) and `qu.blob.done {space, blob, direction}`. Example:
 [08-blobs.mjs](../examples/08-blobs.mjs).
 
+## stats
+
+`qu.use(stats({ windowMs = 10000, sampleMs = 1000, emitMs = 0, storageCacheMs = 5000 }))` – operating
+figures for any peer, client or relay. Optional and cheap: links count bytes and frames anyway
+(`qu.net.links`); the plugin only reads those counters and bus events. One sampling timer (unref'd).
+
+```js
+const s = qu.stats.snapshot();       // sync: traffic, connections, peers, record outcomes, counters
+s.traffic;      // {bytesIn, bytesOut, framesIn, framesOut, inBps, outBps}  totals incl. closed links, throughput over windowMs
+s.peers;        // [{peer, via, since, bytesIn, bytesOut, framesIn, framesOut, inBps, outBps}]  open connections
+s.connections;  // {open, total, peak}
+s.records;      // {local: {stored: n, …}, remote: {stored, duplicate, rejected, gone, …}}  ingest outcomes
+s.counters;     // {reconciles, syncErrors, staleRetired, rateLimited, quotaRefused, refusedByPeer}
+await qu.stats.storage();   // {spaces, records, bytes, outbox, pending, driverBytes, quota}
+await qu.stats.report();    // snapshot + storage
+await qu.stats.prometheus(); // the report as Prometheus text
+qu.bus.on('qu.stats', (snapshot) => render(snapshot)); // every emitMs (0: off)
+```
+
+`storage()` reads key names only: a mirror sums its kept per-space usage (`bytes` = stored
+envelopes), any other peer counts envelopes per known space. `driverBytes` is the SQLite file
+size, or in a browser `navigator.storage.estimate()` (with `quota`). Results are cached for
+`storageCacheMs`. Peers are named by network id only. The figures contain no space ids or
+identities. Example: [09-stats.mjs](../examples/09-stats.mjs).
+
 ## mirror
 
 `qu.use(mirror({ allow = null, quota = null, maxEnvelopeBytes = 262144, expireEveryMs }))` on a
@@ -544,7 +569,7 @@ of them unchanged.
 | `connectSse(qu, base, opts?)` / `sseTransport({connect: [url]})` | SSE only |
 | `rtc({mode, iceServers, maxMesh, fanout})` | WebRTC between members; signaling sealed through the space; `await qu.rtc.track(space)`, `qu.rtc.setMode('auto'\|'mesh'\|'relay-only')`. Needs `status`. |
 | `topology({mode, mirrors, peers, maxMesh, fanout, connect})` | `star`, `mesh` or `auto` over URL endpoints; `qu.topology.{setPeers, setMode, endpoints(), close()}` |
-| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/info` and static files; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
+| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000, statsToken?})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/info` and static files; with `statsToken` (and the `stats` plugin) also `/stats` (JSON) and `/metrics` (Prometheus) for requests sending `Authorization: Bearer <token>` or `?token=`; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
 | `httpServerTransport(opts)` / registry `ws-server`, `http-server` (Node) | plugin form; `qu.transports['ws-server'].{ready, close()}` |
 | `createLink(qu, {send, close?, onUp?, onDown?, scope?})` | write your own transport: call `receive(bytes)` for incoming data and `closed()` on disconnect |
 
@@ -557,13 +582,13 @@ Example: [03-mirror-websocket.mjs](../examples/03-mirror-websocket.mjs).
 
 ```sh
 npx qu-lite-mirror --port 8787 --db ./mirror.sqlite [--host 0.0.0.0] [--allow sid1,sid2] [--static ./web]
-                   [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate 200] [--quiet]
+                   [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate 200] [--stats-token SECRET] [--quiet]
 docker compose up --build                       # same, port 8787, data in a volume
 ```
 
 Every flag also has an environment variable: `QU_PORT`, `QU_HOST`, `QU_DB`, `QU_ALLOW`,
-`QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE` and `QU_RATE` (`0` disables
-rate limiting). The mirror keeps its identity in its database, so clients resume after a
+`QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE`, `QU_RATE` (`0` disables
+rate limiting) and `QU_STATS_TOKEN` (installs `stats`, enables `/stats` and `/metrics`). The mirror keeps its identity in its database, so clients resume after a
 restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
 
 With `--static ./web` (the Docker image always sets it) the same port also serves the client start page
@@ -590,12 +615,13 @@ TLS and reverse proxy setups (nginx, Caddy, path prefix): [DEPLOY.md](DEPLOY.md)
 | `qu.inbox.message` | `{id, at, payload}` | |
 | `qu.signal.<sid>.<type>` | `{sid, type, author, value, at, from}` | |
 | `qu.status.presence` / `typing` / `receipts` | see [status](#status) | |
+| `qu.stats` | snapshot | every `emitMs` (stats plugin) |
 | `qu.blob.progress` / `qu.blob.done` | `{space, blob, direction, done?, total?}` | attachment transfers |
 | `qu.compact.done`, `qu.envelope.dropped`, `qu.gc.expired`, `qu.scrub.done` | | maintenance |
 | `sync.start`, `sync.done`, `sync.error`, `sync.busy` | `{peer, sid, …}` | reconcile sessions |
 | `sync.stale` | `{peer, sid, shard, since, retired}` | a stale device retired old records instead of pushing them |
 | `qu.envelope.retired` | `{sid, ids}` | envelopes removed locally (blind layer) |
-| `net.peer.up` / `net.peer.down` | `{peer, via}` | |
+| `net.peer.up` / `net.peer.down` | `{peer, via}` / `{peer, via, stats}` | `stats`: the link's final byte and frame counters |
 | `net.limited` | `{peer, type, size, closed}` | rate limit hit |
 | `mirror.grant` / `mirror.quota` | `{sid, …}` | |
 | `bus.error` | `{topic, error}` | a handler threw |

@@ -19,6 +19,8 @@ services:
       QU_QUOTA_BYTES: "1073741824"
       QU_MAX_ENVELOPE: "262144"
       QU_RATE: "200"
+      # enables /stats (JSON) and /metrics (Prometheus) for requests with "Authorization: Bearer <token>" (empty = off)
+      QU_STATS_TOKEN: ""
     volumes:
       - qu-lite-data:/data
     restart: unless-stopped
