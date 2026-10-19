@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { crypto, grantMessage } from '../src/index.js';
+import { crypto, grantMessage, createClock, Space, sealEnvelope, formatHlc } from '../src/index.js';
 import { fullClient, mirrorNode, connectInProcess, until, settle, values } from './helpers.js';
 
 async function group(...names) {
@@ -117,4 +117,56 @@ test('a reload keeps every group and every epoch key (joined after a rotation)',
   assert.equal(restored.id, space.id);
   assert.equal(restored.epoch, 1);
   assert.deepEqual(await values(bob, restored, 'chat'), ['in epoch 1']);
+});
+
+test('invites expire: signed window, refused after it - by the invitee and by every member', async () => {
+  let now = Date.UTC(2026, 9, 1);
+  const clock = () => createClock({ now: () => now });
+  const m = await mirrorNode();
+  const alice = await fullClient({ clock: clock() });
+  const bob = await fullClient({ clock: clock() });
+  for (const qu of [alice, bob]) await connectInProcess(qu, m).ready;
+  const group = await alice.createGroup();
+  const admin = await alice.members(group);
+
+  const DAY = 24 * 60 * 60 * 1000;
+  const invite = await admin.invite(); // default: 7 days
+  assert.equal(invite.expiresAt, now + 7 * DAY);
+  assert.equal(invite.token.exp - invite.token.iat, 7 * DAY);
+
+  now += 8 * DAY;
+  await assert.rejects(bob.acceptInvite(invite), /invite has expired/);
+  assert.equal(bob.space(group.id), null, 'nothing joined or stored');
+
+  // a modified client writing its entry anyway, dated after the expiry: every member refuses it
+  const space = await Space.open(crypto.fromBase64(invite.secret), { owner: invite.owner });
+  const author = await space.authorFor(bob.identity);
+  const alias = crypto.toHex(author.publicKey);
+  const late = await sealEnvelope(space, { path: '_members', key: alias, hlc: formatHlc(now), value: { role: 'member', xpub: '00'.repeat(32), token: invite.token } }, author);
+  const rejected = new Promise((resolve) => alice.bus.on('qu.record.rejected', (e) => e.id === late.id && resolve(e.reason)));
+  await alice.envelopes.ingest(late.bytes, { from: 'x' });
+  assert.equal(await rejected, 'invite expired');
+  assert.equal(admin.list().some((e) => e.alias === alias), false);
+
+  // stretching the window (or stripping it) breaks the admin's signature
+  const fresh = await admin.invite(undefined, { expiresIn: DAY });
+  for (const token of [{ ...fresh.token, exp: fresh.token.exp + 30 * DAY }, (({ iat, exp, ...rest }) => rest)(fresh.token)]) {
+    const forged = await sealEnvelope(space, { path: '_members', key: alias, hlc: formatHlc(now), value: { role: 'member', xpub: '00'.repeat(32), token } }, author);
+    const why = new Promise((resolve) => alice.bus.on('qu.record.rejected', (e) => e.id === forged.id && resolve(e.reason)));
+    await alice.envelopes.ingest(forged.bytes, { from: 'x' });
+    assert.equal(await why, 'bad token');
+  }
+
+  // within the window it works; expiresIn: null never expires (the old token format)
+  const joined = await bob.acceptInvite(fresh);
+  await until(async () => (await alice.members(group)).list().length === 2, 5000, 'bob joined in time');
+  const forever = await admin.invite(undefined, { expiresIn: null });
+  assert.equal(forever.token.exp, undefined);
+  assert.equal(forever.expiresAt, undefined);
+  now += 400 * DAY;
+  const carol = await fullClient({ clock: clock() });
+  await connectInProcess(carol, m).ready;
+  await carol.acceptInvite(forever);
+  await until(async () => (await alice.members(group)).list().length === 3, 5000, 'a token without a window still works');
+  assert.ok(joined);
 });

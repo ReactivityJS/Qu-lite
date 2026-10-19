@@ -89,8 +89,10 @@ bound the total. **Fix**: `mirror({ maxSpaces })`, `--max-spaces`, `QU_MAX_SPACE
 
 8. **Space-id holders can subscribe**: current or former members know the sid and can fetch its envelopes at a
    relay. They get ciphertext and header metadata only; new epochs stay unreadable for removed members.
-9. **Invite tokens don't expire**: an unused invite link stays valid. A possible extension is an expiry in the
-   signed token.
+9. **Invite tokens didn't expire** - *fixed afterwards*: tokens now carry a signed validity window
+   (`iat`/`exp`, default 7 days). `acceptInvite()` refuses expired invites, and every member checks the join
+   entry's HLC against the window (stretching or stripping it breaks the signature). Limit: the HLC is chosen by
+   the writer, so a modified client could backdate a join into the window. `remove()` answers that.
 10. **Removed admin, stale verifier**: an ex-admin can still sign epochs at a verifier that hasn't seen the newer
     admin list yet.
 11. **Inbox flooding**: anyone may write into an inbox by design. It is bounded only by per-space quota and rate

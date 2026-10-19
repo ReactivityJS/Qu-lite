@@ -171,7 +171,8 @@ await qu.restoreGroups();                              // after a reload
   one per remaining member, padded to a multiple of 8, published (public visibility) under the old epoch
   so members receive it by sync without anyone learning which box is whose.
 - **Rules on every record**: owner/admins manage members and keys; a member edits only its own entry and
-  cannot change its role; newcomers need an admin-signed, single-use invite token; records of removed
+  cannot change its role; newcomers need an admin-signed, single-use invite token that has not expired
+  (signed `iat`/`exp`, default 7 days, `invite(pub, { expiresIn })`); records of removed
   members written after the removal are refused. What cannot be decided yet (membership or key not
   synced) is **deferred** and re-checked automatically (`records.reindex`).
 - **Inbox** (`inbox.js`): one mailbox per identity, addressed by pubkey, writable by anyone with a public

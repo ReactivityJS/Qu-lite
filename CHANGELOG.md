@@ -24,6 +24,9 @@ Findings of the security review (docs/SECURITY-REVIEW.md), all fixed with regres
   reconcile with any peer marked the device current again. Only a mirror's view now retires records or proves a
   device current.
 - **Low** - a public relay accepted unlimited new spaces: `mirror({ maxSpaces })`, `--max-spaces`, `QU_MAX_SPACES`.
+- Invites expire: `members.invite(pub, { expiresIn })` signs a validity window into the token (default 7 days,
+  `null` = never); `acceptInvite()` refuses expired invites and every member refuses join entries dated outside the
+  window. Tokens without a window (older invites) stay valid. The demo shows the expiry and handles expired links.
 
 ### Added
 

@@ -372,7 +372,8 @@ The relay only sees "mailbox X got N bytes". `enabled: false` makes you unreacha
 ```js
 const group = await qu.createGroup();            // joined, watched, I'm the owner
 const m = await qu.members(group);
-const invite = await m.invite();                 // link/QR: {type:'invite', secret, owner, epochs, admins, token}
+const invite = await m.invite();                 // link/QR: {type:'invite', secret, owner, epochs, admins, token, expiresAt}
+await m.invite(null, { expiresIn: 24 * 3600_000 }); // valid for a day (default 7 days, null = never)
 await m.invite(bobPubHex, { role: 'member' });   // or into Bob's inbox (needs inbox())
 // Bob:
 qu.bus.on('qu.inbox.message', ({ payload }) => payload.type === 'invite' && qu.acceptInvite(payload));
@@ -385,7 +386,7 @@ await qu.restoreGroups();                        // after a reload: reopens ever
 | `me` | own alias in this space (hex) |
 | `list()` | `[{alias, role, xpub, identity?, name?, verified, me}]` |
 | `role(alias = me)`, `isAdmin(alias = me)` | |
-| `invite(identityPub?, {role}?)` | admin only; `role`: `'member'` or `'admin'` |
+| `invite(identityPub?, {role?, expiresIn?})` | admin only; `role`: `'member'` or `'admin'`; `expiresIn` ms (default 7 days, `null` = never). The window (`token.iat`/`token.exp`) is signed; `acceptInvite()` refuses an expired invite, and every member refuses a join entry dated outside it (`qu.record.rejected` reason `invite expired`) |
 | `reveal({name}?)` | optional, verifiable "alias X is identity Y" (visible to members only) |
 | `promote(alias, role)` | owner only; re-signs the admin list |
 | `remove(alias) → epoch` | admin; role → `removed`, new epoch for everyone else |

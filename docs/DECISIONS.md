@@ -68,7 +68,9 @@ don't undo a deliberate choice by accident.
 - Whoever knows a space id (current or former members) can subscribe to its envelopes at a
   relay and fetch them: ciphertext and header metadata only - new epochs stay unreadable for
   removed members.
-- Invite tokens do not expire: an unused invite link stays valid until someone uses it.
+- Invite tokens expire (signed window, default 7 days), checked against the join entry's HLC so
+  that all members decide alike. The HLC is the writer's: a modified client could backdate a
+  join into the window - remove such a member (`members.remove`).
 - A removed admin can still sign epochs at a verifier that has not seen the newer admin list.
 - Anyone can write into an inbox (that is its purpose): flooding is bounded only by the relay's
   per-space quota and rate limits.

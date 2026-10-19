@@ -23,7 +23,12 @@
  *   - a member may only re-write its own entry without changing its role,
  *     and only write its own `_receipts/*` cursor (key = own alias);
  *     a newcomer may create its own entry with a valid admin-signed invite
- *     token (single use);
+ *     token (single use) whose validity window covers the entry's time:
+ *     tokens carry `iat`/`exp` (signed; default 7 days) and every peer checks
+ *     the entry's HLC against them - deterministic, so all members agree,
+ *     also when they sync later. The HLC is the writer's: an unmodified
+ *     client never joins late, a modified one could backdate into the
+ *     window - `remove()` is the answer to that;
  *   - every other record needs an active member as author; a removed
  *     member's records written after its removal are refused;
  *   - what cannot be decided yet (membership or admin list not synced) is
@@ -41,6 +46,7 @@
 import * as crypto from './crypto.js';
 import { Space } from './space.js';
 import { GC_TYPE } from './gc.js';
+import { parseHlc } from './hlc.js';
 
 const MEMBERS = '_members';
 const GRANTS = '_grants';
@@ -62,7 +68,18 @@ export const decodeGrant = (g) =>
     ? { kind: 'admins', seq: g.seq, admins: g.admins.map(unb64), sig: unb64(g.sig) }
     : { epoch: g.epoch, writePub: unb64(g.writePub), by: unb64(g.by), sig: unb64(g.sig) };
 
-const tokenMessage = (sid, token) => enc.encode(`qu-lite/invite\n${sid}\n${token.id}\n${token.role}`);
+const DAY = 24 * 60 * 60 * 1000;
+/** What the inviting admin signs; the validity window is part of it, so it cannot be stripped or stretched. */
+const tokenMessage = (sid, token) =>
+  enc.encode(`qu-lite/invite\n${sid}\n${token.id}\n${token.role}${token.exp !== undefined ? `\n${token.iat}\n${token.exp}` : ''}`);
+/** @returns {string|null} why a token's validity window excludes `at` (ms), or null */
+function outsideWindow(token, at) {
+  if (token.exp === undefined && token.iat === undefined) return null; // a token without a window never expires
+  if (!Number.isSafeInteger(token.iat) || !Number.isSafeInteger(token.exp) || token.iat > token.exp) return 'bad token';
+  if (at > token.exp) return 'invite expired';
+  if (at < token.iat) return 'invite not yet valid';
+  return null;
+}
 const revealMessage = (sid, alias) => enc.encode(`qu-lite/reveal\n${sid}\n${alias}`);
 
 /** @param {{pad?: number}} [options] - key boxes are padded to a multiple of `pad` */
@@ -173,10 +190,13 @@ export function members({ pad = 8 } = {}) {
       for (const r of await qu.query({ space, path: KEYS })) await applyKeys(r);
       bus.on(`qu.record.${sid}`, onRecord);
 
-      async function validToken(token, role, alias) {
+      /** @param {number} at - when the entry was written (its HLC, or now for a local write) */
+      async function validToken(token, role, alias, at) {
         if (!token || token.role !== role || !token.by || !token.sig) return 'no token';
         if (!isAdmin(token.by)) return 'defer'; // the admin list may not have arrived yet
         if (!(await crypto.verify(tokenMessage(sid, token), unb64(token.sig), crypto.fromHex(token.by)))) return 'bad token';
+        const window = outsideWindow(token, at);
+        if (window) return window;
         for (const [other, entry] of list) if (other !== alias && entry.tokenId === token.id) return 'token used';
         return 'ok';
       }
@@ -193,7 +213,7 @@ export function members({ pad = 8 } = {}) {
             if (entry.role === 'removed') return 'removed';
             return record.value?.role === entry.role ? 'ok' : 'role change not allowed';
           }
-          const verdict = await validToken(record.value?.token, record.value?.role, author);
+          const verdict = await validToken(record.value?.token, record.value?.role, author, parseHlc(record.hlc).ms);
           return verdict === 'no token' ? 'defer' : verdict; // an admin-written entry may still arrive
         }
         if (record.path === GRANTS || record.path === KEYS) return isAdmin(author) ? 'ok' : 'defer';
@@ -211,7 +231,11 @@ export function members({ pad = 8 } = {}) {
           if (isAdmin(me)) return;
           if (draft.key !== me) throw new Error('members: only admins can change other members');
           if (entry && draft.value?.role !== entry.role) throw new Error('members: you cannot change your own role');
-          if (!entry && (await validToken(draft.value?.token, draft.value?.role, me)) !== 'ok') throw new Error('members: a valid invite token is required to join');
+          if (!entry) {
+            const verdict = await validToken(draft.value?.token, draft.value?.role, me, qu.clock.now());
+            if (verdict === 'invite expired') throw new Error('members: this invite has expired - ask for a new one');
+            if (verdict !== 'ok') throw new Error('members: a valid invite token is required to join');
+          }
           return;
         }
         if (draft.path === GRANTS || draft.path === KEYS) {
@@ -245,12 +269,19 @@ export function members({ pad = 8 } = {}) {
         /**
          * Creates an invite (admin only). With `identityPub` it is also
          * delivered to that person's inbox (needs the inbox plugin).
-         * @returns {Promise<object>} the invite: {secret, owner, epochs, admins, token}
+         * `expiresIn` (ms, default 7 days; `null` = never): the invite can
+         * only be used until then - signed, checked by every member.
+         * @returns {Promise<object>} the invite: {secret, owner, epochs, admins, token, expiresAt}
          */
-        async invite(identityPub, { role = 'member' } = {}) {
+        async invite(identityPub, { role = 'member', expiresIn = 7 * DAY } = {}) {
           requireAdmin();
           if (!ACTIVE.has(role) || role === 'owner') throw new Error(`members: cannot invite as ${role}`);
+          if (expiresIn !== null && !(Number.isSafeInteger(expiresIn) && expiresIn > 0)) throw new Error('members: expiresIn must be a positive number of ms or null');
           const token = { id: crypto.toHex(crypto.randomBytes(8)), role, by: me };
+          if (expiresIn !== null) {
+            token.iat = qu.clock.now();
+            token.exp = token.iat + expiresIn;
+          }
           token.sig = b64(await crypto.sign(tokenMessage(sid, token), (await space.authorFor(identity)).privateKey));
           const grants = await space.grants();
           const invite = {
@@ -260,6 +291,7 @@ export function members({ pad = 8 } = {}) {
             epochs: grants.filter((g) => g.epoch > 0).map((g) => ({ grant: encodeGrant(g), key: b64(space.epochKeys(g.epoch).key) })),
             admins: grants.filter((g) => g.kind === 'admins').map(encodeGrant),
             token,
+            ...(token.exp !== undefined ? { expiresAt: token.exp } : {}),
           };
           if (identityPub) {
             if (!qu.inbox) throw new Error('members.invite: install inbox() to invite by pubkey');
@@ -354,6 +386,8 @@ export function members({ pad = 8 } = {}) {
      * are verified, then the own member entry is written with the token.
      */
     async function acceptInvite(invite, options = {}) {
+      // refuse before anything is joined or stored (the members check it again on the entry)
+      if (invite.token && outsideWindow(invite.token, qu.clock.now()) === 'invite expired') throw new Error('members: this invite has expired - ask for a new one');
       const space = await Space.open(unb64(invite.secret), { owner: invite.owner });
       for (const g of invite.admins ?? []) await space.addAdmins(decodeGrant(g));
       for (const { grant, key } of [...(invite.epochs ?? [])].sort((a, b) => a.grant.epoch - b.grant.epoch)) {

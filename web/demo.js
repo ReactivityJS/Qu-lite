@@ -226,8 +226,9 @@ $('groups').addEventListener('change', () => known.get($('groups').value) && ope
 $('newGroup').addEventListener('click', async () => openGroup(await qu.createGroup()));
 $('makeLink').addEventListener('click', async () => {
   if (!space) return;
-  const invite = await manager.invite();
+  const invite = await manager.invite(); // valid for 7 days (signed into the token)
   $('invite').value = `${location.origin}${location.pathname}#i=${toUrl(invite)}`;
+  $('invite').title = `gültig bis ${new Date(invite.expiresAt).toLocaleString()}`;
 });
 $('invitePubBtn').addEventListener('click', async () => {
   if (!space || !$('invitePub').value.trim()) return;
@@ -269,7 +270,7 @@ function renderInbox() {
             pending.delete(msg.id);
             await qu.storage.set(`demo/accepted/${msg.id}`, 1);
             renderInbox();
-            await openGroup(await qu.acceptInvite(msg.payload));
+            await qu.acceptInvite(msg.payload).then(openGroup).catch((error) => ($('banner').textContent = error.message));
           },
         })
       );
@@ -288,8 +289,13 @@ for (const msg of await qu.inbox.messages()) await onMessage(msg);
 // ---------------------------------------------------------------- start
 async function fromHash() {
   const hash = new URLSearchParams(location.hash.slice(1));
-  if (hash.get('i')) await openGroup(await qu.acceptInvite(fromUrl(hash.get('i'))));
-  else if (hash.get('g') && known.has(hash.get('g'))) await openGroup(known.get(hash.get('g')));
+  if (hash.get('i')) {
+    try {
+      await openGroup(await qu.acceptInvite(fromUrl(hash.get('i'))));
+    } catch (error) {
+      $('banner').textContent = /expired/.test(error.message) ? 'Diese Einladung ist abgelaufen - bitte um eine neue.' : `Einladung ungültig: ${error.message}`;
+    }
+  } else if (hash.get('g') && known.has(hash.get('g'))) await openGroup(known.get(hash.get('g')));
 }
 window.addEventListener('hashchange', fromHash);
 await fromHash();
