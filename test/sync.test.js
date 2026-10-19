@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createQu, createClock, records, sync, Space, connectInProcess, memoryDriver } from '../src/index.js';
+import { createQu, createClock, records, sync, Space, connectInProcess, memoryDriver, encodeFrame } from '../src/index.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 // Minute-aligned, so day boundaries fall exactly on sync-index minute buckets.
@@ -44,10 +44,13 @@ test('3 days offline on both sides: one resync brings both peers to the same sta
   const a = await peer();
   const b = await peer();
   const [sa, sb] = await shared(a, b);
+  await a.watch({ space: sa });
+  await b.watch({ space: sb });
 
   let link = connectInProcess(a, b);
+  await link.ready;
   await a.write(sa, 'chat', 'before');
-  await settle();
+  await until(async () => (await values(b, sb, 'chat')).length === 1);
   await link.disconnect();
 
   for (let i = 0; i < 30; i++) {
@@ -56,14 +59,15 @@ test('3 days offline on both sides: one resync brings both peers to the same sta
     if (i % 6 === 0) await b.write(sb, 'chat', `b${i}`);
   }
 
+  // on reconnect ONE side reconciles the watched space (the smaller network id): 30 one way, 5 the other
+  const summaries = [];
+  for (const qu of [a, b]) qu.bus.on('sync.done', (s) => s.sent + s.received > 0 && summaries.push(s));
   link = connectInProcess(a, b);
   await link.ready;
-  const [summary] = await a.resync({ space: sa });
-  assert.equal(summary.sent, 30);
-  assert.equal(summary.received, 5);
-  assert.deepEqual(summary.missing, []);
-  // The 30 pushed to b are not awaited by resync(): wait until b has indexed them.
-  await until(async () => (await values(b, sb, 'chat')).length === 36);
+  await until(async () => (await values(b, sb, 'chat')).length === 36 && (await values(a, sa, 'chat')).length === 36);
+  assert.equal(summaries.length, 1);
+  assert.deepEqual([summaries[0].sent, summaries[0].received].sort((x, y) => x - y), [5, 30]);
+  assert.deepEqual(summaries[0].missing, []);
 
   assert.deepEqual((await recIds(a, sa)).sort(), (await recIds(b, sb)).sort());
   assert.equal((await values(b, sb, 'chat')).length, 36);
@@ -96,6 +100,7 @@ test('volume: reconciling 10,000 records after one offline change costs a few KB
 
   const N = 10_000;
   let fullSize = 0;
+  await b.watch({ space: sb }); // b follows the space; a only writes
   const seed = connectInProcess(a, b);
   for (let i = 0; i < N; i++) {
     if (i % 50 === 0) time.now += 60_000;
@@ -107,17 +112,48 @@ test('volume: reconciling 10,000 records after one offline change costs a few KB
   await seed.disconnect();
 
   await a.write(sa, 'log', 'offline change');
-  const link = connectInProcess(a, b);
+  const done = new Promise((resolve) => b.bus.on('sync.done', resolve));
+  const link = connectInProcess(a, b); // b reconciles its watch on connect
   await link.ready;
-  const [summary] = await a.resync({ space: sa });
+  const summary = await done;
+  await until(async () => (await recIds(b, sb)).length === N + 1);
   await settle();
   const bytes = link.stats.aToB + link.stats.bToA;
 
-  assert.equal(summary.sent, 1);
+  assert.equal(summary.received, 1);
   assert.equal((await recIds(b, sb)).length, N + 1);
   assert.ok(bytes < 8 * 1024, `reconcile used ${bytes} bytes`);
   assert.ok(bytes < fullSize / 500, `reconcile ${bytes} B vs full replay ${fullSize} B`);
   console.log(`# volume: reconcile ${bytes} B for ${N} records (full replay would be ${fullSize} B)`);
+});
+
+test('bounded frames: a large difference is reconciled in several rounds, no frame above the limit', async () => {
+  const make = async () => {
+    const qu = await createQu();
+    qu.use(records());
+    qu.use(sync({ releaseMs: 0, timeoutMs: 5000, retryMs: 0, frameSizeLimit: 4096 }));
+    return qu;
+  };
+  const a = await make();
+  const b = await make();
+  const [sa, sb] = await shared(a, b);
+  for (let i = 0; i < 400; i++) await a.write(sa, 'log', i);
+  const largest = { neg: 0, ids: 0, rounds: 0 };
+  for (const qu of [a, b]) {
+    qu.bus.on('net.out.**', (payload, ctx) => {
+      const type = ctx.topic.split('.')[3];
+      const size = encodeFrame(type, payload).length;
+      if (type === 'neg' || type === 'negr') largest.neg = Math.max(largest.neg, size);
+      if (type === 'neg') largest.rounds++;
+      if (type === 'want' || type === 'ack') largest.ids = Math.max(largest.ids, size);
+    });
+  }
+  await b.watch({ space: sb });
+  await connectInProcess(a, b).ready;
+  await until(async () => (await recIds(b, sb)).length === 400);
+  assert.ok(largest.neg <= 4096 + 128, `largest reconcile message ${largest.neg} B`); // limit + frame header
+  assert.ok(largest.rounds > 1, 'split into several rounds');
+  assert.ok(largest.ids <= 4096 * 32 + 128, `id lists are batched (${largest.ids} B)`);
 });
 
 test('partial sync: only the watched path shard is fetched and routed live', async () => {
@@ -155,6 +191,7 @@ test('repair: scrub drops a corrupted record, resync restores it; lost indexes a
   const b = await peer();
   const [sa, sb] = await shared(a, b);
   await connectInProcess(a, b).ready;
+  await b.watch({ space: sb });
   for (let i = 0; i < 5; i++) await a.write(sa, 'chat', `x${i}`);
   await a.write(sa, 'profile', 'Anna', { key: 'name' });
   await settle();

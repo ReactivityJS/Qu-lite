@@ -153,8 +153,22 @@ test('junk under a blob path changes nothing; get() times out on a blob nobody h
 
   await assert.rejects(bob.blobs.get(sb, 'ab'.repeat(16), { timeoutMs: 200 }), /incomplete after 200 ms/);
 
+
   assert.equal(await alice.blobs.del(sa, ref), ref.chunks + 3);
   await until(async () => (await bob.blobs.has(sb, ref)).have === 0, 5000, 'gone at bob');
   // alice owns the space, so her drop list also removes bob's junk: only the drop list itself is left
   await until(async () => (await m.mirror.count(sa.id)) === 1, 5000, 'mirror dropped every record of the blob');
+
+  // a member's own "blob" whose manifest claims 1.5 GB in one chunk (the id is computed for it):
+  // readers must not allocate it - the manifest is refused, get() just never completes
+  const one = crypto.getRandomValues(new Uint8Array(16));
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', one));
+  const huge = { v: 1, size: 1_500_000_000, chunkSize: 2_000_000_000, hashes: Buffer.from(hash).toString('base64') };
+  const head = new TextEncoder().encode(`qu-lite/blob\n${huge.size}\n${huge.chunkSize}\n`);
+  const hugeId = Buffer.from(new Uint8Array(await crypto.subtle.digest('SHA-256', Buffer.concat([head, hash])))).subarray(0, 16).toString('hex');
+  await bob.write(sb, bob.blobs.path(hugeId), huge);
+  await bob.write(sb, bob.blobs.path(hugeId), { i: 0, d: Buffer.from(one).toString('base64') });
+  await until(async () => (await alice.query({ space: sa, path: alice.blobs.path(hugeId) })).length === 2, 5000, 'oversized blob arrived');
+  assert.deepEqual(await alice.blobs.has(sa, hugeId), { have: 0, total: null, complete: false });
+  await assert.rejects(alice.blobs.get(sa, hugeId, { timeoutMs: 200 }), /incomplete/);
 });

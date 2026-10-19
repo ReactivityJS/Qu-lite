@@ -8,6 +8,9 @@ import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import WebSocket from 'ws';
 import { createPeer, createQu, Space, records, sync, relayTransport } from '../src/index.js';
 import { nodeRegistry, listenHttp } from '../src/node.js';
@@ -92,6 +95,28 @@ test('one port: start page, demo, browser bundle, /healthz and /info next to the
   }
 });
 
+test('static files never leave the root - not even into a sibling directory with the same name prefix', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qu-lite-static-'));
+  mkdirSync(join(dir, 'web'));
+  mkdirSync(join(dir, 'web-secret'));
+  writeFileSync(join(dir, 'web', 'index.html'), 'public');
+  writeFileSync(join(dir, 'web-secret', 'key.txt'), 'TOPSECRET');
+  const qu = await createQu();
+  const server = await listenHttp(qu, { port: 0, host: '127.0.0.1', static: join(dir, 'web') });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    assert.equal(await (await fetch(`${base}/`)).text(), 'public');
+    for (const path of ['/..%2Fweb-secret%2Fkey.txt', '/%2e%2e%2fweb-secret/key.txt', '/..%5Cweb-secret%5Ckey.txt']) {
+      const res = await fetch(base + path);
+      assert.equal(res.status, 404, path);
+      assert.equal((await res.text()).includes('TOPSECRET'), false);
+    }
+  } finally {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('WebSocket heartbeat: idle clients are pinged, a client that stops answering is closed', async () => {
   const qu = await createQu();
   const server = await listenHttp(qu, { port: 0, host: '127.0.0.1', pingMs: 50 });
@@ -107,6 +132,20 @@ test('WebSocket heartbeat: idle clients are pinged, a client that stops answerin
     await closed; // terminated after a missed pong
     assert.equal(alive.readyState, WebSocket.OPEN);
     alive.close();
+  } finally {
+    await server.close();
+  }
+});
+
+test('a WebSocket message above maxFrameBytes closes the connection instead of being buffered', async () => {
+  const qu = await createQu();
+  const server = await listenHttp(qu, { port: 0, host: '127.0.0.1', maxFrameBytes: 64 * 1024 });
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`);
+    await new Promise((resolve) => ws.on('open', resolve));
+    const closed = new Promise((resolve) => ws.on('close', (code) => resolve(code)));
+    ws.send(new Uint8Array(65 * 1024));
+    assert.equal(await closed, 1009);
   } finally {
     await server.close();
   }

@@ -20,6 +20,9 @@
  *     updated in the same atomic write set as the envelope (and its drops).
  *     Refused envelopes are nack'ed to the sender (its outbox keeps them);
  *     drop lists are always accepted - they free space.
+ *   - at most `maxSpaces` spaces: a space's grant is self-certifying, so
+ *     anyone can create new ones - without this limit per-space quotas
+ *     don't bound the mirror's storage (`mirror.full` when refused).
  *
  * Install next to `sync({role: 'mirror'})`, without `records()`.
  */
@@ -30,9 +33,9 @@ import { readPublic } from './envelope.js';
 import { GC_TYPE } from './gc.js';
 
 /**
- * @param {{allow?: string[]|null, expireEveryMs?: number, quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number}} [options]
+ * @param {{allow?: string[]|null, expireEveryMs?: number, quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null}} [options]
  */
-export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota = null, maxEnvelopeBytes = 256 * 1024 } = {}) {
+export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota = null, maxEnvelopeBytes = 256 * 1024, maxSpaces = null } = {}) {
   return (qu) => {
     const { bus, storage } = qu;
     const env = envelopes()(qu);
@@ -43,8 +46,13 @@ export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota
 
     const watchSpace = (sid) => (typeof qu.watch === 'function' ? qu.watch({ space: { sid } }) : undefined);
 
-    bus.on('qu.grant.offer', ({ sid }, ctx) => {
-      if (!allowed(sid)) ctx.stop();
+    bus.on('qu.grant.offer', async ({ sid }, ctx) => {
+      if (!allowed(sid)) return ctx.stop();
+      // a new space beyond the limit (known spaces keep receiving epoch/admin updates)
+      if (maxSpaces !== null && !env.keyring.state(sid) && env.keyring.sids().length >= maxSpaces) {
+        ctx.stop();
+        await bus.notify('mirror.full', { sid, spaces: env.keyring.sids().length });
+      }
     });
     const usageKey = (sid) => `mirror/usage/${sid}`;
     /** Stored usage of a space; built by one scan if missing (older database). */

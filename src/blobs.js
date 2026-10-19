@@ -162,8 +162,13 @@ export function blobs({ chunkSize = 64 * 1024, maxBytes = 64 * 1024 * 1024, keep
       const state = { manifest: null, hashes: null, chunks: new Map(), candidates: [] };
       async function verifyManifest(value) {
         if (state.manifest || value?.v !== 1 || typeof value.hashes !== 'string') return;
+        // Anyone in the space can write a manifest that hashes to ITS id - so it must also be
+        // self-consistent and within maxBytes before a reader allocates or trusts anything.
+        const { size, chunkSize: chunk } = value;
+        if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes || !Number.isSafeInteger(chunk) || chunk <= 0 || chunk > maxBytes) return;
         const hashes = crypto.fromBase64(value.hashes);
-        if ((await blobId(value.size, value.chunkSize, hashes)) !== blob) return;
+        if (hashes.length !== Math.ceil(size / chunk) * 32) return;
+        if ((await blobId(size, chunk, hashes)) !== blob) return;
         state.manifest = value;
         state.hashes = hashes;
         const waiting = state.candidates;
@@ -173,9 +178,12 @@ export function blobs({ chunkSize = 64 * 1024, maxBytes = 64 * 1024 * 1024, keep
       async function addChunk(value) {
         if (!Number.isInteger(value?.i) || typeof value.d !== 'string' || state.chunks.has(value.i)) return;
         if (!state.manifest) return void state.candidates.push(value);
+        const { size, chunkSize: chunk } = state.manifest;
+        if (value.i < 0 || value.i >= state.hashes.length / 32) return;
         const bytes = crypto.fromBase64(value.d);
+        if (bytes.length !== Math.min(chunk, size - value.i * chunk)) return; // exactly its slice, so bytes() fits
         const want = state.hashes.subarray(value.i * 32, value.i * 32 + 32);
-        if (want.length !== 32 || crypto.toHex(await crypto.sha256(bytes)) !== crypto.toHex(want)) return; // junk under the path
+        if (crypto.toHex(await crypto.sha256(bytes)) !== crypto.toHex(want)) return; // junk under the path
         state.chunks.set(value.i, bytes);
       }
       return {

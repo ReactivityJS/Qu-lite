@@ -81,6 +81,7 @@ test('a record whose commit failed on receipt is fetched again by the next resyn
   const [sa, sb] = await shared(a, b);
   const link = connectInProcess(a, b);
   await link.ready;
+  await b.watch({ space: sb }); // live records only reach peers that subscribed
 
   rootB.failing = 1;
   const outcome = new Promise((resolve) => b.bus.on('qu.record.processed', (e) => e.from && resolve(e.status)));

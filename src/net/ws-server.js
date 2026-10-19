@@ -27,7 +27,7 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { attachSocket } from './ws.js';
 import { createSseHandler } from './sse-server.js';
@@ -47,7 +47,8 @@ function staticHandler(dir) {
     try {
       const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
       let file = normalize(join(root, path));
-      if (!file.startsWith(root)) throw new Error('outside root');
+      // inside root - with a separator, or `/app/web-secret` would pass as "starting with /app/web"
+      if (file !== root && !file.startsWith(root + sep)) throw new Error('outside root');
       if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
       const body = await readFile(file);
       res.writeHead(200, { ...HEADERS, 'content-type': TYPES[extname(file)] ?? 'application/octet-stream' });
@@ -64,9 +65,11 @@ function staticHandler(dir) {
  * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, ws?: boolean, sse?: boolean|object, pingMs?: number}} [options]
  *   `pingMs`: WebSocket heartbeat (0 = off); a client that did not answer the previous ping is closed.
  *   `statsToken`: enables /stats and /metrics (needs the stats plugin) for requests carrying this token.
+ *   `maxFrameBytes`: largest WebSocket message accepted (bigger: connection closed, 1009) - the `ws`
+ *   default of 100 MiB would let any client make the relay buffer that much before rate limits apply.
  * @returns {Promise<{port: number, close: () => Promise<void>, wss: WebSocketServer|null}>}
  */
-export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken } = {}) {
+export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024 } = {}) {
   const ownServer = !server;
   const sseHandler = sse ? createSseHandler(qu, typeof sse === 'object' ? sse : {}) : null;
   const files = dir ? staticHandler(dir) : null;
@@ -104,7 +107,7 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, ws =
   }
   server = server ?? createServer();
   server.on('request', onRequest);
-  const wss = ws ? new WebSocketServer({ server, perMessageDeflate: false }) : null;
+  const wss = ws ? new WebSocketServer({ server, perMessageDeflate: false, maxPayload: maxFrameBytes }) : null;
   const refuseUpgrade = (req, socket) => socket.destroy();
   if (!ws) server.on('upgrade', refuseUpgrade);
   wss?.on('connection', (socket) => {

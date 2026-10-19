@@ -3,7 +3,11 @@
  * plugin (WebSocket, later WebRTC DataChannel or HTTPS+SSE, in-process for
  * tests) only moves bytes; everything Qu-specific lives here once:
  *
- *   - the `hi {peer}` handshake (the network id - never the identity),
+ *   - the `hi {peer}` handshake (the network id - never the identity). A
+ *     second link claiming a network id that is already connected REPLACES
+ *     the old one (peer down, then up): a client reconnecting before the
+ *     dead socket was noticed works at once, and an impostor reusing someone
+ *     else's id never shares that peer's subscriptions or traffic,
  *   - framing (frame.js: binary, no base64),
  *   - `net.out.<remote>.<type>` -> send, received frames -> `net.in.<remote>.<type>`,
  *   - `net.peer.up` / `net.peer.down`, byte and frame counters per link -
@@ -68,7 +72,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
   };
   sendFrame('hi', { peer: localId ?? qu.peerId });
 
-  return {
+  const link = {
     stats,
     get peer() {
       return remote;
@@ -88,8 +92,9 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
         const peer = String(frame.payload?.peer ?? '');
         if (!/^[0-9a-f]{16}$/.test(peer)) return close();
         remote = localId ? xorHex(peer, localId) : peer;
+        net.links.get(remote)?.drop(); // newest wins - never two links under one name
         if (scope) net.scopes.set(remote, new Set(scope));
-        net.links.set(remote, { via, since: Date.now(), stats });
+        net.links.set(remote, { via, since: Date.now(), stats, drop: () => (link.closed(), close()) });
         off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
         onUp?.(remote);
         qu.bus.notify('net.peer.up', { peer: remote, via });
@@ -117,4 +122,5 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       close();
     },
   };
+  return link;
 }

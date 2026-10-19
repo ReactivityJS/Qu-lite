@@ -216,3 +216,64 @@ test('isolate: one connection per space over real WebSockets - the relay sees se
     await relay.close();
   }
 });
+
+test('a relay routes live records only to peers that subscribed: an anonymous connection learns nothing', async () => {
+  const m = await mirrorWith();
+  const a = await plain();
+  const b = await plain();
+  const sa = a.join(await Space.create(a.identity));
+  const sb = b.join(await Space.open(sa.invite));
+  await a.watch({ space: sa });
+  await b.watch({ space: sb });
+  await connectInProcess(a, m).ready;
+  await connectInProcess(b, m).ready;
+  const bare = await createQu(); // no plugins at all: never says hello, never subscribes
+  const lurker = await createQu();
+  lurker.use(sync({ retryMs: 0 })); // says hello, watches nothing
+  const seen = [frames(bare), frames(lurker)];
+  await connectInProcess(bare, m).ready;
+  await connectInProcess(lurker, m).ready;
+  await a.write(sa, 'chat', 'for members only');
+  await until(async () => (await values(b, sb, 'chat')).length === 1, 5000, 'b gets it');
+  await settle(100);
+  for (const list of seen) assert.deepEqual(list.filter((f) => f.type === 'rec' || f.type === 'sig').length, 0);
+});
+
+test('a second connection claiming a connected network id replaces it - it never shares that peer\'s traffic', async () => {
+  const m = await mirrorWith();
+  const victim = await plain();
+  const other = await plain();
+  const sv = victim.join(await Space.create(victim.identity));
+  const so = other.join(await Space.open(sv.invite));
+  await victim.watch({ space: sv });
+  await other.watch({ space: so });
+  await connectInProcess(victim, m).ready;
+  await connectInProcess(other, m).ready;
+  const replaced = new Promise((resolve) => m.bus.on('net.peer.down', ({ peer }) => peer === victim.peerId && resolve()));
+  const impostor = await createQu({ netId: victim.peerId }); // learned the id, e.g. over a direct link
+  const seen = frames(impostor);
+  await connectInProcess(impostor, m).ready;
+  await replaced;
+  await other.write(so, 'chat', 'for the victim');
+  await settle(200);
+  assert.equal(seen.filter((f) => f.type === 'rec').length, 0);
+});
+
+test('maxSpaces: a mirror accepts no new spaces beyond its limit, known ones keep working', async () => {
+  const m = await mirrorWith({ maxSpaces: 1 });
+  const full = [];
+  m.bus.on('mirror.full', (e) => full.push(e));
+  const a = await plain();
+  const s1 = a.join(await Space.create(a.identity));
+  await connectInProcess(a, m).ready;
+  await a.write(s1, 'chat', 'first space');
+  await until(async () => (await a.syncStatus()).outbox === 0, 5000, 'first space stored');
+  const s2 = a.join(await Space.create(a.identity));
+  await a.write(s2, 'chat', 'second space');
+  await until(() => full.length > 0, 5000, 'refused');
+  await settle(100);
+  assert.equal(await m.mirror.count(s2.id), 0);
+  assert.deepEqual(await m.mirror.spaces(), [s1.id]);
+  await a.write(s1, 'chat', 'still fine');
+  await until(async () => (await m.mirror.count(s1.id)) === 2, 5000, 'known space keeps working');
+});

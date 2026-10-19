@@ -95,10 +95,34 @@ server {
 #   location /qu/ { proxy_pass http://127.0.0.1:8787/; ...same settings as above... }
 ```
 
+## Hardening a public relay
+
+Anyone can reach a public relay and create spaces on it: a space's grant is self-certifying, and no account is
+needed. The relay can't read anything, but it can be filled up or flooded. Set these limits:
+
+| Setting | Recommendation | Why |
+|---|---|---|
+| `QU_MAX_SPACES` / `--max-spaces` | e.g. `10000` | caps how many spaces strangers can create; known spaces keep working |
+| `QU_QUOTA_BYTES` / `QU_QUOTA_RECORDS` | e.g. `1073741824` / `200000` | caps each space, including every inbox |
+| `QU_MAX_ENVELOPE` | `262144` (default) | largest single record |
+| `QU_RATE` | `200` (default) | frames/s per connection |
+| connections per IP | at the proxy (below) | rate limits are per connection; the relay doesn't see client IPs |
+
+The relay also closes WebSocket messages above 8 MiB (`maxFrameBytes`) and SSE uploads above 1 MiB.
+
+Connection limits per client IP belong in the proxy, for example in nginx:
+
+```nginx
+limit_conn_zone $binary_remote_addr zone=qu_conn:10m;
+# inside the server/location block:
+limit_conn qu_conn 20;
+```
+
 ## Operating figures
 
 Start the relay with a token (`QU_STATS_TOKEN` in `docker-compose.yml`, or `--stats-token`). `/stats` and
-`/metrics` then answer requests that send `Authorization: Bearer <token>` (or `?token=<token>`). Without a
+`/metrics` then answer requests that send `Authorization: Bearer <token>` (or `?token=<token>`; avoid it,
+because query strings end up in proxy access logs). Without a
 token they don't exist (404). Behind the proxy every request arrives from localhost, so the token is the only
 protection. Use a long random one: `openssl rand -hex 24`.
 

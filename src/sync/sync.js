@@ -19,7 +19,10 @@
  * reconciles exactly that scope - a space, optionally narrowed to a path's
  * shard and a time window - with every connected peer, and again whenever a
  * peer connects. Live records are only routed to peers that subscribed to
- * their (sid, shard); a peer that never sent `sub` gets everything.
+ * their (sid, shard). A mirror takes everything (it stores whole spaces and
+ * never subscribes at clients); any other peer gets only what it subscribed
+ * to - one that never sent `sub` gets nothing live, so connecting to a relay
+ * reveals nothing about the spaces it serves.
  *
  *   hello         {role, subs, only?}             'peer' | 'mirror', current subscriptions;
  *                                                 `only`: the list is exhaustive (even if empty)
@@ -57,7 +60,9 @@
  * bring them back everywhere. So every complete reconcile is remembered:
  *
  *   sync/last/<sid>[/<shard>]      start time of the last complete reconcile
- *                                  of that (whole-space or shard) scope
+ *                                  of that (whole-space or shard) scope with
+ *                                  a mirror (only a mirror's state proves
+ *                                  this device knows the deletions)
  *
  * A scope whose last complete reconcile is older than the horizon (minus a
  * day of margin) is STALE. Its reconcile still pushes the outbox (own
@@ -65,8 +70,10 @@
  * those really lost them, since a deletion would have left a gone marker -
  * but a record OLDER than the horizon that the peer lacks is ambiguous and
  * is retired locally (envelopes.js `retire`) instead of pushed: `sync.stale`
- * reports it, `qu.record.deleted {stale: true}` tells the app. The same
- * applies when another peer asks a stale device for such records (`want`).
+ * reports it, `qu.record.deleted {stale: true}` tells the app. Only a MIRROR
+ * can cause that: towards any other peer (a group member over WebRTC, which
+ * could simply claim to lack things) a stale device withholds those old
+ * records - in its reconcile and when asked for them (`want`) - but keeps them.
  * `stale: 'push'` restores the old behaviour (e.g. to repair a mirror that
  * lost its data); a mirror never retires.
  */
@@ -83,6 +90,14 @@ import { gcCutoff } from '../gc.js';
 const SETTLED = new Set(['stored', 'duplicate', 'superseded', 'deferred', 'blind', 'gone', 'control']);
 
 const MINUTE = 60_000;
+/** Ids per want/ack frame (128 KiB): frames stay far below transport limits (ws-server maxFrameBytes, SSE posts). */
+const IDS_PER_FRAME = 4096;
+const idChunks = (list) => Array.from({ length: Math.ceil(list.length / IDS_PER_FRAME) }, (_, i) => list.slice(i * IDS_PER_FRAME, (i + 1) * IDS_PER_FRAME));
+const packIds = (list) => {
+  const ids = new Uint8Array(list.length * 32);
+  list.forEach((id, i) => ids.set(crypto.fromHex(id), i * 32));
+  return ids;
+};
 const DAY = 24 * 60 * MINUTE;
 const pad = (ms) => String(ms).padStart(13, '0');
 const floorMinute = (ms) => Math.floor(ms / MINUTE) * MINUTE;
@@ -99,6 +114,8 @@ const later = (fn, ms) => {
  *   `releaseMs`: how long an unwatched scope stays subscribed (warm release).
  *   `timeoutMs`: how long a reconcile waits for wanted records to arrive.
  *   `retryMs`: how often pending reconciles are retried while connected.
+ *   `frameSizeLimit`: max Negentropy message (bytes; 0 = unlimited) - bigger
+ *   differences take more rounds instead of one huge frame.
  *   `role`: announced to peers; `ackFrom: 'mirror'` keeps outbox entries
  *   until a MIRROR has stored them (a plain peer's ack is not enough).
  *   `stale`: what a stale scope does with old records the peer lacks
@@ -109,7 +126,7 @@ export function sync({
   timeoutMs = 10_000,
   sessionTtlMs = 60_000,
   retryMs = 30_000,
-  frameSizeLimit = 0,
+  frameSizeLimit = 256 * 1024,
   role = 'peer',
   ackFrom = 'any',
   maxSessionsPerPeer = 8,
@@ -264,9 +281,11 @@ export function sync({
       };
       active.delete(state.pending);
       const complete = !error && summary.missing.length === 0;
-      // a complete reconcile of a whole space or shard (not a time window) proves this device current
+      // a complete reconcile of a whole space or shard (not a time window) WITH A MIRROR proves this
+      // device current - a plain peer may be just as stale and know none of the deletions
       const windowed = state.scope.from != null || state.scope.to != null;
-      const current = complete && !windowed && role !== 'mirror' ? storage.set(`sync/last/${scopeKey(state.scope)}`, state.startedAt) : undefined;
+      const proves = complete && !windowed && role !== 'mirror' && roles.get(state.peer) === 'mirror';
+      const current = proves ? storage.set(`sync/last/${scopeKey(state.scope)}`, state.startedAt) : undefined;
       Promise.all([complete ? storage.remove(state.pending) : undefined, current]).then(() => {
         bus.notify(error ? 'sync.error' : 'sync.done', summary);
         state.resolve(summary);
@@ -349,11 +368,12 @@ export function sync({
     }
 
     // --- routing: only to peers that asked for this (sid, shard) ----------
-    /** A peer that never subscribed gets everything; otherwise only its (sid[, shard]) subscriptions. */
+    /** A mirror wants every space; any other peer only its (sid[, shard]) subscriptions - none: nothing. */
     function wants(peer, sid, shard) {
-      const subs = remoteSubs.get(peer);
       if (!allows(peer, sid)) return false;
-      return !subs || subs.has(sid) || subs.has(`${sid}/${shard}`);
+      if (roles.get(peer) === 'mirror') return true;
+      const subs = remoteSubs.get(peer);
+      return Boolean(subs && (subs.has(sid) || subs.has(`${sid}/${shard}`)));
     }
     bus.on('qu.route', ({ sid, shard, peers: candidates }) => ({ peers: candidates.filter((peer) => wants(peer, sid, shard)) }));
 
@@ -474,9 +494,7 @@ export function sync({
       ackQueue.delete(peer);
       if (!bySid || !peers.has(peer)) return;
       for (const [sid, list] of bySid) {
-        const ids = new Uint8Array(list.length * 32);
-        list.forEach((id, i) => ids.set(crypto.fromHex(id), i * 32));
-        await send(peer, 'ack', { sid, ids });
+        for (const chunk of idChunks(list)) await send(peer, 'ack', { sid, ids: packIds(chunk) });
       }
     }
 
@@ -544,7 +562,7 @@ export function sync({
         const { push, retire } = await sortStale(sid, wanted, (shard) => isStale(sid, shard));
         wanted = push;
         missing.push(...retire);
-        await retireStale(peer, { sid }, retire, await lastSync(sid));
+        if (roles.get(peer) === 'mirror') await retireStale(peer, { sid }, retire, await lastSync(sid));
       }
       for (const id of wanted) if (!(await sendOrDropList(peer, sid, id, sent))) missing.push(id);
       if (missing.length) await send(peer, 'wantmiss', { session, ids: missing });
@@ -565,12 +583,14 @@ export function sync({
       if (next !== null) return send(state.peer, 'neg', { session, msg: next });
 
       await send(state.peer, 'negend', { session });
-      // A stale scope keeps old records the peer lacks to itself (see header).
+      // A stale scope keeps old records the peer lacks to itself (see header); a mirror's view retires them.
       if (state.stale !== null) {
         const { push, retire } = await sortStale(state.scope.sid, state.have);
         state.have = push;
-        state.retired = retire.length;
-        await retireStale(state.peer, state.scope, retire, state.stale);
+        if (roles.get(state.peer) === 'mirror') {
+          state.retired = retire.length;
+          await retireStale(state.peer, state.scope, retire, state.stale);
+        }
       }
       // Push what the peer lacks - but only what it subscribed to: a mirror
       // reconciling a whole space must not fill a partially-syncing peer.
@@ -584,9 +604,7 @@ export function sync({
         if (!awaiting.has(id)) awaiting.set(id, new Set());
         awaiting.get(id).add(state);
       }
-      const ids = new Uint8Array(wanted.length * 32);
-      wanted.forEach((id, i) => ids.set(crypto.fromHex(id), i * 32));
-      await send(state.peer, 'want', { session, sid: state.scope.sid, ids });
+      for (const chunk of idChunks(wanted)) await send(state.peer, 'want', { session, sid: state.scope.sid, ids: packIds(chunk) });
     });
     bus.on('net.in.*.negerr', ({ session, reason }) => {
       const state = initiating.get(session);

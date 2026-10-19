@@ -113,3 +113,32 @@ test('records younger than the horizon are still pushed by a stale device (the p
   assert.deepEqual(await values(alice, sa), ['recent'], 'only the ambiguous old record was retired');
   assert.equal((await m2.storage.keys(`rec/${sa.id}/`)).length, 1);
 });
+
+test('only a mirror makes a stale device retire records - another peer claiming to lack them gets nothing, deletes nothing', async () => {
+  const w = world();
+  const alice = await w.client();
+  const peerB = await w.client(); // a plain peer (e.g. a group member over WebRTC), not a mirror
+  const sa = alice.join(await Space.create(alice.identity));
+  const sb = peerB.join(await Space.open(sa.invite));
+  await alice.watch({ space: sa });
+  const m = await w.mirror();
+  let link = connectInProcess(alice, m);
+  await link.ready;
+  const old = await alice.write(sa, 'notes', 'old note');
+  await until(async () => (await alice.lastSync(sa.id)) !== null && (await alice.syncStatus()).outbox === 0, 5000, 'synced with the mirror');
+  await link.disconnect();
+
+  w.advance(120 * DAY);
+  assert.equal((await alice.staleSpaces()).length, 1);
+  await peerB.watch({ space: sb });
+  const events = [];
+  alice.bus.on('sync.stale', (e) => events.push(e));
+  const toPeer = connectInProcess(alice, peerB);
+  await toPeer.ready;
+  await peerB.resync({ space: sb }); // peerB asks for what it lacks
+  await alice.resync({ space: sa }); // and alice reconciles with it
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(await peerB.storage.has(`rec/${sb.id}/${old.id}`), false, 'old record withheld from a plain peer');
+  assert.deepEqual(await values(alice, sa), ['old note'], 'and kept locally');
+  assert.deepEqual(events, []);
+});

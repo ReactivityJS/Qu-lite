@@ -355,19 +355,21 @@ await doc.compact();
 
 ```js
 await qu.staleSpaces();          // [{sid, last}] - spaces whose last complete sync is older than the horizon
-await qu.lastSync(space.id);     // start of the last complete reconcile (ms) or null
+await qu.lastSync(space.id);     // start of the last complete reconcile with a mirror (ms) or null
 qu.bus.on('sync.stale', ({ sid, since, retired }) => warnUser(sid, since, retired));
 sync({ stale: 'retire' })        // default; 'push' = old behaviour (e.g. to refill a mirror that lost its data)
 ```
 
 - **The problem**: drop lists expire after 90 days. A device that was away longer still holds records the others
   deleted meanwhile, and nobody remembers the deletion - a plain reconcile would push them back everywhere.
-- **Last complete sync** (`sync/last/<sid>[/<shard>]`): every complete reconcile of a whole space or shard records its
-  start time. A scope whose last one is older than the horizon (minus a day of margin) is *stale*.
+- **Last complete sync** (`sync/last/<sid>[/<shard>]`): every complete reconcile of a whole space or shard *with a
+  mirror* records its start time (a plain peer may be just as stale). A scope whose last one is older than the horizon
+  (minus a day of margin) is *stale*.
 - **What a stale device pushes**: its outbox (own unsent writes, however old) and every record younger than the
   horizon - a peer lacking those really lost them, a deletion would have left a gone marker. A record *older* than the
   horizon that the peer lacks is ambiguous: it is retired locally (`envelopes.retire`, one write set with the reader's
-  indexes, `qu.record.deleted {stale: true}`) instead of pushed - also when another peer asks for it (`want`).
+  indexes, `qu.record.deleted {stale: true}`) instead of pushed. Only a mirror's view retires: towards any other peer
+  (which could simply claim to lack things) a stale device withholds those records but keeps them.
 - After that reconcile the device is current again. A mirror never retires; a device that never synced a space is not
   stale (nothing old to doubt).
 

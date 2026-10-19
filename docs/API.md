@@ -312,7 +312,7 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `retryMs` | `30000` | retry interval for unfinished reconciles while connected (`0`: only on connect) |
 | `sessionTtlMs` | `60000` | responder session lifetime |
 | `maxSessionsPerPeer` | `8` | concurrent responder sessions per peer |
-| `frameSizeLimit` | `0` | Negentropy frame size limit (0 = none) |
+| `frameSizeLimit` | `262144` | max Negentropy message in bytes (0 = unlimited); bigger differences take more rounds. `want`/`ack` id lists go out in batches of 4096 ids |
 | `stale` | `'retire'` | a scope not completely synced for longer than the drop-list horizon retires old records the peer lacks instead of pushing them (they may have been deleted meanwhile); `'push'`: push anyway |
 
 | Method | |
@@ -321,7 +321,7 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `qu.resync({space, path?, from?, to?, peer?}) → result[]` | reconciles now; result: `{peer, sid, shard, sent, received, missing, error?}` |
 | `qu.syncStatus() → {outbox, pending}` | what still waits |
 | `qu.syncState(sid, id) → 'pending' \| 'sent'` | whether a local write left the outbox |
-| `qu.lastSync(sid, shard?) → ms \| null` | start of the last complete reconcile of the space (or shard) |
+| `qu.lastSync(sid, shard?) → ms \| null` | start of the last complete reconcile of the space (or shard) with a mirror |
 | `qu.staleSpaces() → [{sid, last}]` | spaces this device has not completely synced within the horizon - check at start-up to warn the user |
 
 `members()`, `user()` and `inbox()` call `watch()` for their spaces themselves.
@@ -540,6 +540,7 @@ peer with `sync({ role: 'mirror' })` and **without** `records()`.
 | `allow` | list of sids to serve (`null`: any that is granted) |
 | `quota` | `{records?, bytes?}` per space; refused envelopes produce `qu.record.refused` at the sender, whose outbox keeps them |
 | `maxEnvelopeBytes` | size limit per envelope |
+| `maxSpaces` | most spaces this mirror accepts (`null`: unlimited). Grants are self-certifying, so anyone can create spaces; set it on a public relay. Refusals: `mirror.full {sid, spaces}` |
 
 API: `qu.mirror.ready` resolves to the served sids. Also `spaces()`, `count(sid)`, `usage(sid)`,
 `writeKeys(sid)`, `admins(sid)` and `expire()`. Events: `mirror.grant {sid, changed}` and
@@ -569,7 +570,7 @@ of them unchanged.
 | `connectSse(qu, base, opts?)` / `sseTransport({connect: [url]})` | SSE only |
 | `rtc({mode, iceServers, maxMesh, fanout})` | WebRTC between members; signaling sealed through the space; `await qu.rtc.track(space)`, `qu.rtc.setMode('auto'\|'mesh'\|'relay-only')`. Needs `status`. |
 | `topology({mode, mirrors, peers, maxMesh, fanout, connect})` | `star`, `mesh` or `auto` over URL endpoints; `qu.topology.{setPeers, setMode, endpoints(), close()}` |
-| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000, statsToken?})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/info` and static files; with `statsToken` (and the `stats` plugin) also `/stats` (JSON) and `/metrics` (Prometheus) for requests sending `Authorization: Bearer <token>` or `?token=`; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
+| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000, statsToken?, maxFrameBytes = 8 MiB})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/info` and static files; with `statsToken` (and the `stats` plugin) also `/stats` (JSON) and `/metrics` (Prometheus) for requests sending `Authorization: Bearer <token>` or `?token=`; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
 | `httpServerTransport(opts)` / registry `ws-server`, `http-server` (Node) | plugin form; `qu.transports['ws-server'].{ready, close()}` |
 | `createLink(qu, {send, close?, onUp?, onDown?, scope?})` | write your own transport: call `receive(bytes)` for incoming data and `closed()` on disconnect |
 
@@ -582,10 +583,12 @@ Example: [03-mirror-websocket.mjs](../examples/03-mirror-websocket.mjs).
 
 ```sh
 npx qu-lite-mirror --port 8787 --db ./mirror.sqlite [--host 0.0.0.0] [--allow sid1,sid2] [--static ./web]
-                   [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate 200] [--stats-token SECRET] [--quiet]
+                   [--quota-records N] [--quota-bytes N] [--max-envelope N] [--max-spaces N] [--rate 200]
+                   [--stats-token SECRET] [--quiet]
 docker compose up --build                       # same, port 8787, data in a volume
 ```
 
+`--max-spaces N` (`QU_MAX_SPACES`) limits how many spaces the relay accepts.
 Every flag also has an environment variable: `QU_PORT`, `QU_HOST`, `QU_DB`, `QU_ALLOW`,
 `QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE`, `QU_RATE` (`0` disables
 rate limiting) and `QU_STATS_TOKEN` (installs `stats`, enables `/stats` and `/metrics`). The mirror keeps its identity in its database, so clients resume after a

@@ -58,11 +58,22 @@ don't undo a deliberate choice by accident.
 | Text | optional RGA CRDT plugin, per-member mergeable snapshots; chars kept as runs (split/extended), same per-char RGA order and wire format | collaborative notes in small groups; not part of the core; lean without a tree or a second format |
 | Attachments | optional `blobs` plugin: manifest + 64 KiB chunks as ordinary records, content-addressed and hash-verified, one shard per blob; wake lock + unload warning while transfers run | everything (encryption, mirror, quotas, deletion, sync) reused; no binary side channel for the blind mirror; fetch on demand |
 | Operating figures | optional `stats` plugin reading the per-link byte/frame counters links keep anyway (`qu.net.links`, final values in `net.peer.down`) plus bus events; relay endpoints only with a token | no per-frame hook, nothing counted unless installed; a localhost check is meaningless behind a proxy |
+| Live routing | a mirror takes every space; any other peer gets live records (and reconcile pushes) only for what it subscribed to - nothing without a `sub` | an anonymous connection to a relay, or a member of another group over WebRTC, must not see a feed of other spaces' envelopes (found in the security review 2026-10) |
+| Network ids | a second link claiming a connected network id replaces the first | reconnects work before the dead socket is noticed; an impostor never shares another peer's subscriptions |
 | Stale devices | remember the last complete reconcile per scope; past the horizon, old records the peer lacks are retired locally, not pushed | no resurrection of deleted records without a protocol change or a mirror-side guess |
 
 ## Known limits
 
 - IP address and timing still link connections (use a proxy/Tor in front).
+- Whoever knows a space id (current or former members) can subscribe to its envelopes at a
+  relay and fetch them: ciphertext and header metadata only - new epochs stay unreadable for
+  removed members.
+- Invite tokens do not expire: an unused invite link stays valid until someone uses it.
+- A removed admin can still sign epochs at a verifier that has not seen the newer admin list.
+- Anyone can write into an inbox (that is its purpose): flooding is bounded only by the relay's
+  per-space quota and rate limits.
+- Anyone can create spaces at a public relay: bound it with `maxSpaces` and quotas
+  (docs/DEPLOY.md).
 - A device offline longer than the 90-day drop-list horizon retires its records older than the
   horizon that the network lacks (`sync.stale`) - they may have been deleted. If a mirror lost
   its data instead, such a device does not refill those old records (`sync({stale: 'push'})`

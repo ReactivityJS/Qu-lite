@@ -5,6 +5,26 @@ versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor
 
 ## [Unreleased]
 
+### Security
+
+Findings of the security review (docs/SECURITY-REVIEW.md), all fixed with regression tests:
+
+- **High** - a relay routed live envelopes of every space to any connection that had not subscribed (also anonymous
+  ones without keys): ciphertext, space ids, aliases, sizes and timing. Live records and reconcile pushes now reach a
+  peer only for what it subscribed to; mirrors take everything as before.
+- **Medium** - a connection claiming another client's network id received that client's routed traffic. The newest
+  link with an id now replaces the older one.
+- **Medium** - static files: `..%2F` reached sibling directories whose name starts like the web root
+  (`web` -> `web-secret`).
+- **Medium** - attachments: a member could publish a manifest whose size made readers allocate gigabytes (or throw).
+  Manifests must now be self-consistent and within `maxBytes`, chunks exactly their slice.
+- **Medium** - the WebSocket server accepted 100 MiB messages (the `ws` default) before rate limits applied: now
+  `maxFrameBytes` (8 MiB); Negentropy messages are limited to 256 KiB (`frameSizeLimit`) and id lists are batched.
+- **Medium** - stale devices: any peer could make a stale device delete old records by claiming to lack them, and a
+  reconcile with any peer marked the device current again. Only a mirror's view now retires records or proves a
+  device current.
+- **Low** - a public relay accepted unlimited new spaces: `mirror({ maxSpaces })`, `--max-spaces`, `QU_MAX_SPACES`.
+
 ### Added
 
 - Stale-device check: a device whose last complete sync of a space is older than the 90-day drop-list horizon no
