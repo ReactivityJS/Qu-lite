@@ -202,3 +202,27 @@ test('bin/backup.mjs copies a running relay\'s database, and a relay started on 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('the CLI reads settings from QU_X_FILE (Docker/Swarm secrets), e.g. the stats token', async () => {
+  const { spawn } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'qu-lite-secret-'));
+  writeFileSync(join(dir, 'token'), 'from-a-secret\n');
+  const cli = spawn(process.execPath, ['--no-warnings', fileURLToPath(new URL('../bin/mirror.mjs', import.meta.url)), '--port', '0', '--host', '127.0.0.1', '--db', ':memory:'], {
+    env: { ...process.env, QU_STATS_TOKEN: 'ignored', QU_STATS_TOKEN_FILE: join(dir, 'token') },
+  });
+  try {
+    const port = await new Promise((resolve, reject) => {
+      cli.stdout.on('data', (chunk) => {
+        const m = /:(\d+) \(db/.exec(String(chunk));
+        if (m) resolve(Number(m[1]));
+      });
+      cli.on('exit', (code) => reject(new Error(`mirror exited ${code}`)));
+    });
+    const base = `http://127.0.0.1:${port}`;
+    assert.equal((await fetch(`${base}/stats`, { headers: { authorization: 'Bearer from-a-secret' } })).status, 200);
+    assert.equal((await fetch(`${base}/stats`, { headers: { authorization: 'Bearer ignored' } })).status, 401, 'the file wins');
+  } finally {
+    cli.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

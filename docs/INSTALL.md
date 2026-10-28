@@ -1,6 +1,7 @@
 # Installing a relay with Docker
 
-This guide takes a fresh Linux server (Debian/Ubuntu shown) to a running Qu Lite relay behind HTTPS. The relay
+This guide takes a fresh Linux server (Debian/Ubuntu shown) to a running Qu Lite relay behind HTTPS, with Docker
+Compose. For a **Docker Swarm** with caddy-docker-proxy, see [Docker Swarm](#docker-swarm-with-caddy-docker-proxy). The relay
 serves its API (`/ws`, `/sse`), the client start page (`/`), the demo (`/demo.html`) and the browser bundle
 (`/dist/qu-lite.js`) on **one port**. A reverse proxy in front does TLS. Background and proxy details are in
 [DEPLOY.md](DEPLOY.md).
@@ -150,6 +151,76 @@ docker compose down                   # stop, keep the data
 docker compose down -v                # stop AND delete all data (the volume)
 ```
 
+## Docker Swarm (with caddy-docker-proxy)
+
+If your swarm already runs [caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy), the relay is
+one more service. `docker-stack.yml` carries the Caddy labels, publishes **no port** (Caddy reaches it over the
+shared overlay network) and pins it to one node.
+
+**One replica, always.** The relay keeps its data in a local SQLite file and its connections in the process. Two
+replicas would be two separate relays whose clients don't see each other's live messages. Updates therefore
+stop the old task before starting the new one (`order: stop-first`). That means a few seconds without the relay;
+clients reconnect by themselves, and their unsent writes wait in their outbox.
+
+**Image**: the CI publishes `ghcr.io/reactivityjs/qu-lite` for amd64 and arm64 once the tests passed:
+- `:main` after every push to `main`;
+- `:1.2.3`, `:1.2` and `:latest` for a release tag.
+
+Pin a version in production (`QU_IMAGE=ghcr.io/reactivityjs/qu-lite:0.2.0`). A new GitHub package starts out
+private: either make it public (package settings → visibility), or log the nodes in
+(`docker login ghcr.io` with a token that has `read:packages`) and deploy with `--with-registry-auth`.
+
+**Deploy**
+
+```sh
+# once: pin the relay to the node that keeps its data (the volume is local to that node)
+docker node update --label-add qu-lite=true <node>
+
+# optional: stats token as a secret, then uncomment QU_STATS_TOKEN_FILE and the secrets blocks in docker-stack.yml
+printf %s "$(openssl rand -hex 24)" | docker secret create qu_stats_token -
+
+# settings (QU_DOMAIN, limits, QU_IMAGE) from .env - docker stack deploy does not read it by itself
+cp .env.example .env && echo "QU_DOMAIN=relay.example.org" >> .env && nano .env
+set -a; . ./.env; set +a
+docker stack deploy -c docker-stack.yml qu-lite            # add --with-registry-auth for a private image
+```
+
+The stack expects the overlay network that caddy-docker-proxy watches to be called `caddy` and to exist already
+(`external: true`). If yours has a different name, change it in `docker-stack.yml`. Under a path prefix
+(`https://example.org/qu/`), use the `handle_path` labels commented in the file instead of `caddy:` with its own
+domain. `QU_BIND`/`QU_PUBLISH_PORT` don't apply here, since nothing is published.
+
+**Check**: `docker service ps qu-lite_relay` shows one task `Running` (healthy after a few seconds). Then continue
+with [6. Check](#6-check) using your domain.
+
+**Update**
+
+```sh
+docker service update --image ghcr.io/reactivityjs/qu-lite:0.2.1 qu-lite_relay   # or: set QU_IMAGE, deploy again
+docker service update --force qu-lite_relay                                       # same tag, newly pulled (:main)
+docker service rollback qu-lite_relay                                             # back to the previous version
+```
+
+**Backup / restore**: the volume `qu-lite_data` lives on the labelled node. Run the same commands as above
+there, with the container instead of `docker compose exec`:
+
+```sh
+C=$(docker ps -q -f name=qu-lite_relay)
+docker exec "$C" node --no-warnings bin/backup.mjs /data/mirror.sqlite /data/backup.sqlite
+docker cp "$C":/data/backup.sqlite "backups/qu-lite-$(date +%F).sqlite" && docker exec "$C" rm /data/backup.sqlite
+```
+
+To restore, on the same node (the image runs as the relay's own user, so the file gets the right owner):
+
+```sh
+docker service scale qu-lite_relay=0
+docker run --rm -v qu-lite_data:/data -v "$PWD/backups":/b:ro ghcr.io/reactivityjs/qu-lite:main \
+  sh -c 'cp /b/qu-lite-2026-10-28.sqlite /data/mirror.sqlite && rm -f /data/mirror.sqlite-wal /data/mirror.sqlite-shm'
+docker service scale qu-lite_relay=1
+```
+
+**Logs**: `docker service logs -f qu-lite_relay`.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -161,3 +232,5 @@ docker compose down -v                # stop AND delete all data (the volume)
 | clients see `qu.record.refused` with `quota` | a space hit `QU_QUOTA_RECORDS`/`QU_QUOTA_BYTES` - raise them in `.env`, then `docker compose up -d` |
 | logs show `refused new space` | `QU_MAX_SPACES` reached |
 | `/stats` returns 404 | `QU_STATS_TOKEN` is empty |
+| Swarm: task stays `Pending` | no node has the label `qu-lite=true`, or the image can't be pulled (private package: `--with-registry-auth`) |
+| Swarm: domain answers 502 | relay and Caddy are not on the same overlay network (`caddy`), or the task is not healthy yet |

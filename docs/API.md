@@ -592,7 +592,9 @@ docker compose up --build                       # same, port 8787, data in a vol
 `--max-spaces N` (`QU_MAX_SPACES`) limits how many spaces the relay accepts.
 Every flag also has an environment variable: `QU_PORT`, `QU_HOST`, `QU_DB`, `QU_ALLOW`,
 `QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE`, `QU_RATE` (`0` disables
-rate limiting) and `QU_STATS_TOKEN` (installs `stats`, enables `/stats` and `/metrics`). The mirror keeps its identity in its database, so clients resume after a
+rate limiting) and `QU_STATS_TOKEN` (installs `stats`, enables `/stats` and `/metrics`). Every variable can also
+be read from a file named by `<NAME>_FILE` (Docker/Swarm secrets, e.g. `QU_STATS_TOKEN_FILE=/run/secrets/qu_stats_token`);
+the file wins. The mirror keeps its identity in its database, so clients resume after a
 restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
 
 With `--static ./web` (the Docker image always sets it) the same port also serves the client start page

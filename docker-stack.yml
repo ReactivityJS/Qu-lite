@@ -1,0 +1,62 @@
+# Qu Lite relay as a Docker Swarm service behind caddy-docker-proxy
+# (https://github.com/lucaslorentz/caddy-docker-proxy). Step by step: docs/INSTALL.md#docker-swarm.
+#
+#   set -a; . ./.env; set +a            # docker stack deploy does not read .env by itself
+#   docker stack deploy -c docker-stack.yml qu-lite
+#
+# No published port: Caddy reaches the relay over the shared overlay network
+# (`caddy`, external) and does TLS. ONE replica only - the relay keeps its
+# data in a local SQLite file and its connections in the process; the
+# placement constraint pins it to the node that holds the volume.
+services:
+  relay:
+    image: ${QU_IMAGE:-ghcr.io/reactivityjs/qu-lite:main}
+    environment:
+      QU_ALLOW: "${QU_ALLOW:-}"
+      QU_QUOTA_RECORDS: "${QU_QUOTA_RECORDS:-}"
+      QU_QUOTA_BYTES: "${QU_QUOTA_BYTES:-1073741824}"
+      QU_MAX_ENVELOPE: "${QU_MAX_ENVELOPE:-262144}"
+      QU_MAX_SPACES: "${QU_MAX_SPACES:-}"
+      QU_RATE: "${QU_RATE:-200}"
+      # stats token from a secret (see below); or QU_STATS_TOKEN as a plain variable
+      # QU_STATS_TOKEN_FILE: /run/secrets/qu_stats_token
+    volumes:
+      - data:/data
+    networks:
+      - caddy
+    # secrets:
+    #   - qu_stats_token
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.qu-lite == true          # docker node update --label-add qu-lite=true <node>
+      update_config:
+        order: stop-first                         # never two processes on one database
+        failure_action: rollback
+      rollback_config:
+        order: stop-first
+      restart_policy:
+        condition: any
+        delay: 5s
+      labels:
+        caddy: ${QU_DOMAIN:-relay.example.org}
+        caddy.encode: gzip
+        caddy.reverse_proxy: "{{upstreams 8787}}"
+        caddy.reverse_proxy.flush_interval: "-1"  # stream SSE immediately
+        # under a path prefix instead (https://example.org/qu/):
+        #   caddy: example.org
+        #   caddy.handle_path: /qu/*
+        #   caddy.handle_path.0_reverse_proxy: "{{upstreams 8787}}"
+        #   caddy.handle_path.0_reverse_proxy.flush_interval: "-1"
+
+volumes:
+  data:
+
+networks:
+  caddy:
+    external: true                                # the network caddy-docker-proxy watches
+
+# secrets:
+#   qu_stats_token:
+#     external: true                              # printf %s "$(openssl rand -hex 24)" | docker secret create qu_stats_token -

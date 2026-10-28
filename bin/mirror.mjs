@@ -13,6 +13,8 @@
  * Environment: QU_PORT / QU_HOST / QU_DB / QU_ALLOW / QU_STATIC /
  * QU_QUOTA_RECORDS / QU_QUOTA_BYTES / QU_MAX_ENVELOPE / QU_RATE (0 = no rate limit) /
  * QU_STATS_TOKEN (enables /stats and /metrics for requests with this token) / QU_MAX_SPACES.
+ * Every QU_X can also come from a file named by QU_X_FILE (Docker/Swarm
+ * secrets: QU_STATS_TOKEN_FILE=/run/secrets/qu_stats_token); the file wins.
  * Its identity and network id live in the database, so clients can resume
  * pending syncs across restarts.
  *
@@ -22,6 +24,7 @@
  * proxy in front for TLS (docs/DEPLOY.md).
  */
 import { parseArgs } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createPeer } from '../src/peer.js';
 import { nodeRegistry } from '../src/node.js';
@@ -64,21 +67,28 @@ export async function startMirror({ port = 8787, host, db = ':memory:', allow = 
   };
 }
 
+/** A setting from QU_X_FILE (secrets) or QU_X. */
+function env(name) {
+  const file = process.env[`${name}_FILE`];
+  if (file) return readFileSync(file, 'utf8').trim();
+  return process.env[name];
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const { values: args } = parseArgs({
     options: {
-      port: { type: 'string', default: process.env.QU_PORT ?? '8787' },
-      host: { type: 'string', default: process.env.QU_HOST ?? '0.0.0.0' },
-      db: { type: 'string', default: process.env.QU_DB ?? './mirror.sqlite' },
-      allow: { type: 'string', default: process.env.QU_ALLOW ?? '' },
-      static: { type: 'string', default: process.env.QU_STATIC ?? '' },
+      port: { type: 'string', default: env('QU_PORT') ?? '8787' },
+      host: { type: 'string', default: env('QU_HOST') ?? '0.0.0.0' },
+      db: { type: 'string', default: env('QU_DB') ?? './mirror.sqlite' },
+      allow: { type: 'string', default: env('QU_ALLOW') ?? '' },
+      static: { type: 'string', default: env('QU_STATIC') ?? '' },
       quiet: { type: 'boolean', default: false },
-      'quota-records': { type: 'string', default: process.env.QU_QUOTA_RECORDS ?? '' },
-      'quota-bytes': { type: 'string', default: process.env.QU_QUOTA_BYTES ?? '' },
-      'max-envelope': { type: 'string', default: process.env.QU_MAX_ENVELOPE ?? '' },
-      rate: { type: 'string', default: process.env.QU_RATE ?? '200' },
-      'stats-token': { type: 'string', default: process.env.QU_STATS_TOKEN ?? '' },
-      'max-spaces': { type: 'string', default: process.env.QU_MAX_SPACES ?? '' },
+      'quota-records': { type: 'string', default: env('QU_QUOTA_RECORDS') ?? '' },
+      'quota-bytes': { type: 'string', default: env('QU_QUOTA_BYTES') ?? '' },
+      'max-envelope': { type: 'string', default: env('QU_MAX_ENVELOPE') ?? '' },
+      rate: { type: 'string', default: env('QU_RATE') ?? '200' },
+      'stats-token': { type: 'string', default: env('QU_STATS_TOKEN') ?? '' },
+      'max-spaces': { type: 'string', default: env('QU_MAX_SPACES') ?? '' },
     },
   });
   const instance = await startMirror({

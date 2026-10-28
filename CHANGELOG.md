@@ -50,6 +50,10 @@ Findings of the security review (docs/SECURITY-REVIEW.md), all fixed with regres
   and `docs/TESTING.md` (test suites, browser tests and how to debug them, a manual browser checklist).
 - `bin/backup.mjs` / `npm run backup`: online backup of the relay database while it runs (no sqlite3 needed).
 - `npm run test:browser`; `QU_E2E_HEADED` / `QU_E2E_SLOWMO` show and slow down the browser tests.
+- Docker Swarm: `docker-stack.yml` for caddy-docker-proxy (labels, no published port, one replica pinned to the
+  node with the volume, stop-first updates, rollback), guide in `docs/INSTALL.md`. The CI publishes the image to
+  `ghcr.io/<owner>/qu-lite` (amd64 + arm64) after tests pass - `:main` from `main`, `:x.y.z`/`:x.y`/`:latest` from
+  tags. The mirror CLI reads every `QU_*` setting also from `QU_*_FILE` (secrets).
 
 ### Changed
 

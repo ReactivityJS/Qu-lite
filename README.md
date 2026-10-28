@@ -13,6 +13,7 @@ shares no code with the rest of Qu. Design reasons and known limits: [docs/DECIS
 **Documentation:** [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
 WebSocket, groups, status, deleting, collaborative text, attachments - each one runs with `node examples/<file>`) ·
 [changelog](CHANGELOG.md) · [install a relay with Docker](docs/INSTALL.md) ·
+[Docker Swarm](docs/INSTALL.md#docker-swarm-with-caddy-docker-proxy) ·
 [deployment behind a proxy](docs/DEPLOY.md) · [testing, incl. browser tests](docs/TESTING.md).
 
 ```sh
