@@ -46,9 +46,15 @@ Findings of the security review (docs/SECURITY-REVIEW.md), all fixed with regres
   (JSON) and `/metrics` (Prometheus) with `--stats-token` / `QU_STATS_TOKEN`. Links now also count frames, list
   open links in `qu.net.links` and pass their final counters with `net.peer.down`; the SQLite driver has `size()`.
   The demo header shows live traffic. Example `examples/09-stats.mjs`.
+- Guides: `docs/INSTALL.md` (relay with Docker step by step: `.env`, Caddy, update, backup/restore, troubleshooting)
+  and `docs/TESTING.md` (test suites, browser tests and how to debug them, a manual browser checklist).
+- `bin/backup.mjs` / `npm run backup`: online backup of the relay database while it runs (no sqlite3 needed).
+- `npm run test:browser`; `QU_E2E_HEADED` / `QU_E2E_SLOWMO` show and slow down the browser tests.
 
 ### Changed
 
+- `docker-compose.yml` reads its settings from `.env` (template `.env.example`) and publishes the port on
+  `127.0.0.1` by default (`QU_BIND=0.0.0.0` to expose it directly).
 - The web files moved from `demo/` to `web/` (`index.html` = start page, `demo.html` = demo); `npm run build:web`
   replaces `npm run demo:build`. The Docker healthcheck uses `/healthz`.
 

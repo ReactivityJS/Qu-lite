@@ -1,28 +1,27 @@
 # Qu Lite relay/mirror + client start page + demo. One service, one port:
 #   http://localhost:8787/                      start page: connection check, how apps connect
 #   http://localhost:8787/demo.html?name=alice  and  ?name=bob
-# Behind a TLS reverse proxy bind it to localhost only, e.g. "127.0.0.1:8787:8787" (docs/DEPLOY.md).
 # The relay only ever stores sealed envelopes (it can verify, never read).
 #
-#   docker compose up --build
+#   cp .env.example .env      # settings (optional - the defaults below apply without it)
+#   docker compose up -d --build
+#
+# Step by step on a server: docs/INSTALL.md. TLS reverse proxy: docs/DEPLOY.md.
 services:
   qu-lite:
     build: .
     image: qu-lite
     ports:
-      - "8787:8787"
+      # 127.0.0.1: reachable only from this machine (the reverse proxy); 0.0.0.0 to expose the port directly
+      - "${QU_BIND:-127.0.0.1}:${QU_PUBLISH_PORT:-8787}:8787"
     environment:
-      # QU_ALLOW: comma-separated sids to restrict this mirror to (empty = any self-certified space)
-      QU_ALLOW: ""
-      # per-space quota (empty = unlimited), max envelope size, inbound frames/s per connection (0 = off)
-      QU_QUOTA_RECORDS: ""
-      QU_QUOTA_BYTES: "1073741824"
-      QU_MAX_ENVELOPE: "262144"
-      # most spaces this relay accepts (empty = unlimited) - anyone can create spaces, so set it for a public relay
-      QU_MAX_SPACES: ""
-      QU_RATE: "200"
-      # enables /stats (JSON) and /metrics (Prometheus) for requests with "Authorization: Bearer <token>" (empty = off)
-      QU_STATS_TOKEN: ""
+      QU_ALLOW: "${QU_ALLOW:-}"
+      QU_QUOTA_RECORDS: "${QU_QUOTA_RECORDS:-}"
+      QU_QUOTA_BYTES: "${QU_QUOTA_BYTES:-1073741824}"
+      QU_MAX_ENVELOPE: "${QU_MAX_ENVELOPE:-262144}"
+      QU_MAX_SPACES: "${QU_MAX_SPACES:-}"
+      QU_RATE: "${QU_RATE:-200}"
+      QU_STATS_TOKEN: "${QU_STATS_TOKEN:-}"
     volumes:
       - qu-lite-data:/data
     restart: unless-stopped

@@ -6,6 +6,7 @@
 npm ci
 npm test               # full suite (node:test), incl. 2 Playwright browser tests
 npm run test:unit      # without browser tests
+npm run test:browser   # only the browser tests (details, debugging: docs/TESTING.md)
 node --test --test-timeout=240000 test/sync.test.js   # one file
 npm run demo           # relay + start page (/) + demo (/demo.html) on :8787
 ```

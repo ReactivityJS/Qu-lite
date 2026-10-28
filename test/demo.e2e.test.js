@@ -3,6 +3,7 @@
  * separate Chromium contexts ("separate browsers"), plus real WebRTC between
  * two of them. Both tests live in this one file so they run one after the
  * other, never two browser fleets at once. Skipped without Playwright/Chromium.
+ * How to run and debug them: docs/TESTING.md.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,6 +15,8 @@ import { startMirror } from '../bin/mirror.mjs';
 import { buildWeb } from '../web/build.mjs';
 
 const demoDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
+// QU_E2E_HEADED=1 shows the browsers, QU_E2E_SLOWMO=<ms> slows every action down (debugging; docs/TESTING.md)
+const visible = process.env.QU_E2E_HEADED ? { headless: false, slowMo: Number(process.env.QU_E2E_SLOWMO ?? 0) } : {};
 let chromium = null;
 try {
   ({ chromium } = await import('playwright'));
@@ -26,7 +29,7 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
   // Playwright's own browser, else a preinstalled Chromium (QU_CHROMIUM or the CI image's path).
   for (const executablePath of [undefined, process.env.QU_CHROMIUM, '/opt/pw-browsers/chromium'].filter((p, i) => i === 0 || p)) {
     try {
-      browser = await chromium.launch(executablePath ? { executablePath } : {});
+      browser = await chromium.launch({ ...visible, ...(executablePath ? { executablePath } : {}) });
       break;
     } catch {
       browser = null;
@@ -179,7 +182,7 @@ test('two browsers connect directly (WebRTC) and keep chatting when the relay go
   let browser = null;
   for (const executablePath of [undefined, process.env.QU_CHROMIUM, '/opt/pw-browsers/chromium'].filter((p, i) => i === 0 || p)) {
     try {
-      browser = await chromium.launch(executablePath ? { executablePath, args } : { args });
+      browser = await chromium.launch({ ...visible, args, ...(executablePath ? { executablePath } : {}) });
       break;
     } catch {}
   }

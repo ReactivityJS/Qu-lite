@@ -33,8 +33,10 @@
   "scripts": {
     "test": "node --test --test-timeout=240000 test/*.test.js",
     "test:unit": "node --test --test-timeout=240000 --test-skip-pattern=browsers test/*.test.js",
+    "test:browser": "node --test --test-timeout=240000 test/demo.e2e.test.js",
     "build:web": "node web/build.mjs",
     "mirror": "node --no-warnings bin/mirror.mjs",
+    "backup": "node --no-warnings bin/backup.mjs",
     "demo": "node web/build.mjs && node --no-warnings bin/mirror.mjs --static web --db ./lite-demo.sqlite"
   },
   "keywords": [

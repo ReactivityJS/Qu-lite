@@ -1,5 +1,8 @@
 # Deploying a relay
 
+Step-by-step installation on a server (Docker, `.env`, Caddy, updates, backups): [INSTALL.md](INSTALL.md). This page
+is the reference: what the relay serves, what a reverse proxy must do, hardening and monitoring.
+
 One process, one port (default 8787) serves everything:
 
 | Path | What |
@@ -25,8 +28,8 @@ npm ci && node web/build.mjs
 node --no-warnings bin/mirror.mjs --port 8787 --host 127.0.0.1 --db ./mirror.sqlite --static ./web
 ```
 
-Behind a proxy, publish the port on localhost only (`ports: ["127.0.0.1:8787:8787"]` in `docker-compose.yml`),
-so nobody reaches it around the proxy. Options and environment variables: [API.md](API.md#mirror-cli-and-docker).
+`docker-compose.yml` publishes the port on localhost only (`QU_BIND=127.0.0.1`, the default; settings come from `.env`,
+see `.env.example`), so nobody reaches the relay around the proxy. Options and environment variables: [API.md](API.md#mirror-cli-and-docker).
 
 ## What the proxy must do
 

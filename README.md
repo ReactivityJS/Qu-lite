@@ -12,12 +12,14 @@ shares no code with the rest of Qu. Design reasons and known limits: [docs/DECIS
 
 **Documentation:** [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
 WebSocket, groups, status, deleting, collaborative text, attachments - each one runs with `node examples/<file>`) ·
-[changelog](CHANGELOG.md).
+[changelog](CHANGELOG.md) · [install a relay with Docker](docs/INSTALL.md) ·
+[deployment behind a proxy](docs/DEPLOY.md) · [testing, incl. browser tests](docs/TESTING.md).
 
 ```sh
 npm install
 npm test                # all tests, including two Playwright browser tests (skipped without Chromium)
 npm run test:unit       # without the browser tests
+npm run test:browser    # only the browser tests (npx playwright install --with-deps chromium) - docs/TESTING.md
 node examples/02-sync.mjs   # any example from examples/
 npm run demo            # relay on :8787 with start page (/), demo (/demo.html) and browser bundle
 npm run mirror -- --port 8787 --db ./mirror.sqlite
@@ -32,7 +34,8 @@ only bundled when imported.
 **Try it:** `npm run demo` (or `docker compose up --build`). `http://localhost:8787/` checks the connection and
 shows how an app connects. Then open `http://localhost:8787/demo.html?name=alice` and `…/demo.html?name=bob` in
 two browsers, create a group, share the invite link, write, disconnect, reload - and watch the event log.
-Production behind a TLS reverse proxy: [docs/DEPLOY.md](docs/DEPLOY.md).
+Production: step by step with Docker in [docs/INSTALL.md](docs/INSTALL.md), proxy details in
+[docs/DEPLOY.md](docs/DEPLOY.md).
 
 ```js
 import { createQu, records, sync, Space, connectInProcess } from '@qu/lite';

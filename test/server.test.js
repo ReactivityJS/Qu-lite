@@ -173,3 +173,32 @@ for (const prefer of ['ws', 'sse']) {
     }
   });
 }
+
+test('bin/backup.mjs copies a running relay\'s database, and a relay started on the copy serves the same data', async () => {
+  const { backupDatabase } = await import('../bin/backup.mjs');
+  const { startMirror } = await import('../bin/mirror.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'qu-lite-backup-'));
+  const relay = await startMirror({ port: 0, host: '127.0.0.1', db: join(dir, 'mirror.sqlite'), log: () => {} });
+  const qu = await createQu();
+  qu.use(records());
+  qu.use(sync({ releaseMs: 0, timeoutMs: 5000, retryMs: 0, ackFrom: 'mirror' }));
+  qu.use(relayTransport({ url: `http://127.0.0.1:${relay.port}`, minDelayMs: 50, WebSocketImpl: WebSocket }));
+  try {
+    const space = qu.join(await Space.create(qu.identity));
+    await until(() => qu.transports.relay.status()[0]?.connected, 5000, 'connected');
+    await qu.write(space, 'chat', 'keep me');
+    await until(async () => (await qu.syncStatus()).outbox === 0, 5000, 'stored');
+    const copy = await backupDatabase(join(dir, 'mirror.sqlite')); // while the relay is running
+    qu.transports.relay.disconnect();
+    await relay.close();
+    const restored = await startMirror({ port: 0, host: '127.0.0.1', db: copy, log: () => {} });
+    try {
+      assert.equal(await restored.qu.mirror.count(space.id), 1);
+      assert.equal(restored.qu.peerId, relay.qu.peerId, 'the relay identity comes back too');
+    } finally {
+      await restored.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
