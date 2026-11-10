@@ -10,7 +10,7 @@ delivered, read), deletion and compaction, a hardened mirror (quotas, rate limit
 connection per space) and - optional - collaborative text. Started as `packages/lite` in [QuV5](https://github.com/ReactivityJS/QuV5); it
 shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).
 
-**Documentation:** [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
+**Documentation:** [Developer guide (DE)](docs/GUIDE.md) · [Dev console & relay REPL (DE)](docs/CONSOLE.md) · [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
 WebSocket, groups, status, deleting, collaborative text, attachments - each one runs with `node examples/<file>`) ·
 [changelog](CHANGELOG.md) · [install a relay with Docker](docs/INSTALL.md) ·
 [Docker Swarm](docs/INSTALL.md#docker-swarm-with-caddy-docker-proxy) ·

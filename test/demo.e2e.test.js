@@ -67,7 +67,20 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
     await start.goto(base);
     await ready(start);
     await connected(start);
-    assert.match(await start.textContent('#snippet'), new RegExp(`${base}dist/qu-lite.js`));
+    assert.match(await start.textContent('#snippet'), new RegExp(`${base}dist/qu-client.js`));
+    // the snippet works as shown: small entry, plugins as chunks from the relay, devtools on window.qu
+    const roundTrip = await start.evaluate(async (origin) => {
+      const { createClient } = await import(`${origin}dist/qu-client.js`);
+      const qu = await createClient({ url: origin.replace(/\/$/, ''), name: `snippet-${Date.now()}`, devtools: { log: () => {}, global: 'snippetQu' } });
+      const group = await qu.createGroup();
+      await qu.write(group, 'chat', 'hallo');
+      for (let i = 0; i < 200 && (await qu.syncStatus()).outbox; i++) await new Promise((r) => setTimeout(r, 50));
+      const result = { outbox: (await qu.syncStatus()).outbox, global: globalThis.snippetQu === qu, plugins: qu.dev.info().plugins };
+      await qu.close();
+      return result;
+    }, base);
+    assert.equal(roundTrip.outbox, 0, 'acked by the relay');
+    assert.ok(roundTrip.global && roundTrip.plugins.includes('devtools'));
     await start.click('#storeTest');
     await start.waitForFunction(() => document.getElementById('store').dataset.ok === 'true', null, { timeout: 15_000 });
     await start.close();

@@ -27,14 +27,21 @@ they always match this API. To learn why things work the way they do, read
 | Import | Environment | Contains |
 |---|---|---|
 | `@qu/lite` | browser + Node | everything below except the Node-only adapters |
-| `@qu/lite/node` | Node | `nodeRegistry`, `sqliteDriver`, `listenHttp`, `listenWs`, `httpServerTransport`, `wsServerTransport`, plus `createPeer`/`defaultRegistry` |
+| `@qu/lite/client` | browser + Node | small entry: `createClient`, `createPeer`, `defaultRegistry`, `createQu`, `Registry`, `Bus`, `Space`, `memoryDriver` - every named plugin/store/transport is loaded on demand |
+| `@qu/lite/node` | Node | `createRelay`, `createClient`, `nodeRegistry`, `sqliteDriver`, `listenHttp`, `listenWs`, `httpServerTransport`, `wsServerTransport`, plus `createPeer`/`defaultRegistry` |
+| `@qu/lite/devtools` | browser + Node | `devtools()` ([Dev console](CONSOLE.md)) |
 | `@qu/lite/sqlite` | Node ≥ 22.5 | `sqliteDriver` (`node:sqlite`) |
 | `@qu/lite/ws-server` | Node | `listenHttp`, `listenWs`, `httpServerTransport`, `wsServerTransport` |
 | `qu-lite-mirror` (bin) | Node | relay/mirror CLI, see [Mirror CLI](#mirror-cli-and-docker) |
 
 The library is plain ES modules and needs no build step. It has one runtime dependency,
 `ws`, used only on Node. Bundlers include an optional plugin (`text`, `rtc`/`topology`,
-`relayTransport`/SSE) only if you import it.
+`relayTransport`/SSE) only if you import it. `defaultRegistry()` imports each module only when its
+name is used, so `createPeer`/`createClient` load exactly the plugins they are given (a bundler
+puts each one into its own chunk; the relay serves them as `dist/qu-client.js` + `dist/chunks/`).
+
+A guided introduction (German) is [GUIDE.md](GUIDE.md); inspecting a running peer from the browser
+console or the relay REPL is [CONSOLE.md](CONSOLE.md).
 
 ## Concepts in one minute
 
@@ -91,6 +98,44 @@ qu.use(sync({ ackFrom: 'mirror' }));
 
 `createQu` does **not** persist the identity. Persist it yourself, or use `createPeer`.
 
+### `createClient(options?) → Promise<qu>`
+
+The usual app peer in one call (browser and Node), built with `createPeer`:
+
+```js
+import { createClient } from '@qu/lite/client';
+const qu = await createClient({ url: 'https://relay.example', name: 'my-app', extra: ['text'] });
+```
+
+| Option | Default | |
+|---|---|---|
+| `url` | – | relay origin; installs `relay` transport (WebSocket, SSE fallback) |
+| `name` | `'qu-lite'` | IndexedDB database name |
+| `store` | `['indexeddb', {name}]` if IndexedDB exists, else `'memory'` | any `createPeer` store spec |
+| `plugins` | `CLIENT_PLUGINS`: `records, user, members, inbox, sync({ackFrom:'mirror'}), status, compaction` | replaces the defaults |
+| `extra` | `[]` | added after the defaults, e.g. `['text', 'blobs']` |
+| `relay` | `{}` | options for the relay transport (`isolate`, `prefer`, …) |
+| `transports` | relay from `url` | replaces the relay transport |
+| `devtools` | `true` in browsers | `true`, `false` or options for [`devtools`](#devtools) |
+| `registry`, `identity` | as `createPeer` | `nodeRegistry()` for `sqlite` on Node |
+
+### `createRelay(options?) → Promise<{qu, port, spaces, close()}>` (Node)
+
+A relay/mirror in one call (`@qu/lite/node`); the CLI is a thin wrapper around it.
+
+```js
+import { createRelay } from '@qu/lite/node';
+const relay = await createRelay({ port: 8787, db: './relay.sqlite', logFormat: 'json', handleSignals: true });
+relay.qu.dev.links();
+await relay.close();   // graceful
+```
+
+Options: `port` (8787), `host`, `db` (`':memory:'`), `allow`, `static`, `quota`, `maxEnvelopeBytes`,
+`maxSpaces`, `rate` (200, `0` = off), `statsToken`, `maxConnections`, `maxBufferedBytes`, `log`
+(`console.log`), `logFormat` (`'text'` | `'json'`: one JSON object per line), `extra` (more plugins),
+`devtools` (`true`: `qu.dev` without a global), `handleSignals` (close on SIGINT/SIGTERM and exit).
+`/readyz` answers 200 once the stored grants are loaded.
+
 ### `createPeer(options?) → Promise<qu>`
 
 This builds a peer from registry names. It is the same builder for browsers, Node clients and mirrors.
@@ -124,7 +169,9 @@ const relay = await createPeer({
 | `transports` | `[]` | same entry forms |
 | `netId` | persisted | |
 
-The peer gets `qu.root`, the root driver, for example to call `qu.root.close()` on SQLite.
+The peer gets `qu.root`, the root driver. `qu.close()` closes it. Each plugin is recorded under its
+registry name (`qu.has('sync')`). A transport API with a `ready` promise (the HTTP server) is awaited.
+If building fails half-way, everything installed so far is closed and the error is rethrown.
 
 ### `Registry`, `defaultRegistry()`, `nodeRegistry(registry?)`
 
@@ -139,7 +186,7 @@ await registry.create('store', 'memory');
 
 - stores: `memory`, `indexeddb`
 - plugins: `records`, `sync`, `mirror`, `user`, `members`, `inbox`, `signals`, `status`,
-  `compaction`, `limits`, `text`, `blobs`, `stats`, `topology`
+  `compaction`, `limits`, `text`, `blobs`, `stats`, `topology`, `devtools`
 - transports: `ws`, `sse`, `relay`, `webrtc`
 
 `nodeRegistry()` adds the store `sqlite` and the transports `http-server` and `ws-server`.
@@ -157,10 +204,19 @@ await registry.create('store', 'memory');
 | `qu.rotateNetId()` | picks a fresh network id for links opened from now on |
 | `qu.clock` | HLC: `tick()`, `now()`, `peek()`, `recv(hlc)` |
 | `qu.registry` | the registry the peer was built with |
-| `qu.use(plugin)` | installs a plugin and returns its API |
+| `qu.use(plugin, name?)` | installs a plugin and returns its API; `name` (default `plugin.pluginName`) records it in `qu.plugins`; an API with `close()` is closed by `qu.close()` |
+| `qu.has(name)` / `qu.plugins` | whether / which named plugins are installed (`Map name -> api`) |
 | `qu.mount(base, driver)` / `qu.unmount(base)` | mounts a driver on a key prefix |
+| `qu.close({keepStore?}) → Promise` | shuts the peer down: `qu.closing`, disposers in reverse order (plugins, transports, links, timers), the root store (unless `keepStore`), `qu.closed`. Idempotent. |
+| `qu.onClose(fn) → unregister` | cleanup for `close()` |
+| `qu.timers.interval(fn, ms)` / `qu.timers.timeout(fn, ms) → cancel` | timers owned by the peer: cleared on close, never keep Node alive |
+| `qu.closed` | `true` once `close()` started |
 
 Plugins add more members to `qu`, listed with each plugin below.
+
+**Writing a plugin**: return an API object; register listeners' `off` functions and other
+cleanup with `qu.onClose()`, use `qu.timers` instead of `setInterval`, report background failures with
+`qu.bus.error(error, where)`, and set `plugin.pluginName` so `qu.has()` and the devtools know it.
 
 ### Bus
 
@@ -185,6 +241,8 @@ off();
 
 A throwing handler never breaks the others. It is reported on `bus.error` as `{topic, error}`,
 or on the console if nobody listens. The exception is `run()`, where a throw aborts the chain.
+`bus.error(error, where)` reports a failure outside a handler (a timer, a deferred flush) the same way.
+`new Bus({cacheSize = 2048})`: the sorted handler list of a topic is cached until a listener is added or removed.
 
 ---
 
@@ -193,7 +251,7 @@ or on the console if nobody listens. The exception is `run()`, where a throw abo
 | Driver | Import | |
 |---|---|---|
 | `memoryDriver()` | `@qu/lite` | in memory |
-| `indexedDbDriver({name?, store?, indexedDB?, IDBKeyRange?})` | `@qu/lite` | browser; defaults `name: 'qu-lite'`, `store: 'kv'` |
+| `indexedDbDriver({name?, store?, indexedDB?, IDBKeyRange?, onBlocked?})` | `@qu/lite` | browser; defaults `name: 'qu-lite'`, `store: 'kv'`; closes on `versionchange`, reopens a connection the browser closed |
 | `sqliteDriver({path?})` | `@qu/lite/sqlite` | Node ≥ 22.5, WAL, one table; default `':memory:'`; `close()` |
 
 **Driver contract**: `get(key)`, `set(key, value)`, `remove(key)` and `keys(prefix)`.
@@ -531,6 +589,18 @@ size, or in a browser `navigator.storage.estimate()` (with `quota`). Results are
 `storageCacheMs`. Peers are named by network id only. The figures contain no space ids or
 identities. Example: [09-stats.mjs](../examples/09-stats.mjs).
 
+## devtools
+
+`qu.use(devtools({ global?, log?, table? }))` – the inspection API `qu.dev` for the browser console and
+the relay REPL. `global`: name on `globalThis` (browser default `'qu'`, Node default none, `false` = none).
+`createClient()` installs it in browsers, `createRelay()` always (without a global).
+
+`qu.dev.help()`, `info()`, `links()`, `transports()`, `trace(pattern, {persist?, filter?}) → stop`,
+`untrace()`, `spaces()`, `pending()`, `ls(prefix, limit)`, `get(key)`, `dump(prefix, limit)`, `stats()`,
+`listeners(topic)`, `emit(topic, payload)`. The identity (`qu/identity`) is always masked.
+`?qu-trace=<pattern>` in the page URL, or `trace(p, {persist: true})`, traces from start-up.
+Details and recipes: [CONSOLE.md](CONSOLE.md).
+
 ## mirror
 
 `qu.use(mirror({ allow = null, quota = null, maxEnvelopeBytes = 262144, expireEveryMs }))` on a
@@ -571,11 +641,19 @@ of them unchanged.
 | `connectSse(qu, base, opts?)` / `sseTransport({connect: [url]})` | SSE only |
 | `rtc({mode, iceServers, maxMesh, fanout})` | WebRTC between members; signaling sealed through the space; `await qu.rtc.track(space)`, `qu.rtc.setMode('auto'\|'mesh'\|'relay-only')`. Needs `status`. |
 | `topology({mode, mirrors, peers, maxMesh, fanout, connect})` | `star`, `mesh` or `auto` over URL endpoints; `qu.topology.{setPeers, setMode, endpoints(), close()}` |
-| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000, statsToken?, maxFrameBytes = 8 MiB})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/info` and static files; with `statsToken` (and the `stats` plugin) also `/stats` (JSON) and `/metrics` (Prometheus) for requests sending `Authorization: Bearer <token>` or `?token=`; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
+| `listenHttp(qu, {port, host?, server?, static?, ws = true, sse = true, pingMs = 25000, statsToken?, maxFrameBytes = 8 MiB, maxConnections = 10000, maxBufferedBytes = 16 MiB, drainMs = 1000, ready?})` (Node) | one port for WebSocket upgrades, `/sse`, `/healthz`, `/readyz` (200 once `ready()` is truthy, 503 while shutting down), `/info` (incl. `protocol`) and static files; beyond `maxConnections` peers a WebSocket is closed with 1013 and SSE gets 503 (`net.refused`); `close()` is graceful (1001 to clients, terminate after `drainMs`); with `statsToken` (and the `stats` plugin) also `/stats` (JSON) and `/metrics` (Prometheus) for requests sending `Authorization: Bearer <token>` or `?token=`; `{port, close()}`. WebSocket clients are pinged every `pingMs` (keeps proxies from closing idle connections; silent clients are closed). `listenWs` is the same without SSE. |
 | `httpServerTransport(opts)` / registry `ws-server`, `http-server` (Node) | plugin form; `qu.transports['ws-server'].{ready, close()}` |
 | `createLink(qu, {send, close?, onUp?, onDown?, scope?})` | write your own transport: call `receive(bytes)` for incoming data and `closed()` on disconnect |
 
-Events: `net.peer.up {peer, via}`, `net.peer.down {peer, via}`, `net.connecting`, `net.error`,
+**Link rules** (every transport): `hi` carries `{peer, v}` with `v = PROTOCOL_VERSION` - a remote with a newer
+version is refused (`net.error {reason: 'protocol'}`); a remote that sends no valid `hi` within
+`netOf(qu).helloTimeoutMs` (15 s) or more than 8 frames before it is closed; frame types must match
+`[a-z][a-z0-9_-]{0,31}`; the rate guard (`limits`) sees type and size before the frame is parsed; frames
+are decoded strictly. **Backpressure**: a WebSocket or SSE stream whose send buffer exceeds `maxBufferedBytes`
+(16 MiB) is closed (`net.slow`) - the peer reconnects and resumes. `qu.close()` drops every link.
+
+Events: `net.peer.up {peer, via}`, `net.peer.down {peer, via}`, `net.connecting`, `net.error {via, reason, peer}`,
+`net.slow {via, peer, buffered}`, `net.refused {via, reason}`,
 `net.relay.transport {url, via, scoped}`, `net.rtc.open` and `net.rtc.closed`.
 
 Example: [03-mirror-websocket.mjs](../examples/03-mirror-websocket.mjs).
@@ -585,7 +663,7 @@ Example: [03-mirror-websocket.mjs](../examples/03-mirror-websocket.mjs).
 ```sh
 npx qu-lite-mirror --port 8787 --db ./mirror.sqlite [--host 0.0.0.0] [--allow sid1,sid2] [--static ./web]
                    [--quota-records N] [--quota-bytes N] [--max-envelope N] [--max-spaces N] [--rate 200]
-                   [--stats-token SECRET] [--quiet]
+                   [--stats-token SECRET] [--max-connections N] [--log-format text|json] [--repl] [--quiet]
 docker compose up --build                       # same, port 8787, data in a volume
 ```
 
@@ -594,12 +672,15 @@ Every flag also has an environment variable: `QU_PORT`, `QU_HOST`, `QU_DB`, `QU_
 `QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE`, `QU_RATE` (`0` disables
 rate limiting) and `QU_STATS_TOKEN` (installs `stats`, enables `/stats` and `/metrics`). Every variable can also
 be read from a file named by `<NAME>_FILE` (Docker/Swarm secrets, e.g. `QU_STATS_TOKEN_FILE=/run/secrets/qu_stats_token`);
-the file wins. The mirror keeps its identity in its database, so clients resume after a
-restart. `startMirror(options)` from `bin/mirror.mjs` is the same thing in code.
+the file wins. Also `QU_MAX_CONNECTIONS` and `QU_LOG_FORMAT`. The mirror keeps its identity in its database, so clients resume after a
+restart. `createRelay(options)` from `@qu/lite/node` is the same thing in code (`startMirror` in
+`bin/mirror.mjs` remains as an alias). `--repl` opens an interactive console with `qu`, `dev` and `relay`
+next to the running relay ([CONSOLE.md](CONSOLE.md#relay-repl)); SIGINT/SIGTERM shut down gracefully.
 
 With `--static ./web` (the Docker image always sets it) the same port also serves the client start page
 (`/`: connection check and how an app connects), the demo (`/demo.html`) and the library as one browser
-module (`/dist/qu-lite.js`, built by `node web/build.mjs`). `/healthz` and `/info` are always served.
+module (`/dist/qu-lite.js`, or the small `/dist/qu-client.js` with on-demand chunks, built by
+`node web/build.mjs`). `/healthz`, `/readyz` and `/info` are always served.
 TLS and reverse proxy setups (nginx, Caddy, path prefix): [DEPLOY.md](DEPLOY.md).
 
 ---
@@ -630,7 +711,9 @@ TLS and reverse proxy setups (nginx, Caddy, path prefix): [DEPLOY.md](DEPLOY.md)
 | `net.peer.up` / `net.peer.down` | `{peer, via}` / `{peer, via, stats}` | `stats`: the link's final byte and frame counters |
 | `net.limited` | `{peer, type, size, closed}` | rate limit hit |
 | `mirror.grant` / `mirror.quota` | `{sid, …}` | |
-| `bus.error` | `{topic, error}` | a handler threw |
+| `net.error` / `net.slow` / `net.refused` | see [Transports](#transports) | bad frames, protocol, handshake; slow consumer closed; capacity |
+| `qu.closing` / `qu.closed` | `{}` | `qu.close()` started / finished |
+| `bus.error` | `{topic, error}` | a handler threw, or `bus.error(error, where)` was called |
 
 Hooks (processes you can change): `qu.write.before` (run), `qu.accept` (emit, `ctx.stop()` /
 `ctx.defer`), `qu.query.before` (emit) and `qu.compact.candidate` (emit, `ctx.stop()`).
@@ -657,8 +740,9 @@ These are exported for tools, tests and custom plugins. Apps rarely need them.
   `randomBytes`, `toHex`/`fromHex`, `toBase64`/`fromBase64` and `concat`.
 - **HLC**: `createClock({now?, maxDriftMs?})`, `formatHlc(ms, counter)`, `parseHlc(hlc)`.
 - **Drop lists**: `GC_HORIZON_MS`, `gcCutoff(now)`, `encodeEntries`, `decodeEntries`, `mayDrop`.
-- **Frames**: `encodeFrame(type, payload)`, `decodeFrame(bytes)`. `netOf(qu)` holds the link
-  scopes.
+- **Frames**: `encodeFrame(type, payload)`, `decodeFrame(bytes)` (strict), `peekFrameType(bytes)`,
+  `PROTOCOL_VERSION`. `netOf(qu)` holds the link scopes, open links (`links`: `{via, since, version, stats}`)
+  and `helloTimeoutMs`.
 
 ## Errors
 

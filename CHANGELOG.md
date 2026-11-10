@@ -3,6 +3,27 @@
 All notable changes to `@qu/lite`. The format follows [Keep a Changelog](https://keepachangelog.com/),
 versions follow [Semantic Versioning](https://semver.org/) - before 1.0, a minor version may change the API.
 
+## Unreleased
+
+Stability, scalability and one base for client and relay.
+
+- **Lifecycle**: `qu.close()`, `qu.onClose()`, `qu.timers`; plugins, transports, links and timers are
+  torn down in reverse order (`qu.closing`/`qu.closed`). `qu.use(plugin, name)` records plugins
+  (`qu.plugins`, `qu.has()`).
+- **Presets**: `createClient()` (browser + Node) and `createRelay()` (`@qu/lite/node`); the CLI is a
+  thin wrapper with `--repl`, `--log-format json`, `--max-connections`.
+- **Lazy registry**: `defaultRegistry()` imports modules on first use; new small entry `@qu/lite/client`,
+  served as `dist/qu-client.js` (~4 KB gzip) with plugins as on-demand chunks.
+- **Hardened links**: strict frame decoding, frame-type check, rate guard before parsing, `hi` timeout
+  and early-frame limit, protocol version in `hi` (`PROTOCOL_VERSION`, also in `/info`).
+- **Backpressure**: WebSocket and SSE peers that do not drain are closed (`net.slow`) instead of being
+  buffered without bound.
+- **Server**: `maxConnections` (1013 / 503, `net.refused`), `/readyz`, graceful shutdown (1001, drain).
+- **IndexedDB**: closes on `versionchange`, reopens connections the browser closed.
+- **Devtools**: `devtools()` plugin, `qu.dev` in the browser console and the relay REPL
+  (docs/CONSOLE.md). Developer guide in German: docs/GUIDE.md.
+- Fix: `bus.error?.(…)` calls in `compaction`/`text` were no-ops - `Bus#error(error, where)` exists now.
+
 ## [Unreleased]
 
 ### Security

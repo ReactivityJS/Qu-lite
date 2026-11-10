@@ -15,16 +15,12 @@ const wsUrl = `${base.replace(/^http/, 'ws')}/ws`;
 
 $('base').textContent = base;
 $('endpoints').textContent = `${wsUrl} · ${base}/sse`;
-$('snippet').textContent = `import { createPeer } from '${base}/dist/qu-lite.js';
+$('snippet').textContent = `import { createClient } from '${base}/dist/qu-client.js';
 
-// identity and data stay on the device (IndexedDB)
+// identity and data stay on the device (IndexedDB); plugins load on demand
 // relay: WebSocket, falls back to HTTPS + SSE on the same address
-const qu = await createPeer({
-  store: ['indexeddb', { name: 'my-app' }],
-  plugins: ['records', 'user', 'members', 'inbox',
-            ['sync', { ackFrom: 'mirror' }], 'status', 'compaction'],
-  transports: [['relay', { url: '${base}' }]],
-});
+// in the dev console: qu.dev.help()
+const qu = await createClient({ url: '${base}', name: 'my-app' });
 const group = await qu.createGroup();
 await qu.write(group, 'chat', 'hallo');`;
 
