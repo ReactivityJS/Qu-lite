@@ -29,6 +29,7 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   devtools?: boolean|object,
  *   persist?: boolean,
  *   restore?: {backup: string, passphrase: string, force?: boolean},
+ *   passphrase?: string,
  *   registry?: import('./registry.js').Registry,
  *   identity?: object|'persisted',
  * }} [options]
@@ -40,6 +41,8 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   prompt; default false - call `qu.device.persist()` at a better moment).
  *   `restore`: start from a device backup (`qu.device.exportBackup()` on the
  *   old device); then `await qu.restoreGroups()`.
+ *   `passphrase`: keep the identity encrypted in storage; every start needs it
+ *   (`error.code` 'QU_LOCKED' without, 'QU_WRONG_PASSPHRASE' with a wrong one).
  */
 export async function createClient({
   url,
@@ -54,11 +57,12 @@ export async function createClient({
   identity = 'persisted',
   persist = false,
   restore,
+  passphrase,
 } = {}) {
   store ??= globalThis.indexedDB ? ['indexeddb', { name }] : 'memory';
   transports ??= url && [url].flat().length ? [['relay', { url, ...relay }]] : [];
   const tools = devtools ? [['devtools', devtools === true ? {} : devtools]] : [];
-  const qu = await createPeer({ registry, store, identity, restore, plugins: [...plugins, ...extra, ...tools], transports });
+  const qu = await createPeer({ registry, store, identity, restore, passphrase, plugins: [...plugins, ...extra, ...tools], transports });
   if (persist && qu.device) await qu.device.persist().catch((error) => qu.bus.error(error, 'device.persist'));
   return qu;
 }

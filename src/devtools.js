@@ -23,7 +23,7 @@
 import { toHex } from './crypto.js';
 import { netOf } from './net/link.js';
 
-const SECRET_KEYS = new Set(['qu/identity']);
+const SECRET_KEYS = new Set(['qu/identity', 'qu/identity-locked']);
 const TRACE_KEY = 'qu:trace';
 
 /** Payloads made readable for the console: bytes as `<N bytes>`, long arrays shortened. */

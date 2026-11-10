@@ -104,7 +104,7 @@ test('restore never silently replaces another identity that has groups on this s
 test('storage status and persistence: null where unsupported, the browser answer where it is', async () => {
   const plain = await createQu();
   plain.use(device(fast));
-  assert.deepEqual(await plain.device.status(), { persisted: null, usage: null, quota: null, backupAt: null, groups: 0 });
+  assert.deepEqual(await plain.device.status(), { persisted: null, usage: null, quota: null, backupAt: null, groups: 0, locked: false });
   assert.equal(await plain.device.persist(), null);
   await plain.close();
 
@@ -123,6 +123,89 @@ test('storage status and persistence: null where unsupported, the browser answer
   assert.equal((await qu.device.status()).persisted, false);
   assert.equal(await qu.device.persist(), true);
   assert.deepEqual(granted, [true]);
-  assert.deepEqual(await qu.device.status(), { persisted: true, usage: 1234, quota: 1e9, backupAt: null, groups: 0 });
+  assert.deepEqual(await qu.device.status(), { persisted: true, usage: 1234, quota: 1e9, backupAt: null, groups: 0, locked: false });
   await qu.close();
+});
+
+test('identity lock: stored only encrypted; starts need the passphrase; clear error codes', async () => {
+  const disk = memoryDriver();
+  const first = await createClient({ store: disk, devtools: false, passphrase: PASS });
+  const id = toHex(first.identity.publicKey);
+  assert.equal(await disk.get('qu/identity'), null, 'no plain copy');
+  assert.match(await disk.get('qu/identity-locked'), /^qu-backup\./);
+  assert.equal((await first.device.status()).locked, true);
+  await first.createGroup();
+  await first.close({ keepStore: true });
+
+  await assert.rejects(createClient({ store: disk, devtools: false }), (e) => e.code === 'QU_LOCKED');
+  await assert.rejects(createClient({ store: disk, devtools: false, passphrase: 'not the passphrase' }), (e) => e.code === 'QU_WRONG_PASSPHRASE');
+  const again = await createClient({ store: disk, devtools: false, passphrase: PASS });
+  assert.equal(toHex(again.identity.publicKey), id);
+  assert.equal((await again.restoreGroups()).length, 1, 'groups survive the lock');
+
+  // change the passphrase, then remove the lock
+  await again.device.changePassphrase(PASS, 'another long passphrase');
+  await again.close({ keepStore: true });
+  await assert.rejects(createClient({ store: disk, devtools: false, passphrase: PASS }), (e) => e.code === 'QU_WRONG_PASSPHRASE');
+  const changed = await createClient({ store: disk, devtools: false, passphrase: 'another long passphrase' });
+  await changed.device.removeLock('another long passphrase');
+  assert.equal((await changed.device.status()).locked, false);
+  await changed.close({ keepStore: true });
+  const open = await createClient({ store: disk, devtools: false });
+  assert.equal(toHex(open.identity.publicKey), id, 'same identity, no passphrase needed any more');
+  await open.close();
+});
+
+test('identity lock: an existing unlocked identity is locked on the first start with a passphrase, or later with lock()', async () => {
+  const disk = memoryDriver();
+  const plain = await createClient({ store: disk, devtools: false });
+  const id = toHex(plain.identity.publicKey);
+  await plain.close({ keepStore: true });
+  const locked = await createClient({ store: disk, devtools: false, passphrase: PASS });
+  assert.equal(toHex(locked.identity.publicKey), id);
+  assert.equal(await disk.get('qu/identity'), null);
+  await locked.close({ keepStore: true });
+
+  const other = memoryDriver();
+  const runtime = await createClient({ store: other, devtools: false });
+  await runtime.device.lock(PASS);
+  await assert.rejects(runtime.device.lock(PASS), /already locked/);
+  await runtime.close({ keepStore: true });
+  await assert.rejects(createClient({ store: other, devtools: false }), (e) => e.code === 'QU_LOCKED');
+
+  // a lock that stopped half-way (both copies present) is finished on the next start
+  const half = memoryDriver();
+  const h = await createClient({ store: half, devtools: false });
+  const plainCopy = await half.get('qu/identity');
+  await h.device.lock(PASS);
+  await h.close({ keepStore: true });
+  await half.set('qu/identity', plainCopy);
+  const resumed = await createClient({ store: half, devtools: false, passphrase: PASS });
+  assert.equal(await half.get('qu/identity'), null, 'plain copy removed');
+  await resumed.close();
+});
+
+test('identity lock with restore: the restored identity ends up locked; a locked storage of someone else is protected', async () => {
+  const source = await createClient({ devtools: false });
+  await source.createGroup();
+  const backup = await source.device.exportBackup(PASS);
+  const id = toHex(source.identity.publicKey);
+  await source.close();
+
+  const disk = memoryDriver();
+  const restored = await createClient({ store: disk, devtools: false, restore: { backup, passphrase: PASS }, passphrase: 'device passphrase here' });
+  assert.equal(toHex(restored.identity.publicKey), id);
+  assert.equal(await disk.get('qu/identity'), null, 'stored locked');
+  assert.equal((await restored.restoreGroups()).length, 1);
+  await restored.close({ keepStore: true });
+
+  // someone else's locked storage: refused without its passphrase
+  const foreign = memoryDriver();
+  const owner = await createClient({ store: foreign, devtools: false, passphrase: 'owner passphrase 123' });
+  await owner.close({ keepStore: true });
+  await assert.rejects(createClient({ store: foreign, devtools: false, restore: { backup, passphrase: PASS } }), /locked by another passphrase/);
+  const forced = await createClient({ store: foreign, devtools: false, restore: { backup, passphrase: PASS, force: true } });
+  assert.equal(toHex(forced.identity.publicKey), id);
+  assert.equal(await foreign.get('qu/identity-locked'), null, 'the foreign lock is gone');
+  await forced.close();
 });

@@ -391,7 +391,23 @@ await qu.restoreGroups();                                   // Gruppen öffnen, 
   den Nutzer dabei, Chrome entscheidet selbst (z. B. für installierte PWAs). Deshalb nicht automatisch
   beim ersten Laden, sondern an einem verständlichen Punkt – etwa nach dem Anlegen der ersten Gruppe.
   `createClient({ persist: true })` fragt sofort.
-- **Status für die UI:** `await qu.device.status()` → `{persisted, usage, quota, backupAt, groups}` – z. B.
+- **Optional: Identität mit Passphrase sperren.** Mit `createClient({ url, passphrase })` liegt die
+  Identität nur noch verschlüsselt im Speicher. Jeder Start braucht dann die Passphrase:
+
+  ```js
+  try {
+    qu = await createClient({ url, passphrase: await askUser() });
+  } catch (e) {
+    if (e.code === 'QU_LOCKED' || e.code === 'QU_WRONG_PASSPHRASE') showUnlockDialog(e.code);
+    else throw e;
+  }
+  ```
+
+  Eine vorhandene unverschlüsselte Identität wird beim ersten Start mit Passphrase umgestellt. Zur
+  Laufzeit: `qu.device.lock(p)`, `changePassphrase(alt, neu)`, `removeLock(p)`. Das schützt kopierte
+  Festplatten, Browser-Profile und Datenbankdateien – nicht eine kompromittierte, laufende Seite. Ohne
+  Passphrase und ohne Backup ist die Identität bei vergessener Passphrase verloren: Backup anbieten!
+- **Status für die UI:** `await qu.device.status()` → `{persisted, usage, quota, backupAt, groups, locked}` – z. B.
   „Kein Backup seit 30 Tagen“ oder „Speicher nicht geschützt“ anzeigen.
 
 ## 11. Testen

@@ -65,6 +65,12 @@ Stability, scalability and one base for client and relay.
   connected (each with its own WebSocket -> SSE fallback, with `isolate` one connection per space and
   relay). One relay going down changes nothing for the app; when it is back, the reconcile delivers
   what it missed. `qu.transports.relay.urls`.
+- **Identity lock (optional)**: `createClient({ passphrase })` keeps the identity only encrypted in
+  storage (backup format); every start needs the passphrase (`error.code` `QU_LOCKED` /
+  `QU_WRONG_PASSPHRASE`). An unlocked identity is locked on the first start with a passphrase, the plain
+  copy removed only after the sealed one read back; half-finished locks are completed. `qu.device.lock`,
+  `changePassphrase`, `removeLock`, `status().locked`; restore into a locked storage needs its passphrase
+  or `force`.
 
 ## [Unreleased]
 

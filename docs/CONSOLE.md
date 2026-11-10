@@ -155,6 +155,7 @@ await qu.close()                            // Peer sauber beenden
 await qu.device.status()                    // {persisted, usage, quota, backupAt, groups}
 await qu.device.persist()                   // Browser bitten, den Speicher nicht zu räumen
 await qu.device.downloadBackup('lange passphrase hier')   // Backup als Datei
+await qu.device.lock('lange passphrase hier')             // Identität nur noch verschlüsselt speichern
 ```
 
 Ein Backup enthält die privaten Schlüssel (verschlüsselt). Nie in Bug-Reports oder Chats einfügen.

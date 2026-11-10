@@ -67,24 +67,31 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  *   transports?: Array<string|[string, object]|Function>,
  *   netId?: string,
  *   restore?: {backup: string, passphrase: string, force?: boolean},
+ *   passphrase?: string,
  * }} [options]
  *   `identity: 'persisted'` (default) loads the identity from the store or
  *   creates and saves one - so a reload keeps who you are.
  *   `restore`: writes a device backup (device.js) into the store first and
  *   uses its identity; refused if the store belongs to another identity
  *   that has groups here, unless `force`. Then call `qu.restoreGroups()`.
+ *   `passphrase`: the identity is kept encrypted in the store (device.js
+ *   IDENTITY LOCK); a locked store needs it on every start (errors with
+ *   `code` 'QU_LOCKED' / 'QU_WRONG_PASSPHRASE').
  *   A transport whose API has a `ready` promise (a server binding its port)
  *   is awaited, so a failure surfaces here and not later.
  */
-export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId, restore } = {}) {
+export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId, restore, passphrase } = {}) {
   const [storeName, storeOptions] = typeof store === 'object' && !Array.isArray(store) ? [null, store] : entry(store);
   const root = storeName ? await registry.create('store', storeName, storeOptions) : storeOptions;
 
   let qu = null;
   try {
     if (restore) {
-      await (await import('./device.js')).restoreInto(root, restore);
+      await (await import('./device.js')).restoreInto(root, { ...restore, lockPassphrase: passphrase });
       identity = 'persisted';
+    }
+    if (identity === 'persisted' && (passphrase != null || (await root.get('qu/identity-locked')))) {
+      identity = await (await import('./device.js')).loadIdentity(root, { passphrase });
     }
     if (identity === 'persisted') {
       identity = await root.get('qu/identity');

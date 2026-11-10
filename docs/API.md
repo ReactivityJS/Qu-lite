@@ -119,6 +119,7 @@ const qu = await createClient({ url: 'https://relay.example', name: 'my-app', ex
 | `devtools` | `true` in browsers | `true`, `false` or options for [`devtools`](#devtools) |
 | `persist` | `false` | ask the browser at start to keep the storage ([device](#device)) |
 | `restore` | – | `{backup, passphrase, force?}`: start from a device backup ([device](#device)) |
+| `passphrase` | – | keep the identity encrypted in storage; needed on every start ([device](#device)) |
 | `registry`, `identity` | as `createPeer` | `nodeRegistry()` for `sqlite` on Node |
 
 ### `createRelay(options?) → Promise<{qu, port, spaces, close()}>` (Node)
@@ -632,7 +633,8 @@ persistence. `createClient()` installs it.
 | `qu.device.exportBackup(passphrase) → string` | the device-only keys (`qu/identity`, `members/groups/`, `members/keys/`), sealed: PBKDF2-SHA256 (`iterations`) + AES-256-GCM, header authenticated; one line `qu-backup.…`. Passphrase ≥ 8 characters. Records `qu/backup-at`, notifies `qu.device.backup {groups}` |
 | `qu.device.downloadBackup(passphrase, filename = 'qu-backup.txt')` | browser: the same, offered as a file |
 | `qu.device.persist() → boolean \| null` | `navigator.storage.persist()` (may prompt); `null` where unsupported; `qu.device.persist {granted}` |
-| `qu.device.status() → {persisted, usage, quota, backupAt, groups}` | `null` for what the runtime cannot tell |
+| `qu.device.status() → {persisted, usage, quota, backupAt, groups, locked}` | `null` for what the runtime cannot tell |
+| `qu.device.lock(passphrase)` / `changePassphrase(old, new)` / `removeLock(passphrase)` | identity lock at runtime (see below) |
 
 `readBackup(text, passphrase) → {identity, entries, created}` checks a backup without using it (wrong
 passphrase and damage both throw `backup: wrong passphrase or damaged backup`).
@@ -640,6 +642,14 @@ Restore: `createClient({ restore: {backup, passphrase, force?} })` (or `createPe
 into the store first; a store whose identity differs and has groups is refused unless `force` (then its
 group and epoch keys are dropped). Then `await qu.restoreGroups()`. `createClient({ persist: true })`
 calls `qu.device.persist()` at start.
+
+**Identity lock** (optional): `createClient({ passphrase })` (or `createPeer`) keeps the identity only
+encrypted in storage (`qu/identity-locked`, the backup format without group entries); an unlocked
+identity is locked on the first start with a passphrase (the plain copy is removed after the sealed
+one was read back). Every start then needs it: without, the start rejects with `error.code ===
+'QU_LOCKED'`, with a wrong one `'QU_WRONG_PASSPHRASE'`. Protects data at rest (copied disk, profile,
+database file), not a compromised running page. `restore` into a locked storage needs that storage's
+`passphrase` or `force`.
 
 ## devtools
 

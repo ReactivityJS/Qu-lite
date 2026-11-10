@@ -24,6 +24,19 @@
  * A wrong passphrase and a damaged backup fail the same way (GCM tag).
  * The header is authenticated, so iterations cannot be lowered unnoticed.
  *
+ * IDENTITY LOCK (optional): `createClient({ passphrase })` keeps the
+ * identity only encrypted in storage (`qu/identity-locked`, the backup
+ * format with no group entries) - a copied disk, browser profile or
+ * database file no longer contains usable keys. Every start then needs the
+ * passphrase: without it the start fails with `error.code === 'QU_LOCKED'`,
+ * with a wrong one `'QU_WRONG_PASSPHRASE'` - the app shows an unlock dialog
+ * and calls createClient again. An existing unlocked identity is locked on
+ * the first start with a passphrase (the plain copy is removed only after
+ * the sealed one was read back). At runtime: `qu.device.lock(passphrase)`,
+ * `changePassphrase(old, new)`, `removeLock(passphrase)`. While the app
+ * runs the keys are in memory, as always - the lock protects data at rest,
+ * not a compromised page.
+ *
  * Why the browser grant matters: without `navigator.storage.persist()` a
  * browser may evict the origin's IndexedDB under storage pressure - and with
  * it the identity. Requesting it can show a prompt (Firefox), so it is up to
@@ -33,6 +46,8 @@
 import * as crypto from './crypto.js';
 
 const PREFIX = 'qu-backup.';
+const PLAIN_KEY = 'qu/identity';
+const LOCKED_KEY = 'qu/identity-locked';
 /** Keys that exist only on this device and make up a backup. */
 const DEVICE_KEYS = ['members/groups/', 'members/keys/'];
 export const BACKUP_ITERATIONS = 600_000;
@@ -112,6 +127,56 @@ export async function readBackup(text, passphrase) {
 
 const sameIdentity = (a, b) => Boolean(a && b) && crypto.toHex(a.publicKey) === crypto.toHex(b.publicKey);
 
+const coded = (message, code) => Object.assign(new Error(message), { code });
+
+/** Opens the locked identity. @throws QU_LOCKED (no passphrase) / QU_WRONG_PASSPHRASE */
+async function openLocked(sealed, passphrase) {
+  if (passphrase == null) throw coded('identity is locked: start with the passphrase', 'QU_LOCKED');
+  try {
+    return (await readBackup(sealed, passphrase)).identity;
+  } catch {
+    throw coded('identity is locked: wrong passphrase', 'QU_WRONG_PASSPHRASE');
+  }
+}
+
+/** Stores `identity` locked, verified by reading it back, then removes any plain copy. */
+async function lockStored(store, identity, passphrase, iterations = BACKUP_ITERATIONS) {
+  const sealed = await sealBackup({ identity, entries: [] }, passphrase, { iterations });
+  await store.set(LOCKED_KEY, sealed);
+  const back = await readBackup(await store.get(LOCKED_KEY), passphrase);
+  if (!sameIdentity(back.identity, identity)) throw new Error('identity lock: the sealed copy did not read back - nothing removed');
+  await store.remove(PLAIN_KEY);
+}
+
+/**
+ * The identity of a store, honouring the optional lock (createPeer uses it):
+ * locked -> needs `passphrase`; plain + `passphrase` -> locked now; empty ->
+ * a new identity, stored locked if a passphrase is given.
+ * @param {object} store - a driver
+ * @param {{passphrase?: string, generate?: () => Promise<object>}} [options]
+ */
+export async function loadIdentity(store, { passphrase, generate = crypto.generateIdentity } = {}) {
+  const plain = await store.get(PLAIN_KEY);
+  const sealed = await store.get(LOCKED_KEY);
+  if (sealed) {
+    const identity = await openLocked(sealed, passphrase);
+    if (plain) {
+      // a lock or a restore that stopped half-way
+      if (!sameIdentity(plain, identity)) throw new Error('identity: this storage holds two different identities (locked and plain) - restore with force');
+      await store.remove(PLAIN_KEY);
+    }
+    return identity;
+  }
+  if (plain) {
+    if (passphrase != null) await lockStored(store, plain, passphrase);
+    return plain;
+  }
+  const identity = await generate();
+  if (passphrase != null) await lockStored(store, identity, passphrase);
+  else await store.set(PLAIN_KEY, identity);
+  return identity;
+}
+
 /**
  * Writes a backup into a store before a peer is built on it (createPeer's `restore`).
  * A store that already belongs to ANOTHER identity is refused if that identity has
@@ -120,9 +185,16 @@ const sameIdentity = (a, b) => Boolean(a && b) && crypto.toHex(a.publicKey) === 
  * @param {{backup: string, passphrase: string, force?: boolean}} options
  * @returns {Promise<{identity: object, groups: number, replaced: boolean}>}
  */
-export async function restoreInto(store, { backup, passphrase, force = false }) {
+export async function restoreInto(store, { backup, passphrase, force = false, lockPassphrase }) {
   const payload = await readBackup(backup, passphrase);
-  const current = await store.get('qu/identity');
+  let current = await store.get(PLAIN_KEY);
+  const sealed = await store.get(LOCKED_KEY);
+  if (sealed) {
+    // a locked storage: only its passphrase tells whose it is
+    current = await openLocked(sealed, lockPassphrase).catch(() => null);
+    if (!current && !force) throw new Error('restore: this storage is locked by another passphrase - start with that passphrase, use another database name, or force: true');
+    if (!current || !sameIdentity(current, payload.identity)) await store.remove(LOCKED_KEY);
+  }
   let replaced = false;
   if (current && !sameIdentity(current, payload.identity)) {
     const groups = (await store.keys('members/groups/')).length;
@@ -132,7 +204,7 @@ export async function restoreInto(store, { backup, passphrase, force = false }) 
     for (const prefix of DEVICE_KEYS) for (const key of await store.keys(prefix)) await store.remove(key);
     replaced = true;
   }
-  await store.set('qu/identity', payload.identity);
+  if (!sealed || !current || !sameIdentity(current, payload.identity)) await store.set(PLAIN_KEY, payload.identity);
   for (const [key, value] of payload.entries) await store.set(key, value);
   return { identity: payload.identity, groups: payload.entries.filter(([k]) => k.startsWith('members/groups/')).length, replaced };
 }
@@ -172,7 +244,30 @@ export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = global
         await qu.bus.notify('qu.device.persist', { granted });
         return granted;
       },
-      /** @returns {Promise<{persisted: boolean|null, usage: number|null, quota: number|null, backupAt: number|null, groups: number}>} */
+      /** Locks the stored identity with a passphrase (every start then needs it). */
+      async lock(passphrase) {
+        if (await storage.get(LOCKED_KEY)) throw new Error('lock: already locked - use changePassphrase(old, new)');
+        await lockStored(storage, qu.identity, passphrase, iterations);
+        await qu.bus.notify('qu.device.lock', { locked: true });
+      },
+      /** Re-seals the stored identity with a new passphrase. */
+      async changePassphrase(oldPassphrase, newPassphrase) {
+        const sealed = await storage.get(LOCKED_KEY);
+        if (!sealed) throw new Error('changePassphrase: not locked - use lock(passphrase)');
+        const identity = await openLocked(sealed, oldPassphrase);
+        if (!sameIdentity(identity, qu.identity)) throw new Error('changePassphrase: the stored identity is not this peer\'s');
+        await lockStored(storage, identity, newPassphrase, iterations);
+      },
+      /** Stores the identity unencrypted again (starts need no passphrase). */
+      async removeLock(passphrase) {
+        const sealed = await storage.get(LOCKED_KEY);
+        if (!sealed) return;
+        const identity = await openLocked(sealed, passphrase);
+        await storage.set(PLAIN_KEY, identity);
+        await storage.remove(LOCKED_KEY);
+        await qu.bus.notify('qu.device.lock', { locked: false });
+      },
+      /** @returns {Promise<{persisted: boolean|null, usage: number|null, quota: number|null, backupAt: number|null, groups: number, locked: boolean}>} */
       async status() {
         const persisted = typeof nav?.storage?.persisted === 'function' ? await nav.storage.persisted() : null;
         const estimate = typeof nav?.storage?.estimate === 'function' ? await nav.storage.estimate() : {};
@@ -182,6 +277,7 @@ export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = global
           quota: estimate.quota ?? null,
           backupAt: (await storage.get('qu/backup-at')) ?? null,
           groups: (await storage.keys('members/groups/')).length,
+          locked: Boolean(await storage.get(LOCKED_KEY)),
         };
       },
     };
