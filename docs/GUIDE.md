@@ -184,6 +184,10 @@ qu.bus.on('qu.accept', (record, ctx) => {
 });
 ```
 
+**Was der Abgleich überträgt:** Records sind bereits Deltas (unveränderlich, inhaltsadressiert), und
+Negentropy vergleicht Indizes statt Daten. Zusätzlich prüft ein Reconnect zuerst pro Space einen
+16-Byte-Fingerprint (Digest) – nur abweichende Spaces laufen Negentropy. Messen: `node bench/sync-bytes.mjs`.
+
 **Zustellung prüfen:** `qu.syncState(sid, id)` → `'pending' | 'sent'`; `qu.syncStatus()` →
 `{outbox, pending}`. Mit `ackFrom: 'mirror'` (Standard in `createClient`) gilt ein Record erst als
 gesendet, wenn ein **Relay** ihn dauerhaft gespeichert hat.

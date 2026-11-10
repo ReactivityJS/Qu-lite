@@ -369,7 +369,10 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `timeoutMs` | `10000` | how long a reconcile waits for wanted records |
 | `retryMs` | `30000` | retry interval for unfinished reconciles while connected (`0`: only on connect) |
 | `sessionTtlMs` | `60000` | responder session lifetime |
-| `maxSessionsPerPeer` | `8` | concurrent responder sessions per peer |
+| `maxSessionsPerPeer` | `8` | concurrent responder sessions per peer (beyond: `negerr busy`, retried after ~1 s with backoff) |
+| `maxConcurrentPerPeer` | `4` | own reconciles running at once per peer; more scopes queue instead of being declined |
+| `digest` | `true` | offer/use the digest pre-check: identical whole-space/shard sets are confirmed with one 16-byte fingerprint each, batched into one frame; only differing scopes run Negentropy. Used only when both sides announce it in `hello` |
+| `ackDelayMs` | `20` | acks are collected this long and sent as one frame per space |
 | `frameSizeLimit` | `262144` | max Negentropy message in bytes (0 = unlimited); bigger differences take more rounds. `want`/`ack` id lists go out in batches of 4096 ids |
 | `stale` | `'retire'` | a scope not completely synced for longer than the drop-list horizon retires old records the peer lacks instead of pushing them (they may have been deleted meanwhile); `'push'`: push anyway |
 
@@ -383,6 +386,19 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `qu.staleSpaces() → [{sid, last}]` | spaces this device has not completely synced within the horizon - check at start-up to warn the user |
 
 `members()`, `user()` and `inbox()` call `watch()` for their spaces themselves.
+
+**Traffic**: a reconcile of the same scope with the same peer is never started twice (a second call
+joins the running one). Outbox records pushed on connect are not pushed again by the reconcile on that
+link. A mirror gets no acks (it never writes). `sync.start` carries `digest: true` when a matching digest
+finished the scope without a session. `bench/sync-bytes.mjs [spaces] [records]` prints the bytes per
+frame type for upload, reconnect, offline changes and a fresh device.
+
+| Situation (20 spaces x 200 records, 1.36 MiB of envelopes) | before | now |
+|---|---|---|
+| first upload | 3,490 KiB / 14,664 frames | 1,699 KiB / 4,584 frames |
+| reconnect, nothing changed | 15.5 KiB / 70 frames, 12 sessions declined | 6.6 KiB / 24 frames, no session |
+| reconnect after 10 offline writes per space | 117.9 KiB | 100.6 KiB |
+| fresh device downloads everything | 3,205 KiB, declined sessions wait for `retryMs` | 1,874 KiB, no waiting |
 
 **Devices offline longer than 90 days**: a stale scope still pushes its outbox and every record
 younger than the horizon. Older records the peer lacks are removed locally: `sync.stale {peer, sid,

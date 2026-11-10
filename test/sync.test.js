@@ -120,7 +120,8 @@ test('volume: reconciling 10,000 records after one offline change costs a few KB
   await settle();
   const bytes = link.stats.aToB + link.stats.bToA;
 
-  assert.equal(summary.received, 1);
+  // the change arrives either by the outbox push or by the reconcile - never twice
+  assert.ok(summary.received <= 1, `received ${summary.received}`);
   assert.equal((await recIds(b, sb)).length, N + 1);
   assert.ok(bytes < 8 * 1024, `reconcile used ${bytes} bytes`);
   assert.ok(bytes < fullSize / 500, `reconcile ${bytes} B vs full replay ${fullSize} B`);

@@ -23,6 +23,12 @@ Stability, scalability and one base for client and relay.
 - **Devtools**: `devtools()` plugin, `qu.dev` in the browser console and the relay REPL
   (docs/CONSOLE.md). Developer guide in German: docs/GUIDE.md.
 - Fix: `bus.error?.(…)` calls in `compaction`/`text` were no-ops - `Bus#error(error, where)` exists now.
+- **Sync traffic** (`bench/sync-bytes.mjs`): digest pre-check (`digest`/`digestr` frames, offered in
+  `hello.features`) - an unchanged reconnect runs no Negentropy session; one reconcile per (peer, scope)
+  (fixes double downloads when `watch()` raced the reconnect); `maxConcurrentPerPeer` queue instead of
+  `busy` declines, a declined session is retried after ~1 s; outbox records are not pushed twice on one
+  link; acks batched (`ackDelayMs`) and never sent to mirrors. First upload -51 %, fresh device -42 %,
+  unchanged reconnect -57 % bytes.
 
 ## [Unreleased]
 
