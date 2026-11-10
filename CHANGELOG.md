@@ -90,6 +90,9 @@ Stability, scalability and one base for client and relay.
 - **Short acks** (feature `ack8`): acks carry 8-byte id prefixes, matched against the receiver's outbox
   (acks for records not in the outbox are dropped - they carried no information). Ack volume -74 %,
   first upload of 4,000 records 1,609 -> 1,512 KiB (-6 %).
+- **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
+  of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
+  version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
 
 ## [Unreleased]
 

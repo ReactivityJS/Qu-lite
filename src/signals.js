@@ -52,7 +52,8 @@ export function signals({ maxAgeMs = 60_000, maxFutureMs = 5 * 60_000, seenSize 
       const space = typeof spaceRef === 'string' ? qu.space?.(spaceRef) : spaceRef;
       if (!space) throw new Error('signal: unknown space');
       const signer = await space.authorFor(identity);
-      const { bytes, id } = await sealEnvelope(space, { path: PREFIX + type, hlc: clock.tick(), value }, signer);
+      // 'small' padding: a heartbeat's inner is ~90 bytes, the 128-byte floor of records would add a third
+      const { bytes, id } = await sealEnvelope(space, { path: PREFIX + type, hlc: clock.tick(), value, padding: 'small' }, signer);
       remember(id);
       await route(bytes, peekEnvelope(bytes));
     }

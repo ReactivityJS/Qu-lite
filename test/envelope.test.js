@@ -88,3 +88,9 @@ test('public records are signed and readable without the space key', async () =>
   await assert.rejects(openEnvelope(strangersView, secret.bytes), /no key to read/);
   assert.equal((await openEnvelope(mine, secret.bytes)).value, '0123');
 });
+
+test("padding 'small': quarter steps from 32 bytes; readers strip any padding", async () => {
+  const { paddedLength } = await import('../src/envelope.js');
+  assert.deepEqual([1, 32, 33, 64, 65, 91, 129].map((n) => paddedLength(n, 'small')), [32, 32, 40, 64, 80, 96, 160]);
+  assert.equal(paddedLength(91, 'quarter'), 128, 'records keep their 128-byte floor');
+});

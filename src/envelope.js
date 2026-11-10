@@ -29,7 +29,10 @@
  * (`JSON || 0x00 || zeros` - JSON text never contains a raw 0x00) to a size
  * step, so the ciphertext length only roughly reveals the content size:
  * 'quarter' (default; min 128 B, then quarter steps of the next power of
- * two: 128, 160, 192, 224, 256, 320, ... - at most +25 %), 'pow2' or 'none'.
+ * two: 128, 160, 192, 224, 256, 320, ... - at most +25 %), 'small' (the same
+ * steps from 32 B: for tiny ephemeral signals, whose kind is no secret from
+ * their rhythm anyway), 'pow2' or 'none'. Padding is the sender's choice -
+ * readers strip it whatever the mode.
  *
  * The record id is `sha256(whole envelope)`: content-addressed.
  */
@@ -48,7 +51,8 @@ export const VERSION = 2;
  */
 export function paddedLength(n, mode = 'quarter') {
   if (mode === 'none') return n;
-  if (n <= 128) return 128;
+  const floor = mode === 'small' ? 32 : 128;
+  if (n <= floor) return floor;
   const pow = 2 ** Math.ceil(Math.log2(n));
   if (mode === 'pow2') return pow;
   const step = pow / 8; // quarter steps of the octave (pow/2, pow]
