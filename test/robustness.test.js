@@ -275,3 +275,30 @@ test('devtools: info, links, ls (identity masked), trace and cleanup of the glob
   await qu.close();
   assert.equal(globalThis.quTest, undefined);
 });
+
+test('large download over a real WebSocket stays below the slow-consumer limit (paced), and completes', async () => {
+  const relay = await createRelay({ port: 0, host: '127.0.0.1', log: () => {}, rate: 0, maxBufferedBytes: 256 * 1024 });
+  const url = `http://127.0.0.1:${relay.port}`;
+  const slow = [];
+  relay.qu.bus.on('net.slow', (e) => slow.push(e));
+  const options = { url, devtools: false, relay: { WebSocketImpl: WebSocket, minDelayMs: 50 } };
+  const writer = await createClient(options);
+  const reader = await createClient(options);
+  try {
+    const space = await Space.create(writer.identity);
+    const mine = writer.join(space);
+    await writer.watch({ space: mine });
+    const text = 'x'.repeat(2000);
+    for (let i = 0; i < 1500; i++) await writer.write(mine, 'chat', { i, text }); // ~3.5 MB sealed
+    await until(async () => (await writer.syncStatus()).outbox === 0, 60_000, 'uploaded');
+
+    const theirs = reader.join(await Space.open(space.invite));
+    await until(() => reader.transports.relay.status()[0]?.connected, 5000, 'reader connected');
+    await reader.watch({ space: theirs });
+    await until(async () => (await reader.query({ space: theirs, path: 'chat' })).length === 1500, 60_000, 'downloaded');
+    assert.deepEqual(slow, [], 'the relay never had to drop the reader as a slow consumer');
+  } finally {
+    await Promise.all([writer.close(), reader.close()]);
+    await relay.close();
+  }
+});

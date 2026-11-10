@@ -109,7 +109,8 @@ export function envelopes({ acceptGrants = false } = {}) {
       roles.set(peer, role);
       if (role === 'mirror') for (const [sid, entry] of registered) if (entry.mirror) await announce(sid, [peer]);
     });
-    bus.on('net.in.*.rec', ({ bytes, sync }, ctx) => ingest(bytes, { from: ctx.topic.split('.')[2], sync }));
+    // `pull: tag` marks a record of a direct download (sync.js) - it arrived by sync, not live
+    bus.on('net.in.*.rec', ({ bytes, sync, pull }, ctx) => ingest(bytes, { from: ctx.topic.split('.')[2], sync: Boolean(sync) || Number.isInteger(pull) }));
     bus.on('net.in.*.grant', async ({ sid, grants }, ctx) => {
       if (!api.acceptGrants || typeof sid !== 'string' || !Array.isArray(grants)) return;
       const from = ctx.topic.split('.')[2];

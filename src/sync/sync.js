@@ -31,6 +31,10 @@
  *   negerr        {session, reason}               responder declined a session (busy)
  *   digest        {id, items: [{sid, shard?, n, fp}]}   "is your set of this scope the same as mine?"
  *   digestr       {id, same: [index]}             the items whose set is identical
+ *   pull          {session, tag, sid, shard?, from?, to?}   "I have nothing of this scope: send all of it"
+ *   rec           {bytes, pull: tag}              ... the records, tagged with the pull's small number
+ *                                                 (implies `sync: true`; a few bytes per record)
+ *   pullend       {session, sent, n, fp}          done: rec frames sent, size + fingerprint of the set
  *
  * TRAFFIC - what keeps a reconcile cheap beyond Negentropy itself:
  *
@@ -41,6 +45,21 @@
  *     together into one frame. Identical sets finish right there (complete,
  *     nothing to send); only differing scopes run Negentropy. No answer, an
  *     older peer, a time window: the normal reconcile runs, unchanged.
+ *   - EMPTY SIDE PULLS: a scope this device holds nothing of (a new
+ *     device, a just-joined group) is not reconciled - Negentropy would send
+ *     every id twice (32 bytes each: the responder lists them, the initiator
+ *     wants them back). A `pull` asks for the scope's records directly; the
+ *     responder streams them (paced) and closes with the count and the
+ *     fingerprint of its set. Once that many tagged records are processed,
+ *     the device compares fingerprints: equal = complete. Anything else - a
+ *     different set (a record refused, a new one arrived meanwhile), no
+ *     answer, a decline, a peer without the `pull` feature - falls back to
+ *     the normal reconcile of the same scope, which fetches only what is
+ *     still missing. The pull never decides correctness; the fingerprint or
+ *     the reconcile does.
+ *   - PACED SENDING: bulk record sends (pull, want, push, outbox) wait while
+ *     the link's send buffer is full (`whenWritable`), so a large space never
+ *     trips the transport's slow-consumer limit.
  *   - ONE SESSION PER (peer, scope): a reconcile already running for the same
  *     peer and scope is joined, never started twice (an app's watch() racing
  *     the reconnect's hello used to fetch everything twice).
@@ -105,6 +124,7 @@
  */
 import * as crypto from '../crypto.js';
 import { Negentropy, NegentropyStorageVector } from './negentropy.js';
+import { whenWritable } from '../net/link.js';
 import { peekEnvelope } from '../envelope.js';
 import { gcCutoff } from '../gc.js';
 
@@ -150,6 +170,8 @@ const later = (fn, ms) => {
  *   queue; keep it below the other side's `maxSessionsPerPeer`).
  *   `ackDelayMs`: how long acks are collected before they are sent.
  *   `digest`: offer and use the digest pre-check (see TRAFFIC above).
+ *   `pull`: offer and use the direct download for scopes this device holds
+ *   nothing of (see TRAFFIC above).
  */
 export function sync({
   releaseMs = 30_000,
@@ -163,6 +185,7 @@ export function sync({
   maxConcurrentPerPeer = 4,
   ackDelayMs = 20,
   digest = true,
+  pull = true,
   stale = 'retire',
 } = {}) {
   return (qu) => {
@@ -194,6 +217,27 @@ export function sync({
     const digestBatches = new Map();
     /** @type {Map<string, {peer: string, resolvers: Function[], timer: *}>} digest id -> waiting checks. */
     const digestsOut = new Map();
+    /** @type {Map<string, object>} pull session -> its progress (initiator side) */
+    const pulling = new Map();
+    /** @type {Map<number, object>} pull tag (small integer, in every rec frame) -> its progress */
+    const pullTags = new Map();
+    let pullSeq = 0;
+    /** @type {Map<string, {promise: Promise<void>, resolve: () => void}>} peer -> its hello has arrived (or the link went) */
+    const hellos = new Map();
+    const helloOf = (peer) => {
+      let entry = hellos.get(peer);
+      if (!entry) {
+        let resolve;
+        const promise = new Promise((r) => (resolve = r));
+        hellos.set(peer, (entry = { promise, resolve }));
+      }
+      return entry;
+    };
+    /** Waits (at most `ms`) until `peer`'s hello told its role and features. */
+    const knowPeer = (peer, ms) =>
+      features.has(peer) || !peers.has(peer)
+        ? Promise.resolve()
+        : Promise.race([helloOf(peer).promise, new Promise((r) => setTimeout(r, ms).unref?.())]);
 
     /** May `sid` travel over the link to `peer`? (scoped links, link.js) */
     const allows = (peer, sid) => (qu.net ? qu.net.allows(peer, sid) : true);
@@ -289,25 +333,29 @@ export function sync({
 
     const send = (peer, type, payload) => bus.emit(`net.out.${peer}.${type}`, payload);
 
+    /** @returns {Promise<boolean>} whether the record is held here (sent, or not sendable because the link went away) */
     async function sendRecord(peer, sid, id, viaSync = true) {
       const bytes = await storage.get(`rec/${sid}/${id}`);
-      if (bytes) await send(peer, 'rec', viaSync ? { bytes, sync: true } : { bytes });
+      if (bytes && (await whenWritable(qu, peer))) await send(peer, 'rec', viaSync ? { bytes, sync: true } : { bytes });
       return Boolean(bytes);
     }
 
     /**
      * For reconcile: the record, or - if a drop list dropped it - that drop
      * list (once per `sent` set), which the peer verifies and applies itself.
-     * @returns {Promise<boolean>} false if neither is held
+     * @param {object} [extra] - more fields for the `rec` frame (a pull session)
+     * @returns {Promise<false|'sent'|'skip'>} false if neither is held; 'skip': held but not sent
+     *   (drop list already sent, other shard, link gone)
      */
-    async function sendOrDropList(peer, sid, id, sent, shardOk = () => true) {
+    async function sendOrDropList(peer, sid, id, sent, shardOk = () => true, extra = null) {
       const found = qu.envelopes ? await qu.envelopes.bytesFor(sid, id) : null;
       if (!found) return false;
       const key = found.id;
-      if (sent.has(key) || !shardOk(peekEnvelope(found.bytes).shard)) return true;
+      if (sent.has(key) || !shardOk(peekEnvelope(found.bytes).shard)) return 'skip';
+      if (!(await whenWritable(qu, peer))) return 'skip';
       sent.add(key);
-      await send(peer, 'rec', { bytes: found.bytes, sync: true });
-      return true;
+      await send(peer, 'rec', extra ? { bytes: found.bytes, ...extra } : { bytes: found.bytes, sync: true });
+      return 'sent';
     }
 
     function finish(state, error) {
@@ -445,31 +493,154 @@ export function sync({
       active.add(pending);
       const startedAt = qu.clock.now();
       const windowed = scope.from != null || scope.to != null;
+      // a watch() right after connecting may come before the peer's hello: its features decide the path
+      await knowPeer(peer, Math.min(timeoutMs, 5000));
+      const offered = features.get(peer);
+      const local = await loadItems(scope);
 
-      // identical sets need no session at all (and no slot)
-      let skip = false;
-      if (digest && !windowed && features.get(peer)?.has('digest') && peers.has(peer)) {
-        const local = await loadItems(scope);
+      let skip = false; // the sets are known to be identical - no Negentropy session
+      let pulled = null;
+      let release = null;
+      if (pull && local.size() === 0 && offered?.has('pull') && peers.has(peer)) {
+        // nothing here yet: download directly, no id lists (see TRAFFIC)
+        release = await acquire(peer);
+        pulled = await pullScope(peer, scope);
+        skip = pulled.complete;
+      } else if (digest && !windowed && offered?.has('digest') && peers.has(peer)) {
         skip = await digestCheck(peer, scope, local.size(), await local.fingerprint(0, local.size()));
       }
 
-      const release = skip ? () => {} : await acquire(peer);
+      if (skip) release ??= () => {};
+      else release ??= await acquire(peer);
       const stale = !skip && (await isStale(scope.sid, scope.shard)) ? await lastSync(scope.sid, scope.shard) : null;
       const ne = skip ? null : new Negentropy(await loadItems(scope), frameSizeLimit);
       if (ne) ne.wantUint8ArrayOutput = true;
       const msg = ne ? await ne.initiate() : null;
       const session = randomId();
       return new Promise((resolve) => {
-        const state = { session, peer, scope, pending, ne, have: [], need: [], waiting: new Set(), received: 0, missing: [], retired: 0, startedAt, stale, resolve, closed: false, release };
+        const state = { session, peer, scope, pending, ne, have: [], need: [], waiting: new Set(), received: pulled?.received ?? 0, missing: [], retired: 0, startedAt, stale, resolve, closed: false, release };
         state.timer = later(() => finish(state, new Error('timeout')), timeoutMs);
         initiating.set(session, state);
         // The link may have dropped while the item set was being loaded.
         if (!peers.has(peer)) return finish(state, new Error('peer disconnected'));
-        bus.notify('sync.start', { peer, sid: scope.sid, shard: scope.shard, ...(skip ? { digest: true } : {}) });
+        if (!pulled) bus.notify('sync.start', { peer, sid: scope.sid, shard: scope.shard, ...(skip ? { digest: true } : {}) });
         if (skip) return finish(state);
         send(peer, 'neg', { session, ...scope, msg });
       });
     }
+
+    // --- pull: direct download into an empty scope ----------------------------
+    /**
+     * Asks `peer` for every record of `scope`, then checks the result by
+     * fingerprint. Never fails loudly: `complete: false` sends the caller to
+     * the normal reconcile.
+     * @returns {Promise<{complete: boolean, received: number}>}
+     */
+    function pullScope(peer, scope) {
+      return new Promise((resolve) => {
+        const session = randomId();
+        const tag = (pullSeq = (pullSeq % 1_000_000) + 1);
+        const p = { session, tag, peer, scope, received: 0, expect: null, remote: null, timer: null, done: false };
+        p.end = (complete, reason) => {
+          if (p.done) return;
+          p.done = true;
+          clearTimeout(p.timer);
+          pulling.delete(session);
+          if (pullTags.get(tag) === p) pullTags.delete(tag);
+          bus.notify('sync.pull', { peer, sid: scope.sid, shard: scope.shard, received: p.received, complete, ...(reason ? { reason } : {}) });
+          resolve({ complete, received: p.received });
+        };
+        // a progress timeout: a large space may take long, a silent peer may not
+        p.arm = () => {
+          clearTimeout(p.timer);
+          p.timer = later(() => p.end(false, 'timeout'), timeoutMs);
+        };
+        pulling.set(session, p);
+        pullTags.set(tag, p);
+        p.arm();
+        bus.notify('sync.start', { peer, sid: scope.sid, shard: scope.shard, pull: true });
+        send(peer, 'pull', {
+          session,
+          tag,
+          sid: scope.sid,
+          ...(scope.shard ? { shard: scope.shard } : {}),
+          ...(scope.from != null ? { from: scope.from } : {}),
+          ...(scope.to != null ? { to: scope.to } : {}),
+        });
+      });
+    }
+
+    /** Once every announced record is processed: same set as the peer's? */
+    async function checkPull(p) {
+      if (p.done || p.checking || p.expect === null || p.received < p.expect) return;
+      p.checking = true;
+      try {
+        const local = await loadItems(p.scope);
+        const same = local.size() === p.remote.n && sameBytes(await local.fingerprint(0, local.size()), p.remote.fp);
+        p.end(same, same ? undefined : 'different set');
+      } catch (error) {
+        p.end(false, error.message);
+      }
+    }
+
+    // after the envelope layer: when this runs, the record is processed (stored, refused, deferred ...)
+    bus.on(
+      'net.in.*.rec',
+      ({ pull: tag }, ctx) => {
+        if (!Number.isInteger(tag)) return;
+        const p = pullTags.get(tag);
+        if (!p || p.peer !== ctx.topic.split('.')[2]) return;
+        p.received++;
+        p.arm();
+        return checkPull(p);
+      },
+      { order: 1000 }
+    );
+    bus.on('net.in.*.pullend', ({ session, sent, n, fp }, ctx) => {
+      const p = pulling.get(session);
+      if (!p || p.peer !== ctx.topic.split('.')[2]) return;
+      if (!Number.isInteger(sent) || sent < 0 || !Number.isInteger(n) || !(fp instanceof Uint8Array)) return p.end(false, 'bad pullend');
+      p.expect = sent;
+      p.remote = { n, fp };
+      p.arm();
+      return checkPull(p);
+    });
+
+    // responder: stream the scope, then announce what was sent
+    bus.on('net.in.*.pull', async ({ session, tag, sid, shard, from, to }, ctx) => {
+      const peer = ctx.topic.split('.')[2];
+      if (typeof session !== 'string' || typeof sid !== 'string' || !Number.isInteger(tag)) return;
+      if (!pull || !allows(peer, sid) || (shard != null && typeof shard !== 'string')) return send(peer, 'negerr', { session, reason: 'refused' });
+      const key = `${peer}:${session}`;
+      if (responding.has(key)) return;
+      let open = 0;
+      for (const k of responding.keys()) if (k.startsWith(`${peer}:`)) open++;
+      if (open >= maxSessionsPerPeer) {
+        bus.notify('sync.busy', { peer, sid });
+        return send(peer, 'negerr', { session, reason: 'busy' });
+      }
+      // counts as a session; no TTL - it ends when the stream is sent or the peer goes
+      const entry = { sid, pull: true };
+      responding.set(key, entry);
+      try {
+        const scope = { sid, shard: shard ?? null, from: Number.isFinite(from) ? from : null, to: Number.isFinite(to) ? to : null };
+        // a stale device keeps old records to itself (see STALE DEVICES): the reconcile handles that
+        if (await isStale(sid, scope.shard)) return await send(peer, 'negerr', { session, reason: 'stale' });
+        const items = await loadItems(scope);
+        const sentLists = new Set();
+        let sent = 0;
+        for (let i = 0; i < items.size(); i++) {
+          if (responding.get(key) !== entry) return; // the peer went away
+          if ((await sendOrDropList(peer, sid, crypto.toHex(items.getItem(i).id), sentLists, undefined, { pull: tag })) === 'sent') sent++;
+        }
+        if (responding.get(key) !== entry) return;
+        await send(peer, 'pullend', { session, sent, n: items.size(), fp: await items.fingerprint(0, items.size()) });
+      } catch (error) {
+        bus.notify('sync.error', { peer, sid, error: error.message });
+      } finally {
+        if (responding.get(key) === entry) responding.delete(key);
+      }
+    });
 
     /**
      * Reconciles a scope with every connected peer (or just `peer`).
@@ -547,13 +718,15 @@ export function sync({
       const scoped = qu.net?.scopes.get(peer);
       for (const sid of scoped ?? []) if (!subs.some((sub) => sub.sid === sid && !sub.shard)) subs.push({ sid });
       const only = Boolean(scoped || qu.net?.exclusive);
-      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), ...(digest ? { features: ['digest'] } : {}) });
+      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), ...(digest || pull ? { features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : [])] } : {}) });
     });
     bus.on('net.peer.down', ({ peer }) => {
       peers.delete(peer);
       remoteSubs.delete(peer);
       roles.delete(peer);
       features.delete(peer);
+      hellos.get(peer)?.resolve();
+      hellos.delete(peer);
       flushedTo.delete(peer);
       const queue = ackQueue.get(peer);
       if (queue) clearTimeout(queue.timer);
@@ -562,6 +735,7 @@ export function sync({
       slots.delete(peer);
       for (const next of slot?.queue.splice(0) ?? []) next(); // they see the peer gone and end as pending
       for (const [id, waiting] of digestsOut) if (waiting.peer === peer) answerDigest(id, []);
+      for (const p of [...pulling.values()]) if (p.peer === peer) p.end(false, 'peer disconnected');
       for (const [key, session] of responding) {
         if (key.startsWith(`${peer}:`)) {
           clearTimeout(session.timer);
@@ -590,6 +764,7 @@ export function sync({
       if (!peers.has(peer)) return;
       roles.set(peer, remoteRole);
       features.set(peer, new Set(Array.isArray(offered) ? offered.filter((f) => typeof f === 'string') : []));
+      helloOf(peer).resolve();
       if (Array.isArray(subs) && (subs.length || only)) {
         if (!remoteSubs.has(peer)) remoteSubs.set(peer, new Set());
         for (const sub of subs) if (typeof sub?.sid === 'string') remoteSubs.get(peer).add(sub.shard ? `${sub.sid}/${sub.shard}` : sub.sid);
@@ -782,6 +957,8 @@ export function sync({
       for (const chunk of idChunks(wanted)) await send(state.peer, 'want', { session, sid: state.scope.sid, ids: packIds(chunk) });
     });
     bus.on('net.in.*.negerr', ({ session, reason }) => {
+      const p = pulling.get(session);
+      if (p) return p.end(false, `declined: ${reason}`); // the caller falls back to the reconcile
       const state = initiating.get(session);
       if (!state) return;
       finish(state, new Error(`declined: ${reason}`)); // stays pending

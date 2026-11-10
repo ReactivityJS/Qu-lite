@@ -29,6 +29,16 @@ Stability, scalability and one base for client and relay.
   `busy` declines, a declined session is retried after ~1 s; outbox records are not pushed twice on one
   link; acks batched (`ackDelayMs`) and never sent to mirrors. First upload -51 %, fresh device -42 %,
   unchanged reconnect -57 % bytes.
+- **Direct download** (`pull`/`pullend` frames, feature `pull` in `hello`): a scope this device holds
+  nothing of is fetched without Negentropy's two id lists (32 B per record each way); the result is
+  checked by fingerprint, anything else falls back to the normal reconcile. Fresh device -15 % bytes
+  on top of the above (-50 % vs. before this release), no reconcile rounds. Pull records carry a small
+  integer tag instead of `sync: true`.
+- **Paced sending** (`whenWritable`): bulk record sends wait for the transport's send buffer. Fixes a
+  regression of the slow-consumer limit above: a download of more than 16 MiB from a relay was closed
+  as slow on every reconnect.
+- A reconcile started right after connecting waits (max 5 s) for the peer's `hello`, so digest and pull
+  apply to `watch()` calls racing the handshake.
 
 ## [Unreleased]
 

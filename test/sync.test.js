@@ -132,7 +132,8 @@ test('bounded frames: a large difference is reconciled in several rounds, no fra
   const make = async () => {
     const qu = await createQu();
     qu.use(records());
-    qu.use(sync({ releaseMs: 0, timeoutMs: 5000, retryMs: 0, frameSizeLimit: 4096 }));
+    // pull off: this test is about Negentropy's rounds (an empty side would download directly)
+    qu.use(sync({ releaseMs: 0, timeoutMs: 5000, retryMs: 0, frameSizeLimit: 4096, pull: false }));
     return qu;
   };
   const a = await make();

@@ -49,7 +49,7 @@ export function createSseHandler(qu, { path = '/sse', keepAliveMs = 15_000, maxB
       }
       res.write(`data:${toBase64(bytes)}\n\n`);
     };
-    const link = createLink(qu, { send, close: () => res.end(), via: 'sse' });
+    const link = createLink(qu, { send, close: () => res.end(), via: 'sse', buffered: () => res.writableLength ?? 0, maxBuffered: maxBufferedBytes });
     const entry = { link, res };
     sessions.set(session, entry);
     const keepAlive = setInterval(() => res.write(':\n\n'), keepAliveMs);

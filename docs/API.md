@@ -373,6 +373,7 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `maxConcurrentPerPeer` | `4` | own reconciles running at once per peer; more scopes queue instead of being declined |
 | `digest` | `true` | offer/use the digest pre-check: identical whole-space/shard sets are confirmed with one 16-byte fingerprint each, batched into one frame; only differing scopes run Negentropy. Used only when both sides announce it in `hello` |
 | `ackDelayMs` | `20` | acks are collected this long and sent as one frame per space |
+| `pull` | `true` | offer/use the direct download: a scope this device holds nothing of is fetched with one `pull` request instead of a reconcile (no id lists), checked by fingerprint at the end; on any difference, decline or timeout the normal reconcile runs. Used only when both sides announce it in `hello` |
 | `frameSizeLimit` | `262144` | max Negentropy message in bytes (0 = unlimited); bigger differences take more rounds. `want`/`ack` id lists go out in batches of 4096 ids |
 | `stale` | `'retire'` | a scope not completely synced for longer than the drop-list horizon retires old records the peer lacks instead of pushing them (they may have been deleted meanwhile); `'push'`: push anyway |
 
@@ -387,7 +388,11 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 
 `members()`, `user()` and `inbox()` call `watch()` for their spaces themselves.
 
-**Traffic**: a reconcile of the same scope with the same peer is never started twice (a second call
+**Traffic**: a reconcile waits up to 5 s for the peer's `hello` (its role and features decide the path).
+An empty scope is pulled (`sync.pull {peer, sid, shard, received, complete, reason?}`; `sync.start` has
+`pull: true`); a pull never decides correctness - the fingerprint or the fallback reconcile does. Bulk
+record sends (pull, `want`, push, outbox) are paced by the link's send buffer, so large spaces never
+trip the slow-consumer limit. A reconcile of the same scope with the same peer is never started twice (a second call
 joins the running one). Outbox records pushed on connect are not pushed again by the reconcile on that
 link. A mirror gets no acks (it never writes). `sync.start` carries `digest: true` when a matching digest
 finished the scope without a session. `bench/sync-bytes.mjs [spaces] [records]` prints the bytes per
@@ -398,7 +403,8 @@ frame type for upload, reconnect, offline changes and a fresh device.
 | first upload | 3,490 KiB / 14,664 frames | 1,699 KiB / 4,584 frames |
 | reconnect, nothing changed | 15.5 KiB / 70 frames, 12 sessions declined | 6.6 KiB / 24 frames, no session |
 | reconnect after 10 offline writes per space | 117.9 KiB | 100.6 KiB |
-| fresh device downloads everything | 3,205 KiB, declined sessions wait for `retryMs` | 1,874 KiB, no waiting |
+| fresh device downloads everything | 3,205 KiB, declined sessions wait for `retryMs` | 1,598 KiB (pull), no waiting |
+| fresh device, 5 spaces x 2,000 records (3.3 MiB) | – | 3,800 KiB with pull, 4,459 KiB without |
 
 **Devices offline longer than 90 days**: a stale scope still pushes its outbox and every record
 younger than the horizon. Older records the peer lacks are removed locally: `sync.stale {peer, sid,
@@ -667,6 +673,9 @@ version is refused (`net.error {reason: 'protocol'}`); a remote that sends no va
 `[a-z][a-z0-9_-]{0,31}`; the rate guard (`limits`) sees type and size before the frame is parsed; frames
 are decoded strictly. **Backpressure**: a WebSocket or SSE stream whose send buffer exceeds `maxBufferedBytes`
 (16 MiB) is closed (`net.slow`) - the peer reconnects and resumes. `qu.close()` drops every link.
+**Pacing**: a transport passes `buffered()` and `maxBuffered` to `createLink`; `whenWritable(qu, peer)` (from
+`src/net/link.js`) resolves once there is room (waits above `maxBuffered / 4`, at most 4 MiB, until below a
+quarter of that) and returns `false` when the link went away. WebSocket, SSE server and WebRTC report their buffer.
 
 Events: `net.peer.up {peer, via}`, `net.peer.down {peer, via}`, `net.connecting`, `net.error {via, reason, peer}`,
 `net.slow {via, peer, buffered}`, `net.refused {via, reason}`,

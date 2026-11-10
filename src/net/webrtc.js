@@ -113,7 +113,7 @@ export function rtc({ mode = 'auto', maxMesh = 6, fanout = 3, iceServers = [], c
         channel.binaryType = 'arraybuffer';
         channel.onopen = () => {
           clearTimeout(session.timer);
-          session.link = createLink(qu, { send: (bytes) => channel.readyState === 'open' && channel.send(bytes), close: () => close(alias, 'link'), via: 'webrtc' });
+          session.link = createLink(qu, { send: (bytes) => channel.readyState === 'open' && channel.send(bytes), close: () => close(alias, 'link'), via: 'webrtc', buffered: () => channel.bufferedAmount ?? 0, maxBuffered: 16 * 1024 * 1024 });
           bus.notify('net.rtc.open', { space: sid, alias });
         };
         channel.onmessage = (event) => session.link?.receive(new Uint8Array(event.data));

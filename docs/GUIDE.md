@@ -186,7 +186,10 @@ qu.bus.on('qu.accept', (record, ctx) => {
 
 **Was der Abgleich überträgt:** Records sind bereits Deltas (unveränderlich, inhaltsadressiert), und
 Negentropy vergleicht Indizes statt Daten. Zusätzlich prüft ein Reconnect zuerst pro Space einen
-16-Byte-Fingerprint (Digest) – nur abweichende Spaces laufen Negentropy. Messen: `node bench/sync-bytes.mjs`.
+16-Byte-Fingerprint (Digest) – nur abweichende Spaces laufen Negentropy. Ein Space, von dem das Gerät
+noch nichts hat (neues Gerät, frisch beigetreten), wird direkt geladen (`pull`), ohne Id-Listen, und am
+Ende per Fingerprint geprüft; bei Abweichung läuft der normale Abgleich. Große Downloads werden nach dem
+Sendepuffer getaktet. Messen: `node bench/sync-bytes.mjs` (Vergleich: `PULL=0`, `DIGEST=0`).
 
 **Zustellung prüfen:** `qu.syncState(sid, id)` → `'pending' | 'sent'`; `qu.syncStatus()` →
 `{outbox, pending}`. Mit `ackFrom: 'mirror'` (Standard in `createClient`) gilt ein Record erst als

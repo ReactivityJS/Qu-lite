@@ -31,6 +31,12 @@
  *     version (`v`): a remote speaking a newer major version is refused
  *     (`net.error {reason: 'protocol'}`) instead of being misunderstood,
  *   - on `qu.close()` every open link is dropped.
+ *   - PACING: a transport that can tell how much it still has to send
+ *     (`buffered()`, e.g. a WebSocket's bufferedAmount) lets bulk senders wait
+ *     with `whenWritable(qu, peer)` instead of filling memory - and instead
+ *     of running into the transport's slow-consumer limit (`maxBuffered`),
+ *     which closes the link. Waiting starts above a quarter of that limit
+ *     (at most 4 MiB) and ends below a sixteenth.
  *
  * Contract for a transport: call `createLink(qu, {send, close, via})` when a
  * byte channel opens, feed every incoming message to `link.receive(bytes)`
@@ -78,7 +84,7 @@ const xorHex = (a, b) => Array.from({ length: a.length }, (_, i) => (parseInt(a[
  * @param {{send: (bytes: Uint8Array) => void, close?: () => void, via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} transport
  * @returns {{receive: (bytes: Uint8Array) => void, closed: () => void, close: () => void, stats: {sent: number, received: number, framesOut: number, framesIn: number}, readonly peer: string|null}}
  */
-export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onDown, localId, scope }) {
+export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onDown, localId, scope, buffered = null, maxBuffered = 0 }) {
   const net = netOf(qu);
   const stats = { sent: 0, received: 0, framesOut: 0, framesIn: 0 };
   let remote = null;
@@ -145,7 +151,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
         remote = localId ? xorHex(peer, localId) : peer;
         net.links.get(remote)?.drop(); // newest wins - never two links under one name
         if (scope) net.scopes.set(remote, new Set(scope));
-        net.links.set(remote, { via, since: Date.now(), stats, version, drop: () => (link.closed(), close()) });
+        net.links.set(remote, { via, since: Date.now(), stats, version, buffered, maxBuffered, drop: () => (link.closed(), close()) });
         off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
         onUp?.(remote);
         qu.bus.notify('net.peer.up', { peer: remote, via });
@@ -171,4 +177,30 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
     },
   };
   return link;
+}
+
+const PACE_CEILING = 4 * 1024 * 1024;
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Resolves when `peer`'s link has room for more bulk data: at once if its
+ * send buffer is below the high-water mark (or the transport cannot tell),
+ * otherwise once the buffer drained below the low-water mark.
+ * @param {object} qu @param {string} peer
+ * @param {{pollMs?: number, maxWaitMs?: number}} [options]
+ * @returns {Promise<boolean>} false if the link went away (or stayed full for `maxWaitMs`) - stop sending then
+ */
+export async function whenWritable(qu, peer, { pollMs = 10, maxWaitMs = 120_000 } = {}) {
+  const link = qu.net?.links.get(peer);
+  if (!link) return false;
+  if (typeof link.buffered !== 'function') return true;
+  const high = Math.min(PACE_CEILING, link.maxBuffered > 0 ? link.maxBuffered / 4 : PACE_CEILING);
+  if (link.buffered() <= high) return true;
+  const low = high / 4;
+  const end = Date.now() + maxWaitMs;
+  while (qu.net.links.get(peer) === link && link.buffered() > low) {
+    if (Date.now() > end) return false;
+    await pause(pollMs);
+  }
+  return qu.net.links.get(peer) === link;
 }

@@ -3,7 +3,8 @@
  * Guarantees: one session per (peer, scope), bounded concurrency instead of
  * `busy` declines, the digest pre-check (and its fallback to the plain
  * reconcile), no double upload of outbox records, batched acks, no acks to
- * mirrors. Results must stay identical to the plain reconcile.
+ * mirrors, the direct download (pull) into an empty scope with its fallbacks,
+ * and paced sending. Results must stay identical to the plain reconcile.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -191,4 +192,159 @@ test('reload while offline: outbox and pending survive, everything converges wit
   for (const s of ms) assert.equal((await mirror.query({ space: s, path: 'chat' })).length, 5);
   await link.disconnect();
   await Promise.all([client.close(), mirror.close()]);
+});
+
+/** A mirror holding `n` spaces x `per` records, written by a seeding peer. */
+async function seededMirror(n, per, mirrorOptions = {}) {
+  const mirror = await peer({ role: 'mirror', ...mirrorOptions });
+  const writer = await peer({ ackFrom: 'mirror' });
+  const [ms, ws] = await spaces(n, mirror, writer);
+  for (const s of ms) await mirror.watch({ space: s });
+  for (const s of ws) for (let i = 0; i < per; i++) await writer.write(s, i % 10 === 0 ? 'secret' : 'chat', i);
+  const link = connectInProcess(writer, mirror);
+  await link.ready;
+  await until(async () => (await writer.syncStatus()).outbox === 0, 20_000);
+  await link.disconnect();
+  await writer.close();
+  return { mirror, invites: ws.map((s) => s.invite), mirrorSpaces: ms };
+}
+
+async function freshDevice(invites, options = {}) {
+  const qu = await peer({ ackFrom: 'mirror', ...options });
+  const joined = [];
+  for (const invite of invites) joined.push(qu.join(await Space.open(invite)));
+  return { qu, joined };
+}
+
+const allRecords = async (qu, spaces) => {
+  const out = [];
+  for (const s of spaces) out.push(...(await qu.query({ space: s, path: 'chat' })).map((r) => r.value), ...(await qu.query({ space: s, path: 'secret' })).map((r) => r.value));
+  return out.sort((x, y) => x - y);
+};
+
+test('pull: an empty device downloads without id lists, verified by fingerprint, and counts as a complete sync', async () => {
+  const { mirror, invites } = await seededMirror(3, 50);
+  const { qu: fresh, joined } = await freshDevice(invites);
+  const out = frames(fresh);
+  const back = frames(mirror);
+  const pulls = [];
+  fresh.bus.on('sync.pull', (e) => pulls.push(e));
+  const link = connectInProcess(fresh, mirror);
+  await Promise.all(joined.map((space) => fresh.watch({ space })));
+  await until(() => pulls.length === 3, 10_000);
+  await until(async () => (await fresh.syncStatus()).pending === 0);
+  assert.deepEqual(pulls.map((p) => [p.complete, p.received]), [[true, 50], [true, 50], [true, 50]]);
+  assert.equal(out.pull, 3);
+  assert.equal(out.want ?? 0, 0, 'no id list from the device');
+  assert.equal(out.neg ?? 0, 0, 'no reconcile session');
+  assert.equal(back.negr ?? 0, 0, 'no id list from the mirror');
+  assert.equal(back.rec, 150);
+  assert.equal((await allRecords(fresh, joined)).length, 150);
+  for (const s of joined) assert.ok((await fresh.lastSync(s.id)) !== null, 'a verified pull from a mirror proves the device current');
+  await link.disconnect();
+  await Promise.all([fresh.close(), mirror.close()]);
+});
+
+test('pull falls back to the reconcile when the sets differ - same result as without pull', async () => {
+  const { mirror, invites } = await seededMirror(2, 30);
+  // this device refuses one path: the pulled set can never match the mirror's
+  const refuse = (qu) =>
+    qu.bus.on('qu.accept', (record, ctx) => {
+      if (record.path === 'secret') ctx.stop();
+    });
+  const withPull = await freshDevice(invites);
+  const without = await freshDevice(invites, { pull: false });
+  refuse(withPull.qu);
+  refuse(without.qu);
+  const pulls = [];
+  withPull.qu.bus.on('sync.pull', (e) => pulls.push(e));
+  const negs = frames(withPull.qu);
+  const results = [];
+  for (const { qu, joined } of [withPull, without]) {
+    const link = connectInProcess(qu, mirror);
+    await link.ready;
+    const summaries = await Promise.all(joined.map((space) => qu.resync({ space })));
+    results.push({ stored: await allRecords(qu, joined), missing: summaries.flat().reduce((n, s) => n + s.missing.length, 0) });
+    await link.disconnect();
+  }
+  assert.ok(pulls.length >= 2 && pulls.every((p) => p.complete === false && p.reason === 'different set'));
+  assert.ok(negs.neg >= 2, 'fell back to Negentropy');
+  assert.deepEqual(results[0], results[1], 'identical outcome with and without pull');
+  assert.equal(results[0].stored.length, 54);
+  await Promise.all([withPull.qu.close(), without.qu.close(), mirror.close()]);
+});
+
+test('pull is optional: a peer without the feature gets the plain reconcile', async () => {
+  const { mirror, invites } = await seededMirror(2, 20, { pull: false });
+  const { qu: fresh, joined } = await freshDevice(invites);
+  const out = frames(fresh);
+  const link = connectInProcess(fresh, mirror);
+  await link.ready;
+  await Promise.all(joined.map((space) => fresh.resync({ space })));
+  assert.equal(out.pull ?? 0, 0);
+  assert.ok(out.neg >= 2);
+  assert.equal((await allRecords(fresh, joined)).length, 40);
+  await link.disconnect();
+  await Promise.all([fresh.close(), mirror.close()]);
+});
+
+test('pull interrupted by a disconnect stays pending; the next connect completes it by reconcile', async () => {
+  const { mirror, invites } = await seededMirror(1, 300);
+  const { qu: fresh, joined } = await freshDevice(invites);
+  let link = connectInProcess(fresh, mirror);
+  await link.ready;
+  // the mirror's send buffer "fills up" after 40 records - then the link drops
+  const sent = frames(mirror);
+  const end = mirror.net.links.get(fresh.peerId);
+  end.buffered = () => ((sent.rec ?? 0) >= 40 ? 10_000 : 0);
+  end.maxBuffered = 1000;
+  fresh.watch({ space: joined[0] });
+  await until(async () => (await allRecords(fresh, joined)).length === 40, 5000);
+  await link.disconnect();
+  await settle(50);
+  assert.ok((await allRecords(fresh, joined)).length < 300, 'interrupted');
+  assert.equal((await fresh.syncStatus()).pending, 1, 'remembered as unfinished');
+
+  const out = frames(fresh);
+  link = connectInProcess(fresh, mirror);
+  await link.ready;
+  await until(async () => (await fresh.syncStatus()).pending === 0, 10_000);
+  assert.equal((await allRecords(fresh, joined)).length, 300);
+  assert.equal(out.pull ?? 0, 0, 'not empty any more: reconcile, fetching only the rest');
+  await link.disconnect();
+  await Promise.all([fresh.close(), mirror.close()]);
+});
+
+test('pacing: bulk sends wait while the send buffer is full, and stop when the link goes', async () => {
+  const { mirror, invites } = await seededMirror(1, 60);
+  const { qu: fresh, joined } = await freshDevice(invites);
+  const link = connectInProcess(fresh, mirror);
+  await link.ready;
+  // the in-process channel cannot fill up - give the mirror's end of the link a fake buffer
+  const pressure = { bytes: 10_000 };
+  const end = mirror.net.links.get([...mirror.net.links.keys()][0]);
+  end.buffered = () => pressure.bytes;
+  end.maxBuffered = 1000; // high-water mark 250 B, low 62 B
+  const sent = frames(mirror);
+  fresh.watch({ space: joined[0] });
+  await settle(300);
+  assert.equal(sent.rec ?? 0, 0, 'nothing sent into a full buffer');
+  pressure.bytes = 0;
+  await until(async () => (await allRecords(fresh, joined)).length === 60, 5000);
+
+  // full again, then the link drops: the sender gives up instead of waiting forever
+  const again = await freshDevice(invites);
+  const l2 = connectInProcess(again.qu, mirror);
+  await l2.ready;
+  const end2 = mirror.net.links.get(again.qu.peerId);
+  end2.buffered = () => 10_000;
+  end2.maxBuffered = 1000;
+  const before = sent.rec;
+  again.qu.watch({ space: again.joined[0] });
+  await settle(200);
+  await l2.disconnect();
+  await settle(100);
+  assert.equal(sent.rec, before, 'no record sent after the link went');
+  await link.disconnect();
+  await Promise.all([fresh.close(), again.qu.close(), mirror.close()]);
 });

@@ -48,7 +48,7 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, sc
     socket.send(bytes);
   };
   const start = () => {
-    link = createLink(qu, { send, close: () => socket.close(), via, onUp, onDown, localId, scope });
+    link = createLink(qu, { send, close: () => socket.close(), via, onUp, onDown, localId, scope, buffered: () => socket.bufferedAmount ?? 0, maxBuffered: maxBufferedBytes });
   };
   if (socket.readyState === OPEN) start();
   else socket.addEventListener('open', start);

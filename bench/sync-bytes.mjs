@@ -3,6 +3,7 @@
  * Bytes on the wire per frame type for the common sync situations between a
  * client (ackFrom: 'mirror') and a mirror, over the production link code
  * (in-process byte channel). Run: node bench/sync-bytes.mjs [spaces] [records]
+ * Compare: PULL=0 / DIGEST=0 switch the direct download / the digest pre-check off.
  *
  *   initial      client wrote everything offline, connects for the first time
  *   reconnect    nothing changed on either side
@@ -26,7 +27,7 @@ const time = { now: 1_759_999_980_000 };
 async function peer(options = {}) {
   const qu = await createQu({ clock: createClock({ now: () => time.now }) });
   qu.use(records());
-  qu.use(sync({ releaseMs: 0, timeoutMs: 10_000, retryMs: Number(process.env.RETRY ?? 0), ...options }));
+  qu.use(sync({ releaseMs: 0, timeoutMs: 10_000, retryMs: Number(process.env.RETRY ?? 0), pull: process.env.PULL !== '0', digest: process.env.DIGEST !== '0', ...options }));
   return qu;
 }
 
