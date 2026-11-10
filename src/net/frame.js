@@ -90,3 +90,27 @@ export function decodeFrame(frame) {
   });
   return { type, payload };
 }
+
+/**
+ * How many records a frame carries, for rate limits: a `recs` frame counts
+ * one per blob (each record is one), every other frame 1. Reads only the
+ * length prefixes - no JSON parsing. Malformed frames count 1 (decoding
+ * rejects them later).
+ * @param {Uint8Array} frame @returns {number}
+ */
+export function frameUnits(frame) {
+  try {
+    if (peekFrameType(frame) !== 'recs') return 1;
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    let offset = 1 + frame[0];
+    offset += 4 + view.getUint32(offset);
+    let units = 0;
+    while (offset + 4 <= frame.length) {
+      offset += 4 + view.getUint32(offset);
+      units++;
+    }
+    return Math.max(1, units);
+  } catch {
+    return 1;
+  }
+}

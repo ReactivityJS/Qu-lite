@@ -71,6 +71,10 @@ Stability, scalability and one base for client and relay.
   copy removed only after the sealed one read back; half-finished locks are completed. `qu.device.lock`,
   `changePassphrase`, `removeLock`, `status().locked`; restore into a locked storage needs its passphrase
   or `force`.
+- **Batched records** (`recs` frame, feature `recs` in `hello`, `sync({ batch })`): bulk record sends go
+  up to 64 records / 64 KiB per frame; any other sync frame flushes first. Rate limits and the send
+  budget count records (`frameUnits`), not frames. Acks for a batch go out together. First upload of
+  4,000 records: 4,564 -> 167 frames, -5 % bytes; fresh device -6.5 %.
 
 ## [Unreleased]
 

@@ -34,7 +34,9 @@
  *   pull          {session, tag, sid, shard?, from?, to?}   "I have nothing of this scope: send all of it"
  *   rec           {bytes, pull: tag}              ... the records, tagged with the pull's small number
  *                                                 (implies `sync: true`; a few bytes per record)
- *   pullend       {session, sent, n, fp}          done: rec frames sent, size + fingerprint of the set
+ *   pullend       {session, sent, n, fp}          done: records sent, size + fingerprint of the set
+ *   recs          {items: [bytes], sync?, pull?}  several records in one frame (feature 'recs'): each
+ *                                                 item is handled exactly like a `rec` frame
  *
  * TRAFFIC - what keeps a reconcile cheap beyond Negentropy itself:
  *
@@ -57,6 +59,12 @@
  *     the normal reconcile of the same scope, which fetches only what is
  *     still missing. The pull never decides correctness; the fingerprint or
  *     the reconcile does.
+ *   - BATCHED RECORDS: to a peer that offers `recs`, bulk record sends (pull,
+ *     want, push, outbox) go up to 64 records / 64 KiB per frame instead of
+ *     one frame each - about 30 bytes less per record and one decode and
+ *     dispatch per batch. Any other sync frame to that peer first flushes the
+ *     open batch, so the order of records and control frames stays as it was.
+ *     Rate limits still count records, not frames (frame.js frameUnits).
  *   - PACED SENDING: bulk record sends (pull, want, push, outbox) wait while
  *     the link's send buffer is full (`whenWritable`), so a large space never
  *     trips the transport's slow-consumer limit.
@@ -186,6 +194,7 @@ const later = (fn, ms) => {
  *   `digest`: offer and use the digest pre-check (see TRAFFIC above).
  *   `pull`: offer and use the direct download for scopes this device holds
  *   nothing of (see TRAFFIC above).
+ *   `batch`: offer and use batched `recs` frames (see TRAFFIC above).
  *   `indexCacheItems`: items of cached sync-index vectors kept at most
  *   (~300 bytes each: mirror default 250 000 ~ 71 MiB, peer 50 000 ~ 14 MiB;
  *   0 disables the cache).
@@ -203,6 +212,7 @@ export function sync({
   ackDelayMs = 20,
   digest = true,
   pull = true,
+  batch = true,
   indexCacheItems = role === 'mirror' ? 250_000 : 50_000,
   stale = 'retire',
 } = {}) {
@@ -433,12 +443,75 @@ export function sync({
       return vector;
     }
 
-    const send = (peer, type, payload) => bus.emit(`net.out.${peer}.${type}`, payload);
+    const emitOut = (peer, type, payload) => bus.emit(`net.out.${peer}.${type}`, payload);
+
+    // --- batched records (see BATCHED RECORDS) ----------------------------------
+    const BATCH_ITEMS = 64;
+    const BATCH_BYTES = 64 * 1024;
+    /** @type {Map<string, Map<string, {extra: object, items: Uint8Array[], bytes: number, timer: *}>>} peer -> kind (sync, live, pull tag) -> open batch */
+    const recBatches = new Map();
+    async function flushRecs(peer, kind) {
+      const open = recBatches.get(peer);
+      const b = open?.get(kind);
+      if (!b) return;
+      open.delete(kind);
+      if (!open.size) recBatches.delete(peer);
+      clearTimeout(b.timer);
+      if (b.items.length === 1) await emitOut(peer, 'rec', { bytes: b.items[0], ...b.extra });
+      else await emitOut(peer, 'recs', { items: b.items, ...b.extra });
+    }
+    const flushAll = async (peer) => {
+      for (const kind of [...(recBatches.get(peer)?.keys() ?? [])]) await flushRecs(peer, kind);
+    };
+    /** Sends one record - batched where the peer takes `recs`. `extra`: {sync: true}, {pull: tag} or {}. */
+    async function sendRec(peer, bytes, extra) {
+      if (!batch || !features.get(peer)?.has('recs')) return emitOut(peer, 'rec', { bytes, ...extra });
+      const kind = extra.pull != null ? `p${extra.pull}` : extra.sync ? 's' : 'l';
+      // no await between finding the batch and adding to it: concurrent senders never mix kinds
+      let open = recBatches.get(peer);
+      if (!open) recBatches.set(peer, (open = new Map()));
+      let b = open.get(kind);
+      if (!b) {
+        open.set(kind, (b = { extra, items: [], bytes: 0, timer: null }));
+        b.timer = setTimeout(() => flushRecs(peer, kind), 0); // a paused sender still delivers what it has
+      }
+      b.items.push(bytes);
+      b.bytes += bytes.length;
+      // a batch never exceeds the remote's burst (its rate limit counts every record)
+      const budget = qu.net?.links.get(peer)?.budget;
+      const max = budget ? Math.max(1, Math.min(BATCH_ITEMS, Math.floor(budget.burst))) : BATCH_ITEMS;
+      if (b.items.length >= max || b.bytes >= BATCH_BYTES) await flushRecs(peer, kind);
+    }
+    /** Every other sync frame flushes the open batches first: order stays as without batching. */
+    const send = async (peer, type, payload) => {
+      if (recBatches.has(peer)) await flushAll(peer);
+      return emitOut(peer, type, payload);
+    };
+    /** peer -> recs frames being processed: acks wait for the batch to finish (one ack frame, not one per record) */
+    const batchesIn = new Map();
+    bus.on('net.in.*.recs', async ({ items, sync: viaSync, pull: tag }, ctx) => {
+      const peer = ctx.topic.split('.')[2];
+      if (!Array.isArray(items) || items.length > 1024) return;
+      batchesIn.set(peer, (batchesIn.get(peer) ?? 0) + 1);
+      try {
+        for (const bytes of items) {
+          if (!(bytes instanceof Uint8Array)) continue;
+          await bus.emit(`net.in.${peer}.rec`, Number.isInteger(tag) ? { bytes, pull: tag } : viaSync ? { bytes, sync: true } : { bytes });
+        }
+      } finally {
+        const left = batchesIn.get(peer) - 1;
+        if (left > 0) batchesIn.set(peer, left);
+        else {
+          batchesIn.delete(peer);
+          if (ackQueue.has(peer)) flushAcks(peer);
+        }
+      }
+    });
 
     /** @returns {Promise<boolean>} whether the record is held here (sent, or not sendable because the link went away) */
     async function sendRecord(peer, sid, id, viaSync = true) {
       const bytes = await storage.get(`rec/${sid}/${id}`);
-      if (bytes && (await whenWritable(qu, peer))) await send(peer, 'rec', viaSync ? { bytes, sync: true } : { bytes });
+      if (bytes && (await whenWritable(qu, peer))) await sendRec(peer, bytes, viaSync ? { sync: true } : {});
       return Boolean(bytes);
     }
 
@@ -456,7 +529,7 @@ export function sync({
       if (sent.has(key) || !shardOk(peekEnvelope(found.bytes).shard)) return 'skip';
       if (!(await whenWritable(qu, peer))) return 'skip';
       sent.add(key);
-      await send(peer, 'rec', extra ? { bytes: found.bytes, ...extra } : { bytes: found.bytes, sync: true });
+      await sendRec(peer, found.bytes, extra ?? { sync: true });
       return 'sent';
     }
 
@@ -820,13 +893,16 @@ export function sync({
       const scoped = qu.net?.scopes.get(peer);
       for (const sid of scoped ?? []) if (!subs.some((sub) => sub.sid === sid && !sub.shard)) subs.push({ sid });
       const only = Boolean(scoped || qu.net?.exclusive);
-      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), ...(digest || pull ? { features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : [])] } : {}) });
+      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), ...(digest || pull || batch ? { features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : []), ...(batch ? ['recs'] : [])] } : {}) });
     });
     bus.on('net.peer.down', ({ peer }) => {
       peers.delete(peer);
       remoteSubs.delete(peer);
       roles.delete(peer);
       features.delete(peer);
+      for (const b of recBatches.get(peer)?.values() ?? []) clearTimeout(b.timer); // its records stay in the outbox / come back by reconcile
+      recBatches.delete(peer);
+      batchesIn.delete(peer);
       hellos.get(peer)?.resolve();
       hellos.delete(peer);
       flushedTo.delete(peer);
@@ -928,7 +1004,9 @@ export function sync({
       let queue = ackQueue.get(from);
       if (!queue) {
         ackQueue.set(from, (queue = { bySid: new Map(), count: 0, timer: null }));
-        if (ackDelayMs > 0) queue.timer = setTimeout(() => flushAcks(from), ackDelayMs); // short and must fire: not unref'd
+        // short and must fire: not unref'd; while a recs batch from that peer runs, its end flushes instead
+        const due = () => (batchesIn.has(from) ? (queue.timer = setTimeout(due, ackDelayMs)) : flushAcks(from));
+        if (ackDelayMs > 0) queue.timer = setTimeout(due, ackDelayMs);
         else queueMicrotask(() => flushAcks(from));
       }
       if (!queue.bySid.has(sid)) queue.bySid.set(sid, []);

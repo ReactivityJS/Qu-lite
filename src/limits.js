@@ -33,7 +33,8 @@ export function limits({ frames = { rate: 200, burst: 400 }, bytes = { rate: 1 <
     const state = new Map();
     qu.bus.on('net.peer.down', ({ peer }) => state.delete(peer));
 
-    net.guard = (peer, type, size) => {
+    // `units`: records in the frame (a batched `recs` frame counts each record, link.js)
+    net.guard = (peer, type, size, units = 1) => {
       const t = now();
       let s = state.get(peer);
       if (!s) state.set(peer, (s = { frames: frames.burst, bytes: bytes.burst, at: t, strikes: [] }));
@@ -41,8 +42,8 @@ export function limits({ frames = { rate: 200, burst: 400 }, bytes = { rate: 1 <
       s.at = t;
       s.frames = Math.min(frames.burst, s.frames + elapsed * frames.rate);
       s.bytes = Math.min(bytes.burst, s.bytes + elapsed * bytes.rate);
-      if (s.frames >= 1 && s.bytes >= size) {
-        s.frames -= 1;
+      if (s.frames >= units && s.bytes >= size) {
+        s.frames -= units;
         s.bytes -= size;
         return true;
       }

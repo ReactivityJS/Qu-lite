@@ -379,6 +379,7 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `maxConcurrentPerPeer` | `4` | own reconciles running at once per peer; more scopes queue instead of being declined |
 | `digest` | `true` | offer/use the digest pre-check: identical whole-space/shard sets are confirmed with one 16-byte fingerprint each, batched into one frame; only differing scopes run Negentropy. Used only when both sides announce it in `hello` |
 | `ackDelayMs` | `20` | acks are collected this long and sent as one frame per space |
+| `batch` | `true` | offer/use batched `recs` frames: bulk record sends go up to 64 records / 64 KiB per frame to a peer that offers them (any other sync frame flushes first, so the order is unchanged). 20 spaces x 200 records: first upload 4,564 -> 167 frames, -5 % bytes; fresh device -6.5 % |
 | `indexCacheItems` | mirror `250000`, peer `50000` | sync-index entries kept in memory (~300 bytes each, LRU; `0` = off). The (ts, id) vector of a whole space or shard and its fingerprint are shared by all sessions, digest checks and pulls until the space's index changes (generation bumped by `storage.afterWrite`); concurrent reads of one scope share one load |
 | `pull` | `true` | offer/use the direct download: a scope this device holds nothing of is fetched with one `pull` request instead of a reconcile (no id lists), checked by fingerprint at the end; on any difference, decline or timeout the normal reconcile runs. Used only when both sides announce it in `hello` |
 | `frameSizeLimit` | `262144` | max Negentropy message in bytes (0 = unlimited); bigger differences take more rounds. `want`/`ack` id lists go out in batches of 4096 ids |
@@ -693,7 +694,11 @@ link (`links.get(peer).backlog()`, `.budget`) and bulk senders wait via `whenWri
 second of budget is queued. A big outbox therefore uploads without drops and without the
 disconnect/re-upload loop (`bench/upload-rate.mjs`: 2,000 records 47 s, 195 reconnects and ~280,000
 dropped frames before; 13 s, one connection, none dropped now). The guard stays for peers that
-ignore the announcement. Install `limits` before the transports.
+ignore the announcement. Install `limits` before the transports. Rate limits count RECORDS: a batched
+`recs` frame costs one frame per record it carries (`frameUnits`, read from the length prefixes before
+parsing), in the guard and in the sender's budget - batching saves bytes and work, it does not raise the
+allowed rate. Throughput for big uploads is set by `--rate` (`bench/upload-rate.mjs`, 2,000 records:
+11.8 s at 200/s, 3.8 s at 1,000/s).
 
 ---
 

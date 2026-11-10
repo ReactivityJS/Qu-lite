@@ -316,7 +316,7 @@ docker compose up --build        # oder: docs/INSTALL.md
 | Max. Verbindungen | `maxConnections` / `--max-connections` (10 000) | WebSocket: Close 1013, SSE: 503 – Clients versuchen später erneut |
 | Schnelle Clients | 64 Frames gleichzeitig pro Verbindung | darüber wird gewartet; über 4 MiB Rückstand hört der Relay auf zu lesen, der Client wartet über seine Taktung |
 | Langsame Clients | `maxBufferedBytes` (16 MiB) | Verbindung wird geschlossen statt unbegrenzt zu puffern (`net.slow`); Client resynchronisiert |
-| Rate-Limit | `--rate` (200 Frames/s) | Token-Bucket pro Verbindung, vor dem Parsen; wird im Handshake angekündigt, Clients takten sich auf 80 % davon (kein Verwerfen, keine Abbrüche bei großen Uploads) |
+| Rate-Limit | `--rate` (200 Records/s) | Token-Bucket pro Verbindung, vor dem Parsen; wird im Handshake angekündigt, Clients takten sich auf 80 % davon (kein Verwerfen, keine Abbrüche bei großen Uploads) |
 | Frame-Größe | `maxFrameBytes` (8 MiB) | größere WebSocket-Nachrichten → Close 1009 |
 | Handshake | 15 s / 8 Frames | wer kein gültiges `hi` sendet, wird getrennt |
 | Quoten | `--quota-records`, `--quota-bytes`, `--max-envelope`, `--max-spaces` | Envelopes werden per `nack` abgelehnt, bleiben im Outbox des Senders |
@@ -326,6 +326,10 @@ docker compose up --build        # oder: docs/INSTALL.md
 geschlossen. Durch Outbox + Negentropy geht dabei nichts verloren.
 
 **Interaktive Konsole am laufenden Relay:** `--repl` – siehe [CONSOLE.md](CONSOLE.md#relay-repl).
+
+**Upload-Durchsatz:** Ein Relay erlaubt pro Verbindung `--rate` Records pro Sekunde (Standard 200), Clients
+takten sich auf 80 % davon. Große Importe (2 000 Records) dauern damit etwa 12 s; mit `--rate 1000` etwa 4 s.
+Das Limit schützt die CPU des Relays (Signaturprüfung und Schreiben pro Record) – passend zur Hardware wählen.
 
 **Ausfallsicherheit mit zwei Relays:** `createClient({ url: ['https://relay-a.example', 'https://relay-b.example'] })`
 hält zu beiden eine Verbindung. Geschrieben wird an beide; ein Record gilt als zugestellt, sobald einer

@@ -4,6 +4,7 @@
  * limit (200 frames/s, burst 400; 1 MiB/s, burst 4 MiB): how long until the
  * outbox is empty, how many frames the relay dropped, how often it closed
  * the link. Run: node bench/upload-rate.mjs [records] [valueBytes]
+ * RATE=<records/s>: the relay's limit (default 200).
  * LIVE=1: connect first, then write (an import while online: live records).
  */
 import { createRelay } from '../src/node.js';
@@ -11,7 +12,7 @@ import { createClient, Space } from '../src/index.js';
 
 const N = Number(process.argv[2] ?? 2000);
 const SIZE = Number(process.argv[3] ?? 200);
-const relay = await createRelay({ port: 0, host: '127.0.0.1', log: () => {} });
+const relay = await createRelay({ port: 0, host: '127.0.0.1', log: () => {}, ...(process.env.RATE ? { rate: Number(process.env.RATE) } : {}) });
 let dropped = 0;
 let closed = 0;
 relay.qu.bus.on('net.limited', (e) => {

@@ -317,7 +317,7 @@ test('announced limits: a big first upload is paced below the relay limit - noth
     client.transports.relay.connect(`http://127.0.0.1:${relay.port}`);
     await until(() => ups === 1, 5000, 'connected');
     const link = client.net.links.get([...client.net.links.keys()][0]);
-    assert.deepEqual(link.budget, { frames: 80, bytes: 0.8 * (1 << 20) }, '80 % of the announced rate');
+    assert.deepEqual(link.budget, { frames: 80, bytes: 0.8 * (1 << 20), burst: 100 }, '80 % of the announced rate, half the burst');
     await until(async () => (await client.syncStatus()).outbox === 0, 20_000, 'uploaded');
     assert.deepEqual(limited, [], 'the relay dropped nothing');
     assert.equal(ups, 1, 'never disconnected');
@@ -423,4 +423,30 @@ test('a relay that processes slowly pauses a fast uploader over a real WebSocket
     await client.close();
     await relay.close();
   }
+});
+
+test('rate limits count batched records: frameUnits, guard and send budget', async () => {
+  const { frameUnits } = await import('../src/net/frame.js');
+  const items = Array.from({ length: 5 }, (_, i) => new Uint8Array([i, i, i]));
+  assert.equal(frameUnits(encodeFrame('recs', { items, sync: true })), 5);
+  assert.equal(frameUnits(encodeFrame('rec', { bytes: items[0] })), 1);
+  assert.equal(frameUnits(new Uint8Array([4, 114, 101, 99, 115])), 1, 'malformed counts 1');
+
+  // a relay allowing 10 records/s (burst 20) accepts a batch of 20, refuses the next one at once
+  const qu = await createQu();
+  const { limits } = await import('../src/limits.js');
+  qu.use(limits({ frames: { rate: 10, burst: 20 } }));
+  const seen = [];
+  qu.bus.on('net.in.*.recs', ({ items: got }) => seen.push(got.length));
+  const limited = [];
+  qu.bus.on('net.limited', (e) => limited.push(e.type));
+  const link = createLink(qu, { send: () => {}, via: 'test' });
+  link.receive(encodeFrame('hi', { peer: '0123456789abcdef', v: 1 }));
+  const batch = (n) => encodeFrame('recs', { items: Array.from({ length: n }, () => new Uint8Array(8)), sync: true });
+  link.receive(batch(20));
+  link.receive(batch(5));
+  await settle();
+  assert.deepEqual(seen, [20], 'the second batch exceeded the remaining record budget');
+  assert.deepEqual(limited, ['recs']);
+  await qu.close();
 });

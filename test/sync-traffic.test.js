@@ -20,11 +20,13 @@ async function peer(options = {}, qu = null) {
 }
 
 /** Frames leaving `qu`, counted per type. */
+/** Frames leaving `qu` per type; `rec` counts records, whether sent alone or batched in `recs`. */
 function frames(qu) {
   const count = {};
-  qu.bus.on('net.out.*.*', (_p, ctx) => {
+  qu.bus.on('net.out.*.*', (payload, ctx) => {
     const type = ctx.topic.split('.')[3];
     count[type] = (count[type] ?? 0) + 1;
+    if (type === 'recs') count.rec = (count.rec ?? 0) + payload.items.length;
   });
   return count;
 }
@@ -299,7 +301,8 @@ test('pull interrupted by a disconnect stays pending; the next connect completes
   end.buffered = () => ((sent.rec ?? 0) >= 40 ? 10_000 : 0);
   end.maxBuffered = 1000;
   fresh.watch({ space: joined[0] });
-  await until(async () => (await allRecords(fresh, joined)).length === 40, 5000);
+  // whatever went out before the buffer "filled" (40 single records or one batch of 64) arrives
+  await until(async () => sent.rec > 0 && (await allRecords(fresh, joined)).length === sent.rec, 5000);
   await link.disconnect();
   await settle(50);
   assert.ok((await allRecords(fresh, joined)).length < 300, 'interrupted');
@@ -347,4 +350,38 @@ test('pacing: bulk sends wait while the send buffer is full, and stop when the l
   assert.equal(sent.rec, before, 'no record sent after the link went');
   await link.disconnect();
   await Promise.all([fresh.close(), again.qu.close(), mirror.close()]);
+});
+
+test('batched records: one frame per batch, identical result with a peer that does not batch', async () => {
+  const results = [];
+  for (const batch of [true, false]) {
+    const { mirror, invites } = await seededMirror(3, 120, { batch });
+    const { qu: fresh, joined } = await freshDevice(invites);
+    const out = frames(mirror);
+    const link = connectInProcess(fresh, mirror);
+    await Promise.all(joined.map((space) => fresh.watch({ space })));
+    await until(async () => (await allRecords(fresh, joined)).length === 360, 10_000);
+    await until(async () => (await fresh.syncStatus()).pending === 0);
+    results.push({ batch, records: await allRecords(fresh, joined), recs: out.recs ?? 0, rec: out.rec });
+    await link.disconnect();
+    await Promise.all([fresh.close(), mirror.close()]);
+  }
+  const [batched, single] = results;
+  assert.deepEqual(batched.records, single.records, 'same records either way');
+  assert.equal(batched.rec, 360);
+  assert.ok(batched.recs > 0 && batched.recs <= 12, `batched in ${batched.recs} frames`);
+  assert.equal(single.recs, 0, 'no recs frames to a peer that did not offer them');
+});
+
+test('batched records: concurrent pulls never mix their records (each completes, verified)', async () => {
+  const { mirror, invites } = await seededMirror(8, 40);
+  const { qu: fresh, joined } = await freshDevice(invites);
+  const pulls = [];
+  fresh.bus.on('sync.pull', (e) => pulls.push(e));
+  const link = connectInProcess(fresh, mirror);
+  await Promise.all(joined.map((space) => fresh.watch({ space })));
+  await until(() => pulls.length === 8, 10_000, 'all pulls ended');
+  assert.ok(pulls.every((p) => p.complete && p.received === 40), JSON.stringify(pulls.map((p) => [p.complete, p.received, p.reason])));
+  await link.disconnect();
+  await Promise.all([fresh.close(), mirror.close()]);
 });

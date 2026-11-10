@@ -123,13 +123,14 @@ test('a write completing while the index is read keeps that read out of the cach
   a.storage.range = range;
   assert.ok(stalled);
 
-  // the stale read must not have been cached: the next reconcile reads again and still agrees
-  counted.read = 0;
-  counted.cached = 0;
+  // the stale read (5 items) must never be served afterwards: every index a's sync uses now has all 6
+  const served = [];
+  a.bus.on('sync.index', ({ sid, items }) => sid === sa.id && served.push(items));
   const [result] = await b.resync({ space: sb });
   assert.equal(result.error, undefined);
   assert.equal((await b.query({ space: sb, path: 'chat' })).length, 6);
-  assert.ok(counted.read >= 1, 'read fresh, not served from a stale cache');
+  assert.ok(served.length >= 1, 'a used its index for the reconcile');
+  assert.ok(served.every((n) => n === 6), `never the stale 5-item index (${served})`);
   await link.disconnect();
   await Promise.all([a.close(), b.close()]);
 });

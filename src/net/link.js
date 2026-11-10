@@ -59,7 +59,7 @@
  * byte channel opens, feed every incoming message to `link.receive(bytes)`
  * and call `link.closed()` when the channel goes away.
  */
-import { encodeFrame, decodeFrame, peekFrameType } from './frame.js';
+import { encodeFrame, decodeFrame, peekFrameType, frameUnits } from './frame.js';
 
 /** Wire protocol version sent in `hi`. Bump on incompatible changes; a peer without `v` speaks 1. */
 export const PROTOCOL_VERSION = 1;
@@ -162,12 +162,13 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
     while (queue.length) {
       const frame = queue[0];
       const cost = Math.min(frame.length, bucket.burstBytes); // a frame above the burst goes once the bucket is full
-      if (bucket.frames < 1 || bucket.bytes < cost) {
-        const wait = Math.max((1 - bucket.frames) / bucket.rateFrames, (cost - bucket.bytes) / bucket.rateBytes, 0);
+      const units = Math.min(frame.units, bucket.burstFrames); // a `recs` frame costs one per record
+      if (bucket.frames < units || bucket.bytes < cost) {
+        const wait = Math.max((units - bucket.frames) / bucket.rateFrames, (cost - bucket.bytes) / bucket.rateBytes, 0);
         drainTimer = setTimeout(drain, Math.max(5, Math.ceil(wait * 1000)));
         return;
       }
-      bucket.frames -= 1;
+      bucket.frames -= units;
       bucket.bytes -= cost;
       queue.shift();
       queuedBytes -= frame.length;
@@ -178,6 +179,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
     if (!open) return;
     const frame = encodeFrame(type, payload);
     if (!bucket) return transmit(frame);
+    frame.units = type === 'recs' ? frameUnits(frame) : 1;
     queue.push(frame);
     queuedBytes += frame.length;
     if (!drainTimer) drain();
@@ -222,7 +224,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       }
       if (remote && type !== 'hi') {
         // the guard (rate limits) decides on type and size - before any parsing work
-        const verdict = net.guard ? net.guard(remote, type, bytes.length) : true;
+        const verdict = net.guard ? net.guard(remote, type, bytes.length, type === 'recs' ? frameUnits(bytes) : 1) : true;
         if (verdict === 'close') return close();
         if (verdict === false) return;
       }
@@ -266,7 +268,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
           /** frames waiting for the send budget, and how many may wait (half a second of budget) */
           backlog: () => queue.length,
           backlogLimit: bucket ? Math.max(8, Math.floor(bucket.rateFrames / 2)) : Infinity,
-          budget: bucket ? { frames: bucket.rateFrames, bytes: bucket.rateBytes } : null,
+          budget: bucket ? { frames: bucket.rateFrames, bytes: bucket.rateBytes, burst: bucket.burstFrames } : null,
           /** inbound processing: frames running, waiting (count, bytes), reading paused */
           inbound: () => ({ inflight, queued: inbox.length, bytes: inboxBytes, paused }),
           drop: () => (link.closed(), close()),
