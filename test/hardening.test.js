@@ -114,8 +114,12 @@ test('rate limit: a flood is dropped above the burst and the connection is close
   const flooder = await plain();
   const limited = [];
   m.bus.on('net.limited', (e) => limited.push(e));
+  // a flooder ignores the announced limits (our link code would pace itself): announce none to it
+  const announced = m.net.inbound;
+  delete m.net.inbound;
   const link = connectInProcess(flooder, m);
   await link.ready;
+  m.net.inbound = announced;
   const mirrorName = link.peer();
   let down = false;
   flooder.bus.on('net.peer.down', () => (down = true));

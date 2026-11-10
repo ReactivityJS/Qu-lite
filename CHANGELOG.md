@@ -39,6 +39,11 @@ Stability, scalability and one base for client and relay.
   as slow on every reconnect.
 - A reconcile started right after connecting waits (max 5 s) for the peer's `hello`, so digest and pull
   apply to `watch()` calls racing the handshake.
+- **Announced rate limits**: `limits` announces its buckets in `hi`; the other side sends at most 80 %
+  of them, queueing frames in order. Fixes a big first upload against a relay: frames above the
+  burst were dropped, the relay closed the link after 50 drops and the client re-sent its whole
+  outbox on every reconnect (2,000 records: 47 s, 195 reconnects, ~280,000 dropped frames; now 13 s,
+  one connection, none dropped). `bench/upload-rate.mjs`.
 
 ## [Unreleased]
 

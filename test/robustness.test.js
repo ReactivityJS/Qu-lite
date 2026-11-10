@@ -302,3 +302,54 @@ test('large download over a real WebSocket stays below the slow-consumer limit (
     await relay.close();
   }
 });
+
+test('announced limits: a big first upload is paced below the relay limit - nothing dropped, one connection', async () => {
+  const relay = await createRelay({ port: 0, host: '127.0.0.1', log: () => {}, rate: 100 });
+  const limited = [];
+  relay.qu.bus.on('net.limited', (e) => limited.push(e));
+  const client = await createClient({ devtools: false, transports: [['relay', { WebSocketImpl: WebSocket, minDelayMs: 50 }]] });
+  try {
+    const space = client.join(await Space.create(client.identity));
+    await client.watch({ space });
+    for (let i = 0; i < 400; i++) await client.write(space, 'chat', i);
+    let ups = 0;
+    client.bus.on('net.peer.up', () => ups++);
+    client.transports.relay.connect(`http://127.0.0.1:${relay.port}`);
+    await until(() => ups === 1, 5000, 'connected');
+    const link = client.net.links.get([...client.net.links.keys()][0]);
+    assert.deepEqual(link.budget, { frames: 80, bytes: 0.8 * (1 << 20) }, '80 % of the announced rate');
+    await until(async () => (await client.syncStatus()).outbox === 0, 20_000, 'uploaded');
+    assert.deepEqual(limited, [], 'the relay dropped nothing');
+    assert.equal(ups, 1, 'never disconnected');
+  } finally {
+    await client.close();
+    await relay.close();
+  }
+});
+
+test('send budget: frames queue in order; no or invalid announcement means no budget', async () => {
+  const { netOf } = await import('../src/net/link.js');
+  const make = async (limits) => {
+    const qu = await createQu();
+    const sent = [];
+    const link = createLink(qu, { send: (b) => sent.push(decodeFrame(b)), via: 'test' });
+    link.receive(encodeFrame('hi', { peer: '0123456789abcdef', v: 1, ...(limits ? { limits } : {}) }));
+    return { qu, sent, entry: netOf(qu).links.get('0123456789abcdef') };
+  };
+  // 10 frames/s announced -> 8/s, burst 2
+  const paced = await make({ frames: { rate: 10, burst: 4 }, bytes: { rate: 1 << 20, burst: 1 << 20 } });
+  for (let i = 0; i < 5; i++) await paced.qu.bus.emit('net.out.0123456789abcdef.ping', { i });
+  assert.deepEqual(paced.sent.slice(1).map((f) => f.payload.i), [0, 1], 'burst of 2 at once');
+  assert.equal(paced.entry.backlog(), 3);
+  await until(() => paced.sent.length === 6, 2000, 'the rest follows at the budget');
+  assert.deepEqual(paced.sent.slice(1).map((f) => f.payload.i), [0, 1, 2, 3, 4], 'in order');
+  await paced.qu.close();
+
+  for (const limits of [null, { frames: { rate: -1, burst: 4 }, bytes: { rate: 1, burst: 1 } }, { frames: 'x' }]) {
+    const open = await make(limits);
+    for (let i = 0; i < 50; i++) await open.qu.bus.emit('net.out.0123456789abcdef.ping', { i });
+    assert.equal(open.sent.length, 51, 'sent at once');
+    assert.equal(open.entry.budget, null);
+    await open.qu.close();
+  }
+});

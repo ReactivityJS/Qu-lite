@@ -31,6 +31,13 @@
  *     version (`v`): a remote speaking a newer major version is refused
  *     (`net.error {reason: 'protocol'}`) instead of being misunderstood,
  *   - on `qu.close()` every open link is dropped.
+ *   - SENDER-SIDE RATE LIMIT: a peer with inbound rate limits (`limits`
+ *     plugin: `net.inbound`) announces them in `hi` (`limits: {frames:
+ *     {rate, burst}, bytes: {rate, burst}}`). The other side then sends at
+ *     most 80 % of that rate (and half the burst): frames queue in order on
+ *     the link instead of being dropped - and instead of the remote closing
+ *     the link after too many drops, which made a big outbox re-upload
+ *     itself on every reconnect. Without an announcement nothing changes.
  *   - PACING: a transport that can tell how much it still has to send
  *     (`buffered()`, e.g. a WebSocket's bufferedAmount) lets bulk senders wait
  *     with `whenWritable(qu, peer)` instead of filling memory - and instead
@@ -92,18 +99,62 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
   let open = true;
 
   let early = 0;
-  const sendFrame = (type, payload) => {
-    if (!open) return;
-    const frame = encodeFrame(type, payload);
+  const transmit = (frame) => {
     stats.sent += frame.length;
     stats.framesOut++;
     send(frame);
+  };
+  // outbound budget from the remote's announced inbound limits (null: send at once)
+  let bucket = null;
+  const queue = [];
+  let queuedBytes = 0;
+  let drainTimer = null;
+  const drain = () => {
+    drainTimer = null;
+    if (!open) return;
+    const now = Date.now();
+    const elapsed = (now - bucket.at) / 1000;
+    bucket.at = now;
+    bucket.frames = Math.min(bucket.burstFrames, bucket.frames + elapsed * bucket.rateFrames);
+    bucket.bytes = Math.min(bucket.burstBytes, bucket.bytes + elapsed * bucket.rateBytes);
+    while (queue.length) {
+      const frame = queue[0];
+      const cost = Math.min(frame.length, bucket.burstBytes); // a frame above the burst goes once the bucket is full
+      if (bucket.frames < 1 || bucket.bytes < cost) {
+        const wait = Math.max((1 - bucket.frames) / bucket.rateFrames, (cost - bucket.bytes) / bucket.rateBytes, 0);
+        drainTimer = setTimeout(drain, Math.max(5, Math.ceil(wait * 1000)));
+        return;
+      }
+      bucket.frames -= 1;
+      bucket.bytes -= cost;
+      queue.shift();
+      queuedBytes -= frame.length;
+      transmit(frame);
+    }
+  };
+  const sendFrame = (type, payload) => {
+    if (!open) return;
+    const frame = encodeFrame(type, payload);
+    if (!bucket) return transmit(frame);
+    queue.push(frame);
+    queuedBytes += frame.length;
+    if (!drainTimer) drain();
+  };
+  /** @returns {object|null} a send budget below the remote's announced limits, or null if none/invalid */
+  const budgetFor = (limits) => {
+    const ok = (b) => b && Number.isFinite(b.rate) && Number.isFinite(b.burst) && b.rate > 0 && b.burst > 0;
+    if (!limits || !ok(limits.frames) || !ok(limits.bytes)) return null;
+    const rateFrames = Math.max(1, limits.frames.rate * 0.8);
+    const rateBytes = Math.max(1024, limits.bytes.rate * 0.8);
+    const burstFrames = Math.max(1, limits.frames.burst / 2);
+    const burstBytes = Math.max(1024, limits.bytes.burst / 2);
+    return { rateFrames, rateBytes, burstFrames, burstBytes, frames: burstFrames, bytes: burstBytes, at: Date.now() };
   };
   const refuse = (reason) => {
     qu.bus.notify('net.error', { via, reason, peer: remote });
     close();
   };
-  sendFrame('hi', { peer: localId ?? qu.peerId, v: PROTOCOL_VERSION });
+  sendFrame('hi', { peer: localId ?? qu.peerId, v: PROTOCOL_VERSION, ...(net.inbound ? { limits: net.inbound } : {}) });
   // a remote that never says hi would hold the socket (and a relay slot) forever
   let helloTimer = net.helloTimeoutMs > 0 ? setTimeout(() => !remote && open && refuse('no hello'), net.helloTimeoutMs) : null;
   helloTimer?.unref?.();
@@ -151,7 +202,21 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
         remote = localId ? xorHex(peer, localId) : peer;
         net.links.get(remote)?.drop(); // newest wins - never two links under one name
         if (scope) net.scopes.set(remote, new Set(scope));
-        net.links.set(remote, { via, since: Date.now(), stats, version, buffered, maxBuffered, drop: () => (link.closed(), close()) });
+        bucket = budgetFor(frame.payload?.limits);
+        net.links.set(remote, {
+          via,
+          since: Date.now(),
+          stats,
+          version,
+          /** bytes not yet on the wire: queued for the budget + the transport's own buffer */
+          buffered: () => queuedBytes + (buffered?.() ?? 0),
+          maxBuffered,
+          /** frames waiting for the send budget, and how many may wait (half a second of budget) */
+          backlog: () => queue.length,
+          backlogLimit: bucket ? Math.max(8, Math.floor(bucket.rateFrames / 2)) : Infinity,
+          budget: bucket ? { frames: bucket.rateFrames, bytes: bucket.rateBytes } : null,
+          drop: () => (link.closed(), close()),
+        });
         off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
         onUp?.(remote);
         qu.bus.notify('net.peer.up', { peer: remote, via });
@@ -163,6 +228,9 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       if (!open) return;
       open = false;
       clearTimeout(helloTimer);
+      clearTimeout(drainTimer);
+      queue.length = 0;
+      queuedBytes = 0;
       off?.();
       if (remote) {
         if (scope) net.scopes.delete(remote);
@@ -184,8 +252,9 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Resolves when `peer`'s link has room for more bulk data: at once if its
- * send buffer is below the high-water mark (or the transport cannot tell),
- * otherwise once the buffer drained below the low-water mark.
+ * send buffer is below the high-water mark (or the transport cannot tell)
+ * and at most half a second of frames waits for the send budget, otherwise
+ * once both drained (buffer below the low-water mark, backlog halved).
  * @param {object} qu @param {string} peer
  * @param {{pollMs?: number, maxWaitMs?: number}} [options]
  * @returns {Promise<boolean>} false if the link went away (or stayed full for `maxWaitMs`) - stop sending then
@@ -193,12 +262,14 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function whenWritable(qu, peer, { pollMs = 10, maxWaitMs = 120_000 } = {}) {
   const link = qu.net?.links.get(peer);
   if (!link) return false;
-  if (typeof link.buffered !== 'function') return true;
   const high = Math.min(PACE_CEILING, link.maxBuffered > 0 ? link.maxBuffered / 4 : PACE_CEILING);
-  if (link.buffered() <= high) return true;
   const low = high / 4;
+  const buffered = () => (typeof link.buffered === 'function' ? link.buffered() : 0);
+  const backlog = () => (typeof link.backlog === 'function' ? link.backlog() : 0);
+  const limit = link.backlogLimit ?? Infinity;
+  if (buffered() <= high && backlog() <= limit) return true;
   const end = Date.now() + maxWaitMs;
-  while (qu.net.links.get(peer) === link && link.buffered() > low) {
+  while (qu.net.links.get(peer) === link && (buffered() > low || backlog() > limit / 2)) {
     if (Date.now() > end) return false;
     await pause(pollMs);
   }

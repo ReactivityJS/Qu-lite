@@ -7,7 +7,12 @@
  *
  *   qu.use(limits({ frames: {rate: 200, burst: 400}, bytes: {rate: 1 << 20, burst: 4 << 20} }))
  *
- * Hooks into every link through `qu.net.guard` (link.js).
+ * Hooks into every link through `qu.net.guard` (link.js), and announces the
+ * limits in every link's `hi` (`qu.net.inbound`): current peers pace
+ * themselves below them, so nothing is dropped in normal operation - the
+ * guard remains for peers that do not.
+ *
+ * Install before the transports, so the first `hi` already carries them.
  */
 import { netOf } from './net/link.js';
 
@@ -18,6 +23,12 @@ import { netOf } from './net/link.js';
 export function limits({ frames = { rate: 200, burst: 400 }, bytes = { rate: 1 << 20, burst: 4 << 20 }, strikes = 50, windowMs = 10_000, now = () => Date.now() } = {}) {
   return (qu) => {
     const net = netOf(qu);
+    // announced in every link's `hi`: well-behaved peers pace themselves below it (link.js)
+    net.inbound = { frames: { rate: frames.rate, burst: frames.burst }, bytes: { rate: bytes.rate, burst: bytes.burst } };
+    qu.onClose?.(() => {
+      delete net.inbound;
+      net.guard = null;
+    });
     /** @type {Map<string, {frames: number, bytes: number, at: number, strikes: number[]}>} */
     const state = new Map();
     qu.bus.on('net.peer.down', ({ peer }) => state.delete(peer));

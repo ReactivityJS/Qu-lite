@@ -647,6 +647,14 @@ These are token buckets per connection, for any peer. Frames above the limit are
 (`net.limited`), and repeated strikes close the connection. Nothing is lost: the outbox and
 pending reconciles retry.
 
+The limits are announced in every link's `hi` (`limits: {frames, bytes}`, from `qu.net.inbound`).
+The other side then sends at most 80 % of the rate with half the burst: frames wait in order on its
+link (`links.get(peer).backlog()`, `.budget`) and bulk senders wait via `whenWritable` once half a
+second of budget is queued. A big outbox therefore uploads without drops and without the
+disconnect/re-upload loop (`bench/upload-rate.mjs`: 2,000 records 47 s, 195 reconnects and ~280,000
+dropped frames before; 13 s, one connection, none dropped now). The guard stays for peers that
+ignore the announcement. Install `limits` before the transports.
+
 ---
 
 ## Transports
@@ -673,7 +681,8 @@ version is refused (`net.error {reason: 'protocol'}`); a remote that sends no va
 `[a-z][a-z0-9_-]{0,31}`; the rate guard (`limits`) sees type and size before the frame is parsed; frames
 are decoded strictly. **Backpressure**: a WebSocket or SSE stream whose send buffer exceeds `maxBufferedBytes`
 (16 MiB) is closed (`net.slow`) - the peer reconnects and resumes. `qu.close()` drops every link.
-**Pacing**: a transport passes `buffered()` and `maxBuffered` to `createLink`; `whenWritable(qu, peer)` (from
+**Send budget**: a remote's `hi` may carry its inbound `limits`; the link then queues frames to stay
+at 80 % of them (see [limits](#limits)). **Pacing**: a transport passes `buffered()` and `maxBuffered` to `createLink`; `whenWritable(qu, peer)` (from
 `src/net/link.js`) resolves once there is room (waits above `maxBuffered / 4`, at most 4 MiB, until below a
 quarter of that) and returns `false` when the link went away. WebSocket, SSE server and WebRTC report their buffer.
 
