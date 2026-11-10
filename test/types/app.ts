@@ -1,6 +1,6 @@
 // Compiled with `npm run types` (tsc --noEmit): an app written against the published types.
 // The @ts-expect-error lines prove that the types catch mistakes.
-import { createClient } from '@qu/lite';
+import { createClient, fetchPublic } from '@qu/lite';
 import { createRelay } from '@qu/lite/node';
 
 async function main(): Promise<void> {
@@ -35,8 +35,16 @@ async function main(): Promise<void> {
   // @ts-expect-error - backup passphrase must be a string
   await qu.device.exportBackup(42);
 
+  const forum = await qu.createGroup({ open: true });
+  const link = await (await qu.members(forum)).link();
+  const posts = await fetchPublic(`http://127.0.0.1:${relay.port}`, forum.id, 'posts', { limit: 10 });
+  posts.map((p) => p.value);
+  const { records } = await qu.background.progress();
+  await qu.push.ring(forum);
+
   await qu.close();
   await relay.close();
+  void [link, records];
   void [text, backup, locked, outbox];
 }
 void main;

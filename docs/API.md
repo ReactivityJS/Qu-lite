@@ -30,6 +30,7 @@ they always match this API. To learn why things work the way they do, read
 | `@qu/lite/client` | browser + Node | small entry: `createClient`, `createPeer`, `defaultRegistry`, `createQu`, `Registry`, `Bus`, `Space`, `memoryDriver` - every named plugin/store/transport is loaded on demand |
 | `@qu/lite/node` | Node | `createRelay`, `createClient`, `nodeRegistry`, `sqliteDriver`, `listenHttp`, `listenWs`, `httpServerTransport`, `wsServerTransport`, plus `createPeer`/`defaultRegistry` |
 | `@qu/lite/devtools` | browser + Node | `devtools()` ([Dev console](CONSOLE.md)) |
+| `@qu/lite/sw` | service worker | `quServiceWorker()`, Background Sync and push ([Service worker](#service-worker)); as a classic script `<relay>/dist/qu-sw.js` |
 | `@qu/lite/sqlite` | Node ≥ 22.5 | `sqliteDriver` (`node:sqlite`) |
 | `@qu/lite/ws-server` | Node | `listenHttp`, `listenWs`, `httpServerTransport`, `wsServerTransport` |
 | `qu-lite-mirror` (bin) | Node | relay/mirror CLI, see [Mirror CLI](#mirror-cli-and-docker) |
@@ -496,6 +497,18 @@ await qu.restoreGroups();                        // after a reload: reopens ever
 | `promote(alias, role)` | owner only; re-signs the admin list |
 | `remove(alias) → epoch` | admin; role → `removed`, new epoch for everyone else |
 | `rotate() → epoch` | admin; new epoch, e.g. after a suspected key leak |
+| `open` | `true` for a space created with `createGroup({ open: true })` |
+| `link() → invite` | admin; an invite **without token**: in an open space anyone holding it writes; otherwise it is a **read-only** link (its holder's records are never accepted) |
+| `ban(alias)`, `unban(alias)`, `bans()` | admin; refuses everything the alias writes from now on - at every member and at the relay |
+
+**Open spaces** (forum, comments, public room): `createGroup({ open: true })` writes the public
+record `_mod/open`. Anyone who has `m.link()` may then write without an invite or member entry.
+Moderation replaces membership: `ban(alias)` writes the public record `_mod/ban:<alias>`, so
+members *and* the relay refuse the alias's later records. `qu.del(space, record)` lets an admin
+delete anyone's record for everyone. In an open space `remove(alias)` bans instead of rotating
+keys, because the link is public. At the relay every author except owner and admins has a rate
+limit for fresh writes (mirror `openRate`, default 0.2 records/s with a burst of 20). Refused
+records stay in the sender's outbox and are retried.
 
 The roles are `owner`, `admin`, `member` and `removed`. The rules are enforced by every peer on
 every record. Events: `qu.members.changed {space}` and `qu.members.epoch {space, epoch}`.
@@ -689,10 +702,114 @@ peer with `sync({ role: 'mirror' })` and **without** `records()`.
 | `quota` | `{records?, bytes?}` per space; refused envelopes produce `qu.record.refused` at the sender, whose outbox keeps them |
 | `maxEnvelopeBytes` | size limit per envelope |
 | `maxSpaces` | most spaces this mirror accepts (`null`: unlimited). Grants are self-certifying, so anyone can create spaces; set it on a public relay. Refusals: `mirror.full {sid, spaces}` |
+| `openRate` | `{rate, burst}` records per second per author for fresh writes in open spaces (default `{rate: 0.2, burst: 20}`; `null` = off). Owner and admins are exempt |
+
+The mirror also serves plain HTTP (CORS for any origin):
+
+| Route | |
+|---|---|
+| `GET /q/<sid>/<path>?key=&limit=&before=&after=` | public records of one path, newest first: `{sid, path, grants, records: [base64 envelope], next?}`. Private records are never served |
+| `POST /q/in` | body: envelopes (`packEnvelopes()`); ingested like records from a link → `{results: [{id, status, reason?}]}`. Used by the service worker for Background Sync |
 
 API: `qu.mirror.ready` resolves to the served sids. Also `spaces()`, `count(sid)`, `usage(sid)`,
 `writeKeys(sid)`, `admins(sid)` and `expire()`. Events: `mirror.grant {sid, changed}` and
 `mirror.quota {sid, usage}`.
+
+## Reading without membership
+
+```js
+import { fetchPublic, publicLink } from '@qu/lite';
+const posts = await fetchPublic('https://relay.example', sid, 'blog');            // newest first
+const about = await fetchPublic('https://relay.example', sid, 'pages', { key: 'about' });
+const more  = await fetchPublic(publicLink('https://relay.example', sid, 'blog'), { before: posts.next });
+```
+
+Reads the **public** records (`write(..., { visibility: 'public' })`) of one path. You need no
+identity, no peer and no membership. The relay sends the sealed envelopes plus the space's grants,
+and `fetchPublic` checks the grant chain and both signatures of every record. A relay can withhold
+records but cannot forge or alter them. For keyed entries only the newest version is returned, and
+deletions are left out. A blog is a group whose members are its authors. A forum is an open space
+(see members).
+
+## background
+
+`qu.use(background({ serviceWorker?, wakeLock?, relay? }))`, or `createClient({ extra: ['background'] })`.
+
+```js
+await qu.background.progress()          // {records, bytes} still in the outbox
+qu.bus.on('qu.sync.progress', ({ records, bytes }) => showUploadBar(records, bytes));
+qu.background.backgroundSync            // true | false | null (not known yet)
+```
+
+While the outbox is not empty:
+
+- **Background Sync** (Chrome, Edge, Samsung Internet): the plugin registers the sync tag
+  `qu-outbox` with the service worker. When the network is back, the browser wakes the worker,
+  even after the tab was closed. The worker posts the sealed envelopes straight from IndexedDB to
+  `POST /q/in` and clears what the relay stored.
+- **Fallback** (Safari, Firefox, no service worker): the screen is kept on (Screen Wake Lock)
+  while a relay is connected and the page is visible.
+  The same happens when Chromium has Background Sync switched off for the site; the plugin then
+  emits `qu.background.unavailable {reason}`.
+
+`blobs` uses the same shared lock (`awakeOf(qu)`). It keeps it for uploads only when there is no
+Background Sync, and for downloads always.
+
+## push
+
+Relay: `createRelay({ push: { subject: 'mailto:ops@example.org' } })` or `--push mailto:…` /
+`QU_PUSH`. Client: `createClient({ extra: ['push'] })`.
+
+```js
+// from a click (the browser asks for permission only then):
+await qu.push.enable([family, team], { labels: { [family.id]: 'Familie' }, paths: ['chat'] });
+await qu.push.ring(family);                       // a call: wakes the others' devices now
+qu.push.opened                                    // {sid, kind} if a notification opened the app
+qu.bus.on('qu.push.open', ({ sid, kind }) => kind === 'call' && showCallScreen(sid));
+await qu.push.disable([team]);                    // or disable() for everything
+```
+
+The push carries **no payload**. When it arrives, the service worker asks the relay
+`POST /push/pending` what happened ("3 messages in family", "call in family") and shows it. The
+labels stay on the device. Tapping opens `?qu-space=<sid>` or `?qu-call=<sid>`, or focuses the open
+app, which then receives `qu.push.open`.
+
+The relay wakes a device for a new record in a subscribed space, except when:
+
+- the device wrote the record itself,
+- the record is not under one of the `paths`, so receipts and presence wake nobody (the relay
+  compares opaque shard tags),
+- the device is connected right now.
+
+Pushes are throttled per device (`minIntervalMs`, default 30 s; 30 messages are one push). A ring
+is sent at once with urgency `high`. Subscribing and ringing are signed with the space's epoch
+write key, so only members can do either; the relay checks the signature blind. Push services
+learn when a device is woken, never anything else. iOS supports this only for web apps added to
+the home screen (16.4+). Every push must show a notification, so use push for things worth one.
+
+| Relay route | |
+|---|---|
+| `GET /push/key` | VAPID public key |
+| `POST /push/subscribe` | `{endpoint, peer?, spaces: [{sid, epoch, sig, author?, shards?}]}` → `{accepted}` |
+| `POST /push/unsubscribe` | `{endpoint, sids?}` |
+| `POST /push/pending` | `{endpoint}` → `{spaces: [{sid, count, kind, at}]}` |
+| `POST /push/ring` | `{sid, epoch, at, kind, sig, peer?}` → `{woken}` |
+
+## Service worker
+
+```js
+// sw.js of the app (same origin as the app), classic script:
+importScripts('https://relay.example/dist/qu-sw.js');
+quServiceWorker({ db: 'qu-lite', open: '/', icon: '/icon.png',
+  texts: { message: (label, n) => ({ title: label, body: `${n} neue Nachricht${n > 1 ? 'en' : ''}` }),
+           call: (label) => ({ title: `Anruf – ${label}`, body: 'Tippen zum Annehmen' }) } });
+// app: navigator.serviceWorker.register('/sw.js')
+```
+
+`@qu/lite/sw` exports the same as a module, and also `deliverOutbox(storage)`, `showPending(scope,
+storage)` and `openFromNotification(scope, notification)` for your own worker. The worker opens the
+app's IndexedDB (`db`: the `name` given to `createClient`) and reaches the relay over HTTP; the
+relay origin is stored by the plugins (`bg/relay`). `dist/qu-sw.js` is about 3 KB gzipped.
 
 ## limits
 
@@ -763,6 +880,7 @@ Example: [03-mirror-websocket.mjs](../examples/03-mirror-websocket.mjs).
 npx qu-lite-mirror --port 8787 --db ./mirror.sqlite [--host 0.0.0.0] [--allow sid1,sid2] [--static ./web]
                    [--quota-records N] [--quota-bytes N] [--max-envelope N] [--max-spaces N] [--rate 200]
                    [--stats-token SECRET] [--max-connections N] [--log-format text|json] [--repl] [--quiet]
+                   [--push mailto:ops@example.org]
 docker compose up --build                       # same, port 8787, data in a volume
 ```
 

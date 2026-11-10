@@ -229,6 +229,76 @@ await st.markRead('chat');
 Entfernen (`m.remove(alias)`) startet eine neue **Epoche**: Entfernte können neue Records nicht mehr
 lesen. Details: [API.md → members](API.md#members).
 
+## 6a. Wenn die App zu ist: Hintergrund, Push, Lesen ohne Mitgliedschaft, offene Räume
+
+**Hintergrund-Sync.** Was offline geschrieben wurde, liegt in der Outbox. `background` zeigt den
+Stand und sorgt dafür, dass er ankommt:
+
+```js
+const qu = await createClient({ url, extra: ['background', 'push'] });
+qu.bus.on('qu.sync.progress', ({ records, bytes }) => zeigeFortschritt(records, bytes));
+```
+
+In Chrome und Edge übernimmt Background Sync: Der Browser weckt den Service Worker, sobald wieder
+Netz da ist, auch wenn der Tab längst geschlossen ist. Der Worker schickt die versiegelten Records
+direkt aus IndexedDB an den Relay. In Safari und Firefox gibt es das nicht. Dort bleibt der
+Bildschirm an, solange etwas aussteht und eine Verbindung besteht (Wake Lock, nur als Rückfall).
+
+**Push.** Der Relay weckt geschlossene Apps mit einem Push **ohne Inhalt**. Der Service Worker fragt
+dann den Relay, worum es geht („3 neue Nachrichten in Familie“, „Anruf in Familie“). Der Name der
+Gruppe bleibt auf dem Gerät. Über Apple, Google oder Mozilla läuft nur das Wecken.
+
+```js
+// in einem Klick-Handler (nur dann fragt der Browser um Erlaubnis):
+await qu.push.enable([familie], { labels: { [familie.id]: 'Familie' }, paths: ['chat'] });
+await qu.push.ring(familie);          // Anruf: weckt die anderen sofort
+if (qu.push.opened?.kind === 'call') zeigeAnrufAnnehmen(qu.push.opened.sid);
+qu.bus.on('qu.push.open', ({ sid, kind }) => kind === 'call' && zeigeAnrufAnnehmen(sid));
+```
+
+Relay: `createRelay({ push: { subject: 'mailto:ops@example.org' } })` bzw. `--push mailto:…`.
+Service Worker der App (`/sw.js`, gleicher Origin):
+
+```js
+importScripts('https://relay.example/dist/qu-sw.js');
+quServiceWorker({ db: 'qu-lite', open: '/',
+  texts: { message: (name, n) => ({ title: name, body: `${n} neue Nachricht${n > 1 ? 'en' : ''}` }),
+           call: (name) => ({ title: `Anruf – ${name}`, body: 'Tippen zum Annehmen' }) } });
+```
+
+Auf dem iPhone geht Push nur, wenn die Web-App zum Home-Bildschirm hinzugefügt wurde. Jeder Push
+muss eine sichtbare Meldung erzeugen. Deshalb weckt nur, was unter `paths` liegt (z. B. `chat`).
+Lesebestätigungen und Präsenz wecken nie.
+
+**Lesen ohne Mitgliedschaft (Blog, öffentliches Profil).** Öffentliche Records
+(`visibility: 'public'`) kann jeder über den Relay lesen, ohne Identität und ohne Peer:
+
+```js
+await autor.write(blog, 'posts', { titel: 'Hallo Welt' }, { visibility: 'public' });
+const posts = await fetchPublic('https://relay.example', blog.id, 'posts');
+// teilbar: https://relay.example/q/<sid>/posts  ->  fetchPublic(link)
+```
+
+Der Leser prüft beide Signaturen jedes Records selbst. Ein Relay kann Records also unterschlagen,
+aber nicht fälschen. Wer schreiben darf, regelt der Space: Ein Blog ist eine Gruppe, deren
+Mitglieder die Autoren sind.
+
+**Offene Räume (Forum, Kommentare).** Jeder mit dem Link darf schreiben, ohne Einladung:
+
+```js
+const forum = await mod.createGroup({ open: true });
+const link = await (await mod.members(forum)).link();     // veröffentlichen
+const raum = await gast.acceptInvite(link);               // Gast schreibt sofort
+await (await mod.members(forum)).ban(alias);              // ab jetzt nimmt niemand mehr etwas an
+await mod.del(forum, beitrag);                            // Beitrag für alle löschen
+```
+
+Statt Mitgliedschaft gibt es Moderation. Sperren sind öffentliche Records, damit auch der Relay sie
+durchsetzt, ohne Inhalte zu lesen. Pro Autor gilt am Relay eine Grenze für neue Beiträge
+(Standard: 20 auf einmal, dann einer alle 5 s). Owner und Admins sind davon ausgenommen. Ein Link
+ohne `open` ist ein reiner **Lese-Link**: Sein Inhaber liest alles, aber was er schreibt, nimmt
+niemand an.
+
 ## 7. Eigene Plugins schreiben
 
 Ein Plugin ist eine Funktion `(qu) => api`. Konventionen, die das System stabil halten:

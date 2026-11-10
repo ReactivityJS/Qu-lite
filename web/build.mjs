@@ -8,6 +8,8 @@
  *                     plugin, store and transport is its own chunk in dist/chunks/,
  *                     fetched only when a peer uses it
  *   dist/demo.js      the demo app (demo.html), bundled with the library
+ *   dist/qu-sw.js     service worker helper (classic script): `importScripts(...)`, then
+ *                     `quServiceWorker({...})` - Background Sync and push (sw.js)
  *
  * `platform: 'browser'` makes esbuild refuse Node-only imports (node:sqlite,
  * ws) instead of silently shipping them.
@@ -27,6 +29,8 @@ export async function buildWeb() {
   rmSync(join(here, 'dist', 'chunks'), { recursive: true, force: true }); // hashed names: drop chunks of earlier builds
   await esbuild.build({ ...common, entryPoints: { 'qu-client': join(here, '..', 'src', 'browser.js') }, outdir: join(here, 'dist'), splitting: true, chunkNames: 'chunks/[name]-[hash]' });
   await esbuild.build({ ...common, entryPoints: [join(here, 'demo.js')], outfile: join(here, 'dist', 'demo.js') });
+  // service worker helper as a CLASSIC script (importScripts works in every browser's worker): self.quServiceWorker
+  await esbuild.build({ ...common, format: 'iife', globalName: 'quSw', footer: { js: 'self.quServiceWorker = quSw.quServiceWorker;' }, entryPoints: [join(here, '..', 'src', 'sw.js')], outfile: join(here, 'dist', 'qu-sw.js') });
   return join(here, 'dist');
 }
 

@@ -8,6 +8,8 @@
  *                                               503 before and while shutting down (readiness:
  *                                               load balancers send traffic only then)
  *   GET /info                                -> {name, version, transports, uptime} (no space data)
+ *   /q/..., /push/...                        -> routes added by plugins (http.js): public reads
+ *                                               and offline delivery (mirror.js), push (push-relay.js)
  *   GET /stats, /metrics                     -> operating figures as JSON / Prometheus text
  *                                               (stats.js), only with `statsToken` - sent as
  *                                               `Authorization: Bearer <token>` or `?token=`;
@@ -42,6 +44,7 @@ import { WebSocketServer } from 'ws';
 import { attachSocket } from './ws.js';
 import { PROTOCOL_VERSION } from './link.js';
 import { createSseHandler } from './sse-server.js';
+import { dispatch } from './http.js';
 
 const VERSION = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version;
 const TYPES = {
@@ -108,6 +111,7 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, ws =
       return res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(info));
     }
     if (req.method === 'GET' && (path === '/stats' || path === '/metrics')) return serveStats(req, res, path);
+    if (dispatch(qu, req, res)) return; // plugin routes (http.js): public reads, push, background sync
     if (files) return files(req, res);
     res.writeHead(ws ? 426 : 404, { 'content-type': 'text/plain' }).end(ws ? 'websocket or sse only' : 'not found');
   };

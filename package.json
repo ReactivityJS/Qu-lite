@@ -36,6 +36,10 @@
     "./devtools": {
       "types": "./types/devtools.d.ts",
       "default": "./src/devtools.js"
+    },
+    "./sw": {
+      "types": "./types/sw.d.ts",
+      "default": "./src/sw.js"
     }
   },
   "bin": {

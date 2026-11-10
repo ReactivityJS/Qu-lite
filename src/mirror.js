@@ -20,6 +20,14 @@
  *     updated in the same atomic write set as the envelope (and its drops).
  *     Refused envelopes are nack'ed to the sender (its outbox keeps them);
  *     drop lists are always accepted - they free space.
+ *   - PUBLIC READS and offline delivery over plain HTTP (public.js): public
+ *     records indexed by path, served with the grants to verify them;
+ *   - OPEN SPACES (members.js `open`): the PUBLIC moderation records under
+ *     `_mod` are applied blind - a banned alias's new envelopes are refused
+ *     ('banned'), and in an open space every author except owner and admins
+ *     gets a rate limit for fresh writes (`openRate`, records/s; 'rate' -
+ *     the sender's outbox keeps the record and retries). State per space in
+ *     `mirror/mod/<sid>`, written with the record that changed it.
  *   - at most `maxSpaces` spaces: a space's grant is self-certifying, so
  *     anyone can create new ones - without this limit per-space quotas
  *     don't bound the mirror's storage (`mirror.full` when refused).
@@ -31,11 +39,13 @@ import { envelopes } from './envelopes.js';
 import { signals } from './signals.js';
 import { readPublic } from './envelope.js';
 import { GC_TYPE } from './gc.js';
+import { publicRelay } from './public.js';
+import { parseHlc } from './hlc.js';
 
 /**
- * @param {{allow?: string[]|null, expireEveryMs?: number, quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null}} [options]
+ * @param {{allow?: string[]|null, expireEveryMs?: number, quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null, openRate?: {rate: number, burst: number}|null}} [options]
  */
-export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota = null, maxEnvelopeBytes = 256 * 1024, maxSpaces = null } = {}) {
+export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota = null, maxEnvelopeBytes = 256 * 1024, maxSpaces = null, openRate = { rate: 0.2, burst: 20 } } = {}) {
   return (qu) => {
     const { bus, storage } = qu;
     const env = envelopes()(qu);
@@ -43,6 +53,8 @@ export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota
     env.forwardSynced = true; // a hub: what it pulls from one peer is new for its other subscribers
     signals()(qu); // forwards verified ephemeral signals, never stores them
     const allowed = (sid) => !allow || allow.includes(sid);
+
+    publicRelay(qu, env, { allowed }); // GET /q/<sid>/<path> (public reads), POST /q/in (offline delivery)
 
     const watchSpace = (sid) => (typeof qu.watch === 'function' ? qu.watch({ space: { sid } }) : undefined);
 
@@ -84,6 +96,66 @@ export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota
         ctx.stop();
       }
     });
+    // --- open spaces: moderation records, applied blind ------------------------
+    const mods = new Map(); // sid -> {open, openHlc, bans: {alias: {ban, hlc}}}
+    async function modOf(sid) {
+      if (!mods.has(sid)) mods.set(sid, (await storage.get(`mirror/mod/${sid}`)) ?? { open: false, openHlc: '', bans: {} });
+      return mods.get(sid);
+    }
+    const hexOf = (key) => (key ? crypto.toHex(key) : null);
+    bus.on('qu.envelope.stored', async ({ sid, header, bytes, ws }) => {
+      if (header.visibility !== 'public') return;
+      const inner = readPublic(bytes);
+      if (inner?.p !== '_mod' || typeof inner.k !== 'string' || typeof inner.h !== 'string' || !/^\d{13}-[0-9a-f]{4}$/.test(inner.h)) return;
+      const state = env.keyring.state(sid);
+      const owner = hexOf(state?.owner);
+      const admin = header.author === owner || (state?.admins.list ?? []).some((a) => hexOf(a) === header.author);
+      const mod = await modOf(sid);
+      if (inner.k === 'open' && header.author === owner && inner.h >= mod.openHlc) {
+        mod.open = inner.v?.open === true && !inner.d;
+        mod.openHlc = inner.h;
+      } else if (inner.k.startsWith('ban:') && admin) {
+        const alias = inner.k.slice(4);
+        if ((mod.bans[alias]?.hlc ?? '') > inner.h) return;
+        mod.bans[alias] = { ban: inner.v?.ban === true && !inner.d, hlc: inner.h };
+      } else return;
+      ws.set(`mirror/mod/${sid}`, mod);
+    });
+    const buckets = new Map();
+    function overRate(key, t) {
+      let b = buckets.get(key);
+      if (!b) {
+        if (buckets.size >= 50_000) buckets.clear(); // bounded; a reset only forgives
+        buckets.set(key, (b = { tokens: openRate.burst, at: t }));
+      }
+      b.tokens = Math.min(openRate.burst, b.tokens + ((t - b.at) / 1000) * openRate.rate);
+      b.at = t;
+      if (b.tokens < 1) return true;
+      b.tokens -= 1;
+      return false;
+    }
+    bus.on('qu.envelope.accept', async ({ header, id, bytes }, ctx) => {
+      const mod = mods.get(header.sid) ?? (await modOf(header.sid));
+      const ban = mod.bans[header.author];
+      if (!ban?.ban && !mod.open) return;
+      if (readPublic(bytes)?.t === GC_TYPE) return; // drop lists free space
+      if (await storage.has(`rec/${header.sid}/${id}`)) return;
+      // written after the ban (minute resolution; the members check the exact time)
+      if (ban?.ban && header.ts > parseHlc(ban.hlc).ms) {
+        ctx.reason = 'banned';
+        return ctx.stop();
+      }
+      if (!mod.open || !openRate) return;
+      const state = env.keyring.state(header.sid);
+      if (header.author === hexOf(state?.owner) || (state?.admins.list ?? []).some((a) => hexOf(a) === header.author)) return;
+      const t = Date.now();
+      if (header.ts < t - 10 * 60_000) return; // backlog from a member's sync, not a fresh write
+      if (overRate(`${header.sid}/${header.author}`, t)) {
+        ctx.reason = 'rate';
+        ctx.stop();
+      }
+    });
+
     // usage moves with the envelope's own write set: + the envelope, - what its drop list removed
     bus.on('qu.envelope.stored', ({ sid, bytes, ws }) => {
       ws.locked(async () => {

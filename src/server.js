@@ -32,6 +32,7 @@ const LOGGED = {
   'mirror.grant': ({ sid, changed }) => ({ sid, changed: changed?.join(',') }),
   'mirror.quota': ({ sid }) => ({ sid }),
   'mirror.full': ({ spaces }) => ({ spaces }),
+  'push.failed': ({ reason }) => ({ reason }),
   'sync.done': ({ peer, sid, sent, received }) => (sent || received ? { peer, sid, sent, received } : null),
   'bus.error': ({ topic, error }) => ({ topic, error: error?.message ?? String(error) }),
 };
@@ -49,11 +50,12 @@ const formatJson = (event, fields) => JSON.stringify({ time: new Date().toISOStr
  *   quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null,
  *   rate?: number, statsToken?: string, maxConnections?: number, maxBufferedBytes?: number,
  *   log?: (line: string) => void, logFormat?: 'text'|'json', extra?: Array<string|[string, object]|Function>,
- *   devtools?: boolean, handleSignals?: boolean,
+ *   devtools?: boolean, handleSignals?: boolean, push?: boolean|{subject?: string, minIntervalMs?: number}|null,
  * }} [options]
  *   `rate`: inbound frames per second and connection (burst 2x, bytes 1 MiB/s); 0 disables.
  *   `statsToken`: installs the stats plugin and serves /stats + /metrics to requests carrying it.
  *   `handleSignals`: close gracefully on SIGINT/SIGTERM and exit.
+ *   `push`: Web Push for closed apps (push-relay.js); `subject` is the contact push services want.
  * @returns {Promise<{qu: object, port: number, spaces: string[], close: () => Promise<void>}>}
  */
 export async function createRelay({
@@ -74,6 +76,7 @@ export async function createRelay({
   extra = [],
   devtools = true,
   handleSignals = false,
+  push = null,
 } = {}) {
   const limiter = rate > 0 ? [['limits', { frames: { rate, burst: 2 * rate } }]] : [];
   const statistics = statsToken ? ['stats'] : [];
@@ -88,6 +91,7 @@ export async function createRelay({
       ['sync', { role: 'mirror' }],
       ['mirror', { allow, quota, maxSpaces, ...(maxEnvelopeBytes ? { maxEnvelopeBytes } : {}) }],
       ...tools,
+      ...(push ? [['push-relay', push === true ? {} : push]] : []),
       ...extra,
     ],
     transports: [['ws-server', { port, host, static: dir, statsToken, maxConnections, maxBufferedBytes, ready: () => mirrorReady }]],

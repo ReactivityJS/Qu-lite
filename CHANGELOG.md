@@ -96,6 +96,23 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Background**: plugin `background`: `qu.background.progress()` and `qu.sync.progress` show
+  what the outbox still holds. With a service worker, Background Sync delivers it after the tab
+  was closed (Chromium; `POST /q/in`). Otherwise the screen is kept on as a fallback. The wake
+  lock is shared (`awakeOf()`); `blobs` keeps it for uploads only without Background Sync.
+- **Push**: relay plugin `push-relay` (`createRelay({ push })`, `--push`) and client plugin `push`.
+  Web Push without payload (VAPID only), so no content passes through push services. The service
+  worker asks the relay what woke it. Only records under chosen paths wake a device, and never
+  the device's own or one that is connected; pushes are throttled. `qu.push.ring()` sends calls
+  as urgent pushes. Subscribe and ring are signed with the epoch write key.
+- **Service worker helper** `@qu/lite/sw` / `dist/qu-sw.js` (~3 KB gzip): Background Sync,
+  notifications, opening the app (`?qu-space=` / `?qu-call=`, `qu.push.open`).
+- **Public reads**: `GET /q/<sid>/<path>` at the relay and `fetchPublic()` / `publicLink()` for
+  readers without membership. Every record is verified (grants plus both signatures).
+- **Open spaces**: `createGroup({ open: true })`; `m.link()` (an invite without token; read-only in
+  a closed group), `m.ban()` / `unban()` as public `_mod` records enforced by members and relay,
+  and a per-author rate limit for fresh writes at the relay (`openRate`).
+- HTTP routes for plugins (`route()`, net/http.js).
 - **TypeScript declarations** for all entry points (`npm run types`, run on `npm pack`; `types/` is
   generated, not committed). `createClient()`/`createPeer()` return `Qu` with typed plugin members
   (`write<V>`, `query<V>`, `members`, `status`, `device`, `dev`, …). Option JSDoc completed where it

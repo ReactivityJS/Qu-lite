@@ -10,11 +10,12 @@
  *                       [--allow sid1,sid2] [--static ./web] [--quiet] [--log-format text|json]
  *                       [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate frames/s]
  *                       [--stats-token SECRET] [--max-spaces N] [--max-connections N] [--repl]
+ *                       [--push mailto:ops@example.org]
  *
  * Environment: QU_PORT / QU_HOST / QU_DB / QU_ALLOW / QU_STATIC /
  * QU_QUOTA_RECORDS / QU_QUOTA_BYTES / QU_MAX_ENVELOPE / QU_RATE (0 = no rate limit) /
  * QU_STATS_TOKEN (enables /stats and /metrics for requests with this token) / QU_MAX_SPACES /
- * QU_MAX_CONNECTIONS / QU_LOG_FORMAT.
+ * QU_MAX_CONNECTIONS / QU_LOG_FORMAT / QU_PUSH (contact for Web Push; enables push, push-relay.js).
  * Every QU_X can also come from a file named by QU_X_FILE (Docker/Swarm
  * secrets: QU_STATS_TOKEN_FILE=/run/secrets/qu_stats_token); the file wins.
  * Its identity and network id live in the database, so clients can resume
@@ -67,6 +68,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       'max-spaces': { type: 'string', default: env('QU_MAX_SPACES') ?? '' },
       'max-connections': { type: 'string', default: env('QU_MAX_CONNECTIONS') ?? '' },
       repl: { type: 'boolean', default: false },
+      push: { type: 'string', default: env('QU_PUSH') ?? '' },
     },
   });
   const relay = await createRelay({
@@ -87,6 +89,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     logFormat: args['log-format'] === 'json' ? 'json' : 'text',
     log: args.quiet ? () => {} : console.log,
     handleSignals: true,
+    push: args.push ? { subject: args.push } : null,
   });
   if (args.repl) {
     const { start } = await import('node:repl');

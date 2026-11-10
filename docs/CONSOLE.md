@@ -186,6 +186,19 @@ Hintergrund offline) oder `status(group)` nur für sichtbare Gruppen öffnen.
 Am Relay stehen dieselben Zahlen in `/metrics` (`qu_lite_traffic_bytes_total{direction, type}`) und in
 `/stats` (`traffic.byType`).
 
+## Hintergrund und Push
+
+```js
+await qu.background.progress()     // {records, bytes} – was noch zum Relay muss
+qu.background.backgroundSync       // true: Background Sync; false: Wake Lock als Rückfall
+qu.awake?.reasons                  // warum der Bildschirm gerade an bleibt
+qu.push.opened                     // {sid, kind}, wenn eine Benachrichtigung die App geöffnet hat
+qu.dev.trace('qu.push.**')
+```
+
+Am Relay: `qu.pushRelay.size()` (gespeicherte Push-Abos), `dev.trace('push.**')` (`push.sent {status}`,
+`push.failed`).
+
 ## Geräte-Backup und Speicher
 
 ```js

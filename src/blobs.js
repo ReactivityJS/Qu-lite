@@ -34,6 +34,7 @@
  *
  * Needs `records()`; uses `sync()` (fetching, upload tracking).
  */
+import { awakeOf } from './awake.js';
 import * as crypto from './crypto.js';
 
 const PREFIX = '_blob-';
@@ -73,41 +74,15 @@ export function blobs({ chunkSize = 64 * 1024, maxBytes = 64 * 1024 * 1024, keep
       return new Uint8Array(await data.slice(start, end).arrayBuffer());
     }
 
-    // --- keeping the device awake while transfers run ---------------------
-    let lock = null;
-    let requesting = false;
-    let connected = 0;
-    const busy = () => uploads.size + downloads.size > 0 && connected > 0;
-    bus.on('net.peer.up', () => {
-      connected++;
-      holdAwake();
-    });
-    bus.on('net.peer.down', () => {
-      connected = Math.max(0, connected - 1);
-      holdAwake();
-    });
-    async function holdAwake() {
-      if (!keepAwake || !wakeLock) return;
-      if (busy() && !lock && !requesting && globalThis.document?.visibilityState !== 'hidden') {
-        requesting = true;
-        try {
-          lock = await wakeLock.request('screen');
-          lock.addEventListener?.('release', () => (lock = null));
-          if (!busy()) await release();
-        } catch {
-          lock = null; // denied (battery saver, not visible): the sync still runs while the page is open
-        } finally {
-          requesting = false;
-        }
-      } else if (!busy() && lock) await release();
-    }
-    async function release() {
-      const held = lock;
-      lock = null;
-      await held?.release?.().catch(() => {});
-    }
-    // the system drops the lock when the page is hidden; take it again on return
-    globalThis.document?.addEventListener?.('visibilitychange', () => holdAwake());
+    // --- keeping the device awake while transfers run (awake.js) -----------
+    // Uploads need it only without Background Sync (background.js): with it, a
+    // closed page still delivers the outbox. Downloads always need it.
+    const awake = keepAwake ? awakeOf(qu, { wakeLock }) : null;
+    const holdAwake = async () => {
+      if (!awake) return;
+      await awake.set('blobs:down', downloads.size > 0);
+      await awake.set('blobs:up', uploads.size > 0 && !qu.background?.backgroundSync);
+    };
     if (warnOnUnload) {
       globalThis.addEventListener?.('beforeunload', (event) => {
         if (!uploads.size) return; // unfinished uploads, connected or not: they only live on this device
@@ -349,7 +324,7 @@ export function blobs({ chunkSize = 64 * 1024, maxBytes = 64 * 1024 * 1024, keep
       ...[...downloads.values()].map((d) => ({ space: d.sid, blob: d.blob, direction: 'down', done: d.done, total: d.total })),
     ];
 
-    const api = { put, get, has, del, pending, ready: restored, path: pathOf, get awake() { return lock !== null; } };
+    const api = { put, get, has, del, pending, ready: restored, path: pathOf, get awake() { return awake?.held ?? false; } };
     qu.blobs = api;
     return api;
   };

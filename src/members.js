@@ -38,6 +38,19 @@
  * to reopen a group) and `members/keys/<sid>/<epoch>` (epoch keys this
  * device holds) - so a reload keeps every group and every epoch.
  *
+ * OPEN SPACES (forum, comments, public chat room): `createGroup({open: true})`.
+ * Anyone with the link (`m.link()`, an invite without token) may write - no
+ * member entry needed. Moderation instead of membership, as PUBLIC records
+ * under `_mod` (public so the relay can enforce them blind, mirror.js):
+ *   _mod/open          {open: true}         written by the owner (marks the space open)
+ *   _mod/ban:<alias>   {ban: true|false}    written by the owner or an admin
+ * A banned alias's records written after the ban are refused by every member
+ * and by the relay; what it wrote before stays unless deleted (`qu.del`, an
+ * admin may drop anyone's records - gc.js). `remove()` bans in an open space
+ * (a new epoch would be pointless: the link is public). Without
+ * `open`, the same link is a READ-ONLY link: its holder reads, but every
+ * record it writes is deferred forever (no member entry).
+ *
  * Removing a member: role -> removed, new epoch (space.rotate), key boxes
  * for everyone else in `_keys`, grant announced to mirrors. The removed
  * member cannot read anything sealed afterwards and - since epochs are
@@ -52,6 +65,7 @@ const MEMBERS = '_members';
 const GRANTS = '_grants';
 const KEYS = '_keys';
 const RECEIPTS = '_receipts/';
+const MOD = '_mod';
 const ACTIVE = new Set(['owner', 'admin', 'member']);
 const BOX_SIZE = 32 + 12 + 32 + 16; // ephemeral pub + iv + 32-byte key + GCM tag
 const enc = new TextEncoder();
@@ -115,6 +129,10 @@ export function members({ pad = 8 } = {}) {
       /** @type {Map<string, {role: string, xpub: string, identity?: string, name?: string, verified: boolean, tokenId?: string, removedAt?: string}>} */
       const list = new Map();
       const me = crypto.toHex((await space.authorFor(identity)).publicKey);
+      // open space and bans (`_mod`), newest record per key wins
+      let open = false;
+      const bans = new Map(); // alias -> hlc of the ban
+      const modHlc = new Map();
       const myX = await space.aliasX(identity);
       let reindexTimer = null;
 
@@ -165,9 +183,25 @@ export function members({ pad = 8 } = {}) {
         return false;
       }
 
+      function applyMod(record) {
+        const key = record.key ?? '';
+        if ((modHlc.get(key) ?? '') > record.hlc) return false;
+        if (key === 'open') {
+          if (record.author !== space.ownerId) return false;
+          open = record.value?.open === true && !record.deleted;
+        } else if (key.startsWith('ban:')) {
+          if (!isAdmin(record.author)) return false;
+          if (record.value?.ban === true && !record.deleted) bans.set(key.slice(4), record.hlc);
+          else bans.delete(key.slice(4));
+        } else return false;
+        modHlc.set(key, record.hlc);
+        return true;
+      }
+
       async function onRecord(record) {
         let changed = false;
-        if (record.path === MEMBERS) {
+        if (record.path === MOD) changed = applyMod(record);
+        else if (record.path === MEMBERS) {
           await applyMember(record);
           changed = true;
         } else if (record.path === GRANTS) changed = await applyGrants(record);
@@ -188,6 +222,7 @@ export function members({ pad = 8 } = {}) {
       if (space.latestEpoch > space.epoch) space.useEpoch();
       for (const r of await qu.query({ space, path: MEMBERS })) await applyMember(r);
       for (const r of await qu.query({ space, path: KEYS })) await applyKeys(r);
+      for (const r of await qu.query({ space, path: MOD })) applyMod(r);
       bus.on(`qu.record.${sid}`, onRecord);
 
       /** @param {number} at - when the entry was written (its HLC, or now for a local write) */
@@ -206,9 +241,15 @@ export function members({ pad = 8 } = {}) {
         const author = record.author;
         if (author === space.ownerId) return 'ok';
         const entry = list.get(author);
+        if (record.path === MOD) {
+          if (record.key === 'open') return 'not allowed';
+          return isAdmin(author) ? 'ok' : 'defer'; // the admin list may not have arrived yet
+        }
+        if (bans.has(author) && record.hlc > bans.get(author)) return 'banned';
         if (record.path === MEMBERS) {
           if (isAdmin(author)) return 'ok';
           if (record.key !== author) return 'not allowed';
+          if (!entry && open && record.value?.role === 'member') return 'ok'; // open: a profile without invite
           if (entry) {
             if (entry.role === 'removed') return 'removed';
             return record.value?.role === entry.role ? 'ok' : 'role change not allowed';
@@ -219,7 +260,7 @@ export function members({ pad = 8 } = {}) {
         if (record.path === GRANTS || record.path === KEYS) return isAdmin(author) ? 'ok' : 'defer';
         // drop lists: any active member; each entry is authorised by the blind layer (gc.js mayDrop)
         if (record.type !== GC_TYPE && record.path.startsWith(RECEIPTS) && record.key !== author) return 'not your receipt';
-        if (!entry) return 'defer';
+        if (!entry) return open ? 'ok' : 'defer';
         if (entry.role === 'removed' && record.hlc > entry.removedAt) return 'removed';
         return 'ok';
       }
@@ -227,10 +268,16 @@ export function members({ pad = 8 } = {}) {
       async function checkLocal(draft) {
         if (me === space.ownerId) return;
         const entry = list.get(me);
+        if (draft.path === MOD) {
+          if (draft.key === 'open' || !isAdmin(me)) throw new Error('members: moderation is for admins');
+          return;
+        }
+        if (bans.has(me)) throw new Error('members: you are banned from this space');
         if (draft.path === MEMBERS) {
           if (isAdmin(me)) return;
           if (draft.key !== me) throw new Error('members: only admins can change other members');
           if (entry && draft.value?.role !== entry.role) throw new Error('members: you cannot change your own role');
+          if (!entry && open && draft.value?.role === 'member') return;
           if (!entry) {
             const verdict = await validToken(draft.value?.token, draft.value?.role, me, qu.clock.now());
             if (verdict === 'invite expired') throw new Error('members: this invite has expired - ask for a new one');
@@ -243,6 +290,7 @@ export function members({ pad = 8 } = {}) {
           return;
         }
         if (draft.type !== GC_TYPE && draft.path.startsWith(RECEIPTS) && draft.key !== me) throw new Error('members: receipts only under your own alias');
+        if (open && !entry) return;
         if (!entry || !ACTIVE.has(entry.role)) throw new Error('members: not an active member of this space');
       }
 
@@ -259,6 +307,42 @@ export function members({ pad = 8 } = {}) {
         list: () => [...list].map(([alias, e]) => ({ alias, role: e.role, xpub: e.xpub, identity: e.identity, name: e.name, verified: e.verified, me: alias === me })),
         role: (alias = me) => list.get(alias)?.role ?? null,
         isAdmin: (alias = me) => isAdmin(alias),
+        /** true: anyone with the link may write (`createGroup({open: true})`) */
+        get open() {
+          return open;
+        },
+        /** @returns {string[]} banned aliases */
+        bans: () => [...bans.keys()],
+
+        /**
+         * A link without invite token (admin only): in an OPEN space it lets anyone
+         * write; otherwise it is READ-ONLY (records of its holder are never accepted).
+         * Publish it as you like - it carries the space's keys.
+         */
+        async link() {
+          requireAdmin();
+          const grants = await space.grants();
+          return {
+            type: 'invite',
+            secret: b64(space.secret),
+            owner: space.ownerId,
+            epochs: grants.filter((g) => g.epoch > 0).map((g) => ({ grant: encodeGrant(g), key: b64(space.epochKeys(g.epoch).key) })),
+            admins: grants.filter((g) => g.kind === 'admins').map(encodeGrant),
+            ...(open ? { open: true } : {}),
+          };
+        },
+
+        /** Admin: refuse everything this alias writes from now on (members and relay). */
+        async ban(alias) {
+          requireAdmin();
+          if (alias === space.ownerId || isAdmin(alias)) throw new Error('members: the owner and admins cannot be banned');
+          await qu.write(space, MOD, { ban: true }, { key: `ban:${alias}`, visibility: 'public' });
+        },
+        /** Admin: lift a ban. */
+        async unban(alias) {
+          requireAdmin();
+          await qu.write(space, MOD, { ban: false }, { key: `ban:${alias}`, visibility: 'public' });
+        },
 
         /** Founder only: the owner's own entry. */
         async found() {
@@ -330,6 +414,10 @@ export function members({ pad = 8 } = {}) {
         /** Admin: remove a member and move everyone else to a new epoch. */
         async remove(alias) {
           requireAdmin();
+          if (open) {
+            await api.ban(alias); // the link is public: a new epoch would change nothing
+            return space.epoch;
+          }
           const entry = list.get(alias);
           if (!entry) throw new Error('members: unknown member');
           if (alias === space.ownerId) throw new Error('members: the owner cannot be removed');
@@ -373,10 +461,11 @@ export function members({ pad = 8 } = {}) {
     const rawEntry = (e) => ({ ...e.raw });
 
     /** A new group founded by this identity (joined, owner entry written). */
-    async function createGroup(options = {}) {
+    async function createGroup({ open = false, ...options } = {}) {
       const space = qu.join(await Space.create(identity), options);
       await keepGroup(space);
       await (await manager(space)).found();
+      if (open) await qu.write(space, MOD, { open: true }, { key: 'open', visibility: 'public' });
       if (typeof qu.watch === 'function') await qu.watch({ space });
       return space;
     }

@@ -70,6 +70,13 @@ export interface MembersManager {
   promote(alias: string, role: 'member' | 'admin'): Promise<unknown>;
   remove(alias: string): Promise<number>;
   rotate(): Promise<number>;
+  /** anyone with the link may write (`createGroup({ open: true })`) */
+  readonly open: boolean;
+  bans(): string[];
+  /** an invite without token: write access in an open space, read-only otherwise */
+  link(): Promise<Invite>;
+  ban(alias: string): Promise<void>;
+  unban(alias: string): Promise<void>;
   [method: string]: any;
 }
 
@@ -135,6 +142,26 @@ export interface TransportApi {
   [member: string]: any;
 }
 
+export interface BackgroundApi {
+  /** what the outbox still holds */
+  progress(): Promise<{ records: number; bytes: number }>;
+  /** resolves with `backgroundSync` once known */
+  ready: Promise<boolean>;
+  /** true: Background Sync delivers the outbox; false: wake lock fallback; null: not known yet */
+  readonly backgroundSync: boolean | null;
+  readonly awake: boolean;
+}
+
+export interface PushApi {
+  /** set when the app was opened from a notification */
+  readonly opened: { sid: string; kind: 'call' | 'message' } | null;
+  supported(): boolean;
+  enable(spaces: Space[], options?: { labels?: Record<string, string>; paths?: string[] | null }): Promise<string[]>;
+  disable(spaces?: Space[]): Promise<void>;
+  labels(map: Record<string, string>): Promise<void>;
+  ring(space: Space, options?: { kind?: 'call' | 'message' }): Promise<number>;
+}
+
 export interface DevTools {
   help(): void;
   info(): { peerId: string; publicKey: string | null; plugins: string[]; mounts: string[]; links: number; uptime: number; closed: boolean };
@@ -164,7 +191,7 @@ export interface Qu extends Kernel {
   get<V = unknown>(space: Space, path: string, key: string): Promise<V | null>;
   query<V = unknown>(options: QueryOptions): Promise<QuRecord<V>[]>;
   // members
-  createGroup(): Promise<Space>;
+  createGroup(options?: { open?: boolean; mirror?: boolean }): Promise<Space>;
   members(space: Space): Promise<MembersManager>;
   acceptInvite(invite: Invite): Promise<Space>;
   restoreGroups(): Promise<Space[]>;
@@ -181,6 +208,13 @@ export interface Qu extends Kernel {
   status: ((space: Space) => Promise<StatusTracker>) & { setHidden(hidden: boolean): void; isHidden(): boolean };
   // device, devtools, transports
   device: DeviceApi;
+  /** plugin `background` */
+  background: BackgroundApi;
+  /** plugin `push` */
+  push: PushApi;
+  /** delete a record (or a keyed entry) - own ones, or anyone's as admin (plugin `compaction`) */
+  del(space: Space, recordOrId: QuRecord | string): Promise<void>;
+  del(space: Space, path: string, key: string): Promise<void>;
   dev: DevTools;
   transports: Record<string, TransportApi>;
   /** the root store driver */

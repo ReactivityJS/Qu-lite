@@ -15,3 +15,4 @@ export { Bus } from './bus.js';
 export { Space } from './space.js';
 export { memoryDriver } from './drivers/memory.js';
 export { PROTOCOL_VERSION } from './net/link.js';
+export { fetchPublic, publicLink } from './public.js';
