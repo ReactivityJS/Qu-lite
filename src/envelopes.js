@@ -387,7 +387,7 @@ export function envelopes({ acceptGrants = false } = {}) {
         } catch (error) {
           if (error.gone) return finish({ sid, id, status: 'gone' });
           await bus.notify('qu.record.failed', { from, space: sid, id, reason: error.message });
-          return finish({ sid, id, status: 'failed', reason: error.message });
+          return finish({ sid, id, status: 'failed', reason: error.message, ...(error.code ? { code: error.code } : {}) });
         }
         await ws.settle();
         if (dropped.length) {

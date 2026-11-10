@@ -25,6 +25,7 @@ import * as crypto from './crypto.js';
 import { createQu } from './qu.js';
 import { Registry } from './registry.js';
 import { memoryDriver } from './drivers/memory.js';
+import { checkFormat } from './format.js';
 
 /** A factory that imports its module on first use. */
 const lazy = (load, pick) => async (options) => (await load())[pick](options);
@@ -50,6 +51,9 @@ export function defaultRegistry() {
     .register('plugin', 'devtools', lazy(() => import('./devtools.js'), 'devtools'))
     .register('plugin', 'device', lazy(() => import('./device.js'), 'device'))
     .register('plugin', 'background', lazy(() => import('./background.js'), 'background'))
+    .register('plugin', 'live', lazy(() => import('./live.js'), 'live'))
+    .register('plugin', 'schema', lazy(() => import('./schema.js'), 'schema'))
+    .register('plugin', 'archive', lazy(() => import('./archive.js'), 'archive'))
     .register('plugin', 'push', lazy(() => import('./push.js'), 'push'))
     .register('plugin', 'push-relay', lazy(() => import('./push-relay.js'), 'pushRelay'))
     .register('plugin', 'topology', lazy(() => import('./net/topology.js'), 'topology'))
@@ -83,6 +87,8 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  *   `code` 'QU_LOCKED' / 'QU_WRONG_PASSPHRASE').
  *   `unlock`: open the identity with a security key or passkey (keys.js): a
  *   tresor on this device, or - on a new device - the one at `relay`.
+ *   The store's format is checked first (format.js): older data is migrated,
+ *   data of a newer version is refused with `code` 'QU_FORMAT_NEWER'.
  *   A transport whose API has a `ready` promise (a server binding its port)
  *   is awaited, so a failure surfaces here and not later.
  * @returns {Promise<import('./qu-types.js').Qu>}
@@ -93,6 +99,7 @@ export async function createPeer({ registry = defaultRegistry(), store = 'memory
 
   let qu = null;
   try {
+    await checkFormat(root); // qu/format: migrate older data, refuse data of a newer version (format.js)
     if (restore) {
       await (await import('./device.js')).restoreInto(root, { ...restore, lockPassphrase: passphrase });
       identity = 'persisted';

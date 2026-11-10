@@ -710,7 +710,7 @@ WebAuthn; `relay` is where tresors go (default: the relay transport's url).
 | `qu.device.persist() → boolean \| null` | `navigator.storage.persist()` (may prompt); `null` where unsupported; `qu.device.persist {granted}` |
 | `qu.device.status() → {persisted, usage, quota, backupAt, groups, locked, keys, keyLocked}` | `null` for what the runtime cannot tell |
 | `qu.device.addKey({name?, kind?, lock?, rpName?}) → {id, synced}` | registers a security key (YubiKey: USB, NFC) or passkey that unlocks this identity, here and on other devices; one tap (two on keys without PRF on creation). `kind`: `'security-key'` \| `'passkey'` (default: the browser offers both). `lock: true`: this device keeps no usable identity, every start needs the key. `synced`: the relay holds the tresor. Call from a click |
-| `qu.device.keys() → [{id, name, created}]` | registered keys |
+| `qu.device.keys() → [{id, name, type, transports, model, created}]` | registered keys. `type`: `'security-key'` \| `'passkey'`, `transports`: e.g. `['usb', 'nfc']`, `['internal', 'hybrid']`, `model`: the AAGUID (when the browser tells; the community list *passkey-authenticator-aaguids* maps it to a name). Without `name` at `addKey`, a label like `Security key (USB, NFC)` or `Passkey (Google Password Manager)` |
 | `qu.device.removeKey(id)` | the key no longer opens the tresor (here and at the relay); the last key of a key-locked device stores the identity plain again |
 | `qu.device.lock(passphrase)` / `changePassphrase(old, new)` / `removeLock(passphrase)` | identity lock at runtime (see below) |
 
@@ -755,6 +755,9 @@ How it works:
   tresor is re-sealed when group or epoch keys change (`qu.device.vault {synced}`).
 - **Credentials:** discoverable (resident), so no user name is needed. They are bound to the
   page's host (`rpId`): use one address for all devices.
+- **No dead entries:** a credential without PRF (`QU_KEY_UNSUPPORTED`) and a removed key are
+  reported to the browser (`PublicKeyCredential.signalUnknownCredential`, newer browsers), so the
+  user's passkey manager can drop them.
 
 ## devtools
 
@@ -1016,6 +1019,112 @@ Low-level hooks used by the blind layer are `qu.envelope.accept`, `qu.envelope.s
 
 ---
 
+## live
+
+`qu.use(live({ delayMs = 16 }))`, or `createClient({ extra: ['live'] })` – a query that answers again
+whenever its result may have changed. It is a thin wrapper around `qu.query()` and the record events.
+
+```js
+const stop = qu.live({ space, path: 'chat', limit: 50, reverse: true }, (rows) => render(rows));
+qu.live({ space, path: 'events', where: { start: { gte: monday } }, orderBy: 'start' }, (rows) => calendar(rows));
+stop();
+```
+
+`render(rows)` runs once at once and again after records of that space and path arrive, change, are
+deleted or dropped:
+
+- **Coalesced:** a burst of records re-runs the query once (`delayMs`).
+- **Only on change:** `render` runs only if the ids or versions of the result changed.
+- **Errors:** they go to `onError` (third argument `{onError}`; default `bus.error`), and the
+  subscription stays.
+- **Closing the peer** stops every subscription.
+
+React, for example:
+
+```js
+function useQu(query) {
+  const [rows, setRows] = useState([]);
+  useEffect(() => qu.live(query, setRows), [JSON.stringify(query)]);
+  return rows;
+}
+```
+
+## schema
+
+`qu.use(schema(rules))`, or `createClient({ extra: [['schema', rules]] })` – what may be stored under a
+path. Rules are checked when writing on this device (the write throws `QU_INVALID`) **and** when records
+of other devices arrive (refused: `qu.record.rejected {reason: 'invalid: …'}`, never indexed).
+
+```js
+qu.use(schema({
+  chat: 'string',                                                     // the value itself
+  events: { title: 'string', start: 'number', tags: 'string[]?', 'place.city': 'string?' },
+  'files/': { name: 'string', size: 'number' },                       // trailing /: every sub-path
+  scores: (value, record) => value.points >= 0 || 'points must not be negative',
+}));
+qu.schema('polls', { question: 'string', options: 'string[]' });       // later
+```
+
+A rule is one of:
+
+- a **type**: `string`, `number`, `boolean`, `object`, `array`, `any`; `[]` means an array of that
+  type, `?` means it may be missing or null;
+- a **shape**: field → type, where dots reach into nested objects and extra fields are allowed;
+- a **function**: returns `true`, `false` or a reason.
+
+Paths without a rule, internal paths (`_…`) and deletions are not checked. Records stored before a
+rule existed are not checked again.
+
+## archive
+
+`qu.use(archive())`, or `createClient({ extra: ['archive'] })` – spaces as one file, for backup, a
+move to another relay, an offline copy, or handing a group's history over.
+
+```js
+const file = await qu.archive.export({ spaces: [group] });       // Uint8Array; default: every space held here
+const all  = await qu.archive.export({ passphrase });            // + identity and keys (a device backup)
+await qu.archive.download({ passphrase });                       // browser: as a file
+
+// elsewhere
+const { backup } = readArchive(all);
+const qu = await createClient({ url, restore: { backup, passphrase }, extra: ['archive'] });
+await qu.archive.import(all);          // {spaces, stored, duplicate, rejected}; opens the restored groups first
+```
+
+What an archive holds:
+
+- **Contents:** the sealed envelopes as stored (still encrypted and signed) and each space's grants.
+  With `passphrase` it also holds a device backup (PBKDF2 + AES-GCM). Without a passphrase nobody
+  without the keys can read it.
+- **On import:** every grant and envelope is verified as if it came from the network, with
+  signatures, quotas and rules. A changed envelope is rejected.
+- **Where:** on clients and on relays (moving a relay: export there, import into the new one).
+- **Format:** `QUARCH1\n`, u32 header length, header JSON `{v, created, backup?, spaces: [{sid,
+  grants, count}]}`, then the envelopes (`packEnvelopes`). `readArchive(bytes)` reads it without
+  importing.
+
+## Storage format and a full disk
+
+**Format version** (always on, one read at start; `format.js`): the store carries `qu/format`.
+
+- New or older stores get the current version.
+- Older data is migrated step by step (`MIGRATIONS`; none yet). The marker moves only after each
+  step finished.
+- Data of a **newer** app version is refused with `QU_FORMAT_NEWER`, so an old app never
+  overwrites converted data.
+
+**Storage full:** a write that fails because the disk or the browser quota is used up (IndexedDB
+`QuotaExceededError`, SQLite `SQLITE_FULL`, `ENOSPC`) notifies `qu.storage.full {keys, reason}` (at most
+every 10 s) and throws `QU_STORAGE_FULL`. Nothing half-written stays behind: a write set is atomic.
+
+```js
+qu.bus.on('qu.storage.full', async () => {
+  const { usage, quota } = await qu.device.status();
+  warn(`Storage full (${usage} of ${quota} bytes) - delete old files or allow more storage`);
+  await qu.device.persist();
+});
+```
+
 ## Caches and memory
 
 Every cache is **RAM only**: nothing of it is written to storage or sent, so caching costs no
@@ -1069,7 +1178,10 @@ These are exported for tools, tests and custom plugins. Apps rarely need them.
 - **Device**: `BACKUP_ITERATIONS` (PBKDF2 rounds of backups, 600,000); `unlockWithKey(store, options)`
   (what `createPeer({ unlock })` calls).
 - **Security keys** (`keys.js`): `registerKey(options)`, `keySecret(options)` → `{id, secret}` (one tap
-  each), `sealVault`, `openVault`, `wrapFor`, `vaultClient(relay)` (`get`/`put` of a tresor at the relay).
+  each), `sealVault`, `openVault`, `wrapFor`, `vaultClient(relay)` (`get`/`put` of a tresor at the relay),
+  `describeCredential(credential)` → `{type, transports, model, label}`.
+- **Format**: `FORMAT`, `checkFormat(store, {migrations?, format?})`. **Schema**: `compileRule(rule)`.
+  **Archive**: `readArchive(bytes)`.
 - **Drop lists**: `GC_HORIZON_MS`, `gcCutoff(now)`, `encodeEntries`, `decodeEntries`, `mayDrop`.
 - **Traffic by type**: `netOf(qu).traffic` (Map type -> `{framesIn, bytesIn, framesOut, bytesOut}`, all links
   since `trafficSince`, unknown types as `other`), `FRAME_TYPES` (type -> meaning; from `devtools.js`, so client bundles without devtools skip the texts); `stats` reports it as
@@ -1087,3 +1199,24 @@ Methods throw `Error`s whose message names the module, such as `records: …`, `
 - A write that could not be committed throws `records: write not stored (failed: …)` and is safe to retry.
 - Member rule violations throw, for example `not an active member` or `members: only the owner changes roles`.
 - A plugin installed without its dependencies throws at `qu.use()`, for example `status(): install records() and members() first`.
+
+**Error codes** (`error.code`), for the cases an app should handle on purpose:
+
+| Code | When | What the app does |
+|---|---|---|
+| `QU_LOCKED` | start of a locked identity without passphrase or `unlock` (`error.unlock === 'key'`: a key is needed) | ask for the passphrase or offer "unlock with key" |
+| `QU_WRONG_PASSPHRASE` | wrong passphrase (start, `changePassphrase`, `removeLock`) | ask again |
+| `QU_KEY_CANCELLED` | the user dismissed the key dialog, or it timed out | offer "try again" |
+| `QU_KEY_UNSUPPORTED` | no WebAuthn, or the key/passkey has no PRF | offer passphrase or backup file instead |
+| `QU_KEY_UNKNOWN` | no identity registered for this key at this address | offer "create a new identity" or another key |
+| `QU_KEY_EXISTS` | the key is already registered here | nothing to do |
+| `QU_KEY_FAILED` | relay refused the tresor, damaged tresor | show the message, retry later |
+| `QU_FORMAT_NEWER` | the stored data was written by a newer app version | ask the user to update (never downgrade data) |
+| `QU_STORAGE_FULL` | disk or browser quota used up (also the event `qu.storage.full`) | tell the user, `qu.device.persist()`, free space; the write can be retried |
+| `QU_INVALID` | a write fails its schema rule (`schema` plugin) | show which field is wrong |
+| `QU_ARCHIVE_INVALID` | not an archive, or a damaged one | ask for the right file |
+
+Refusals of records (from relays or members) are not thrown: they arrive as `qu.record.rejected
+{reason}` and, from a relay, as `net.in.<peer>.nack {reason}`. Reasons include `'quota'`, `'rate'`,
+`'banned'`, `'too large'`, `'invalid: …'` and `'removed'`. The outbox keeps refused local records and
+retries them.

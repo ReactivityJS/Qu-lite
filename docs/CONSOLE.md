@@ -282,6 +282,8 @@ Am Relay: `qu.pushRelay.size()` (gespeicherte Push-Abos), `dev.trace('push.**')`
 ## Geräte-Backup und Speicher
 
 ```js
+// Plugin archive (createClient({ …, extra: ['archive'] })): alles als Datei, mit Passphrase inkl. Schlüssel
+await qu.archive.download({ passphrase: 'lange passphrase hier' })
 await qu.device.addKey({ name: 'YubiKey' })  // Sicherheitsschlüssel / Passkey: antippen
 await qu.device.keys()                       // registrierte Keys
 // anderes Gerät, gleiche Adresse:

@@ -96,6 +96,19 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Optional plugins**:
+  - `live`: `qu.live(query, render)`, re-run on changes, coalesced, only when the result differs.
+  - `schema`: rules per path, checked on write (`QU_INVALID`) and on arrival (refused, never indexed).
+  - `archive`: export and import of spaces or a whole user, verified on import; also for moving a relay.
+- **Storage format version** `qu/format` (format.js): older data is migrated, data of a newer
+  version is refused (`QU_FORMAT_NEWER`).
+- **Storage full**: event `qu.storage.full` (throttled) and error code `QU_STORAGE_FULL` for
+  IndexedDB, SQLite and the file system. Records failing to commit carry the code.
+- **Keys**: `keys()` tells the kind, the transports and the model (AAGUID); a default name comes
+  from what the browser reports. Unusable or removed credentials are reported to the browser
+  (`signalUnknownCredential`), so passkey managers keep no dead entries.
+- **Docs**: a table of error codes with the app's reaction, "what the user sees" for keys, and
+  examples for every new plugin.
 - **Security keys and passkeys** (`keys.js`): `qu.device.addKey()` registers a YubiKey (USB, NFC)
   or a passkey via WebAuthn PRF. `createClient({ url, unlock: 'key' })` opens identity and group keys
   on any device with one tap. Nothing is read out of the key; it only wraps the key of a tresor.

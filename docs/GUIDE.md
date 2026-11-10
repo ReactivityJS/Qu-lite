@@ -192,6 +192,22 @@ Lesbares. Bedingungen: Wert (gleich), Array (eines davon), `gt`/`gte`/`lt`/`lte`
 (Suche ohne Groß-/Kleinschreibung). Felder mit Punkt (`'ort.stadt'`) sowie `$value`, `$key` und
 `$author`. Mehr Rezepte je App-Typ: [REZEPTE.md](REZEPTE.md).
 
+**Live-Abfragen** (Plugin `live`, optional): `qu.live(query, render)` ruft `render` sofort und nach jeder
+passenden Änderung erneut auf. Bursts werden gebündelt, und `render` läuft nur, wenn sich das Ergebnis
+wirklich geändert hat. Das passt direkt in React, Vue oder Svelte:
+
+```js
+const qu = await createClient({ url, extra: ['live'] });
+const stop = qu.live({ space: group, path: 'chat', limit: 50, reverse: true }, (rows) => zeige(rows));
+```
+
+**Datenprüfung** (Plugin `schema`, optional): Regeln pro Pfad greifen beim Schreiben **und** beim
+Empfangen. Was ein anderes Gerät falsch oder böswillig schickt, wird abgewiesen und nie angezeigt.
+
+```js
+createClient({ url, extra: [['schema', { events: { title: 'string', start: 'number', tags: 'string[]?' }, chat: 'string' }]] });
+```
+
 **Validierung und Rechte** gehören in Hooks, nicht in die UI – sie gelten dann für lokale *und*
 empfangene Records:
 
@@ -501,6 +517,18 @@ await qu.restoreGroups();                                   // Gruppen öffnen, 
 - **Status für die UI:** `await qu.device.status()` → `{persisted, usage, quota, backupAt, groups, locked, keys, keyLocked}` – z. B.
   „Kein Backup seit 30 Tagen“ oder „Speicher nicht geschützt“ anzeigen.
 
+**Archiv** (Plugin `archive`, optional): Spaces oder einen ganzen Nutzer als Datei sichern und
+wiederherstellen. Ohne Passphrase ist das Archiv für jeden ohne Schlüssel unlesbar; mit Passphrase
+enthält es zusätzlich Identität und Schlüssel. Beim Import wird alles geprüft wie Daten aus dem Netz.
+Damit lässt sich auch ein Relay umziehen.
+
+```js
+await qu.archive.download({ passphrase });                 // alles, als Datei
+const { backup } = readArchive(datei);                     // auf dem neuen Gerät
+const qu = await createClient({ url, restore: { backup, passphrase }, extra: ['archive'] });
+await qu.archive.import(datei);
+```
+
 ### Anmelden mit YubiKey oder Passkey
 
 Statt Backup-Datei und Passphrase: Ein **Sicherheitsschlüssel** (YubiKey per USB am PC, per NFC am
@@ -536,6 +564,25 @@ Einstellungen:
 - **Art des Schlüssels vorgeben:** `kind: 'security-key'` oder `kind: 'passkey'` bei `addKey` und
   `unlock` (ohne Angabe bietet der Browser beides an). Verwalten mit `qu.device.keys()` und
   `qu.device.removeKey(id)`.
+
+**Was der Nutzer sieht:** Die App muss nicht wissen, was benutzt wird. Der Browser zeigt seinen eigenen
+Dialog mit dem, was vorhanden ist, und der Nutzer wählt. Danach steht in `qu.device.keys()`, was es war.
+
+| Nutzer wählt | `type` / `transports` | Name ohne Angabe | Geht? |
+|---|---|---|---|
+| YubiKey am PC (USB) | `security-key` / `usb` | Security key (USB) | ja |
+| YubiKey am Handy (NFC) | `security-key` / `nfc` | Security key (NFC) | iPhone ab iOS 26.4; Android je nach Gerät |
+| eToken FIDO (FIDO2) | `security-key` | Security key (…) | ja, wenn er `hmac-secret` kann. Klassische eTokens (Zertifikat/Smartcard) gehen im Browser nicht |
+| Android-Fingerabdruck, Google Passwortmanager | `passkey` / `internal`, `hybrid` | Passkey (Google Password Manager) | ja |
+| Face ID / Touch ID (iCloud-Schlüsselbund) | `passkey` | Passkey (iCloud Keychain) | ja (iOS/macOS 18+) |
+| Windows Hello | `passkey` / `internal` | Passkey (Windows Hello) | neuere Versionen, vorher testen |
+| anderes Handy per QR-Code | `passkey` / `hybrid` | Passkey (phone) | ja |
+
+Für die Oberfläche reicht ein Knopf „Mit Passkey oder Sicherheitsschlüssel schützen“. Ein eigener
+Knopf „YubiKey“ (`kind: 'security-key'`) lohnt nur, wenn die Zielgruppe gezielt Hardware-Keys nutzt.
+Wählt der Nutzer etwas ohne die nötige Fähigkeit, meldet Qu `QU_KEY_UNSUPPORTED` und bittet den
+Browser, den unbrauchbaren Eintrag wieder zu entfernen. Alle Fehlercodes stehen in
+[API.md](API.md#errors).
 
 Fehler, die die App abfangen sollte:
 

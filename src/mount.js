@@ -64,6 +64,23 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
     return out;
   }
 
+  // A full disk / used-up browser quota: one clear event (throttled) and one error code,
+  // whatever the driver says - IndexedDB, SQLite and the file system all name it differently.
+  let fullAt = 0;
+  const isFull = (e) => e?.name === 'QuotaExceededError' || e?.code === 'ENOSPC' || e?.code === 'SQLITE_FULL' || /quota|disk is full|no space left|SQLITE_FULL/i.test(e?.message ?? '');
+  async function guard(keys, write) {
+    try {
+      return await write();
+    } catch (error) {
+      if (!isFull(error)) throw error;
+      if (Date.now() - fullAt > 10_000) {
+        fullAt = Date.now();
+        bus?.notify('qu.storage.full', { keys: keys.slice(0, 3), reason: error.message });
+      }
+      throw Object.assign(new Error(`storage full: ${error.message}`), { code: 'QU_STORAGE_FULL', cause: error });
+    }
+  }
+
   return {
     /** @param {string} base @param {object} driver */
     mount(base, driver) {
@@ -90,7 +107,7 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
       return (await driver.get(key)) !== null;
     },
     async set(key, value) {
-      const out = await resolve(key).driver.set(key, value);
+      const out = await guard([key], () => resolve(key).driver.set(key, value));
       if (hooks.length) written([key]);
       return out;
     },
@@ -127,8 +144,13 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
       }
       try {
         for (const [{ driver }, group] of groups) {
-          if (typeof driver.batch === 'function') await driver.batch(group);
-          else for (const { op, key, value } of group) await (op === 'set' ? driver.set(key, value) : driver.remove(key));
+          await guard(
+            group.map((o) => o.key),
+            async () => {
+              if (typeof driver.batch === 'function') await driver.batch(group);
+              else for (const { op, key, value } of group) await (op === 'set' ? driver.set(key, value) : driver.remove(key));
+            },
+          );
         }
       } finally {
         // also after a failed batch: part of it may have landed (across mounts) - invalidating too often is harmless

@@ -50,6 +50,42 @@ function fail(error) {
   throw coded(`security key: ${error?.message ?? error}`, 'QU_KEY_FAILED', error);
 }
 const prfOf = (credential) => credential.getClientExtensionResults?.()?.prf;
+
+/** Well-known passkey providers by AAGUID (the rest: by attachment and transports; apps can map `model` further). */
+const PROVIDERS = {
+  'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4': 'Google Password Manager',
+  'fbfc3007-154e-4ecc-8c0b-6e020557d7bd': 'iCloud Keychain',
+  '08987058-cadc-4b81-b6e1-30de50dcbe96': 'Windows Hello',
+  '9ddd1817-af5a-4672-a2b9-3e3dd95000a9': 'Windows Hello',
+  '6028b017-b1d4-4c02-b4b3-afcdafc96bb2': 'Windows Hello',
+};
+/**
+ * What kind of authenticator answered: from the attachment, the transports and
+ * the AAGUID (authenticator data, bytes 37-52; zero when the browser hides it).
+ * @returns {{type: 'security-key'|'passkey'|null, transports: string[], model: string|null, label: string}}
+ */
+export function describeCredential(credential) {
+  const transports = credential?.response?.getTransports?.() ?? [];
+  let model = null;
+  try {
+    const data = new Uint8Array(credential.response.getAuthenticatorData());
+    const hex = crypto.toHex(data.subarray(37, 53));
+    if (/[1-9a-f]/.test(hex)) model = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  } catch {}
+  const attachment = credential?.authenticatorAttachment ?? null;
+  const type = attachment === 'cross-platform' && !transports.includes('hybrid') ? 'security-key' : attachment || transports.length ? 'passkey' : null;
+  const provider = model && PROVIDERS[model];
+  const via = transports.filter((t) => ['usb', 'nfc', 'ble'].includes(t)).map((t) => t.toUpperCase());
+  const label = provider ? `Passkey (${provider})` : type === 'security-key' ? `Security key${via.length ? ` (${via.join(', ')})` : ''}` : transports.includes('hybrid') ? 'Passkey (phone)' : type === 'passkey' ? 'Passkey (this device)' : 'Key';
+  return { type, transports, model, label };
+}
+
+/** Asks the browser / passkey manager to forget a credential Qu cannot use (best effort, newer browsers). */
+async function forgetCredential(id, rpId) {
+  try {
+    await globalThis.PublicKeyCredential?.signalUnknownCredential?.({ rpId: rpId ?? globalThis.location?.hostname, credentialId: b64url(id) });
+  } catch {}
+}
 const bytesOf = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
 
 /**
@@ -111,10 +147,19 @@ export async function registerKey({ credentials = globalThis.navigator?.credenti
     fail(error);
   }
   const prf = prfOf(created);
-  if (prf?.enabled === false) throw coded('security key: this key or browser does not support the PRF extension (hmac-secret)', 'QU_KEY_UNSUPPORTED');
   const id = bytesOf(created.rawId);
-  if (prf?.results?.first) return { id, secret: bytesOf(prf.results.first) };
-  return keySecret({ credentials, allow: [id], rpId, kind, timeout }); // most security keys: PRF only on get
+  const info = describeCredential(created);
+  if (prf?.enabled === false) {
+    await forgetCredential(id, rpId); // no dead entry left in the user's passkey manager
+    throw coded('security key: this key or browser does not support the PRF extension (hmac-secret)', 'QU_KEY_UNSUPPORTED');
+  }
+  if (prf?.results?.first) return { id, secret: bytesOf(prf.results.first), info };
+  try {
+    return { ...(await keySecret({ credentials, allow: [id], rpId, kind, timeout })), info }; // most security keys: PRF only on get
+  } catch (error) {
+    if (error.code === 'QU_KEY_UNSUPPORTED') await forgetCredential(id, rpId);
+    throw error;
+  }
 }
 
 const kekOf = async (secret, salt) => crypto.aesKey(await crypto.hkdf(crypto.concat(secret, salt), INFO));
@@ -128,11 +173,18 @@ export async function sealVault({ identity, entries }, dek, wraps) {
   return { v: 1, pub: crypto.toHex(identity.publicKey), wraps, data: crypto.toBase64(data), at: Date.now() };
 }
 
-/** A wrap entry for one key: its id, a name, and the DEK under its KEK. */
-export async function wrapFor(dek, { id, secret }, name = 'key') {
+/** A wrap entry for one key: its id, a name, what kind it is, and the DEK under its KEK. */
+export async function wrapFor(dek, { id, secret, info }, name) {
   const salt = crypto.randomBytes(16);
   const wrapped = await crypto.aesEncrypt(await kekOf(secret, salt), dek, enc.encode(INFO));
-  return { id: b64url(id), name: String(name).slice(0, 64), salt: crypto.toBase64(salt), key: crypto.toBase64(wrapped), created: Date.now() };
+  return {
+    id: b64url(id),
+    name: String(name ?? info?.label ?? 'Key').slice(0, 64),
+    ...(info ? { type: info.type, transports: info.transports, model: info.model } : {}),
+    salt: crypto.toBase64(salt),
+    key: crypto.toBase64(wrapped),
+    created: Date.now(),
+  };
 }
 
 /**
@@ -284,8 +336,8 @@ export function vaultManager(qu, { credentials, rpId, fetch, delayMs = 1000, rel
     close: () => clearTimeout(timer),
 
     /** @param {{name?: string, kind?: 'security-key'|'passkey', lock?: boolean, rpName?: string}} [options] */
-    async addKey({ name = 'key', kind, lock = false, rpName } = {}) {
-      const key = await registerKey({ credentials, rpId, rpName, user: name, kind });
+    async addKey({ name, kind, lock = false, rpName } = {}) {
+      const key = await registerKey({ credentials, rpId, rpName, user: name ?? 'qu', kind });
       const current = await storage.get(VAULT_KEY);
       let dek = current ? await dekOf() : null;
       if (current && !dek) throw new Error("addKey: the tresor is not open on this device - start with unlock: 'key' first");
@@ -311,6 +363,7 @@ export function vaultManager(qu, { credentials, rpId, fetch, delayMs = 1000, rel
       const current = await storage.get(VAULT_KEY);
       if (!current?.wraps.some((w) => w.id === id)) return;
       const wraps = current.wraps.filter((w) => w.id !== id);
+      await forgetCredential(unb64url(id), rpId); // a passkey manager may drop the entry too
       if (!wraps.length) {
         if (await storage.get(VAULT_LOCK)) await storage.set(PLAIN_KEY, qu.identity);
         for (const k of [VAULT_KEY, DEK_KEY, VAULT_LOCK]) await storage.remove(k);

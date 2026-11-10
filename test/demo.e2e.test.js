@@ -362,9 +362,11 @@ test('a security key (virtual, with PRF) registers on one device and unlocks the
       const [space] = await phone.restoreGroups();
       for (let i = 0; i < 200 && !(await phone.query({ space, path: 'chat' })).length; i++) await new Promise((r) => setTimeout(r, 50));
       const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-      return { synced: added.synced, same: hex(phone.identity.publicKey) === hex(pc.identity.publicKey), chat: (await phone.query({ space, path: 'chat' })).map((r) => r.value) };
+      const [key] = await pc.device.keys();
+      return { synced: added.synced, same: hex(phone.identity.publicKey) === hex(pc.identity.publicKey), chat: (await phone.query({ space, path: 'chat' })).map((r) => r.value), key: { name: key.name, type: key.type, transports: key.transports } };
     });
-    assert.deepEqual(result, { synced: true, same: true, chat: ['from the PC'] });
+    // the browser tells what answered: a security key over USB (the virtual one)
+    assert.deepEqual(result, { synced: true, same: true, chat: ['from the PC'], key: { name: 'YubiKey', type: 'security-key', transports: ['usb'] } });
     const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
     assert.equal(credentials.length, 1);
     assert.equal(credentials[0].isResidentCredential, true, 'discoverable: unlock needs no user name');

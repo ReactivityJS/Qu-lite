@@ -47,6 +47,11 @@ async function main(): Promise<void> {
   const unlocked = await createClient({ url: [`http://127.0.0.1:${relay.port}`], unlock: 'key' });
   await unlocked.close();
   void synced;
+  const stopLive = qu.live<{ start: number }>({ space: forum, path: 'events' }, (rows) => rows.map((r) => r.value.start));
+  stopLive();
+  qu.schema('polls', { question: 'string' });
+  const file: Uint8Array = await qu.archive.export({ spaces: [forum] });
+  void file;
   const { records } = await qu.background.progress();
   await qu.push.ring(forum);
 

@@ -361,7 +361,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, cac
       const { bytes, id } = await sealEnvelope(space, { ...fields, path: draft.path, key: draft.key, hlc: clock.tick(), value: draft.value, visibility: draft.visibility, padding }, signer);
       const outcome = await env.ingest(bytes, { local: true });
       // 'failed': the commit failed and nothing was written - the write can be retried.
-      if (outcome.status !== expected) throw new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`);
+      if (outcome.status !== expected) throw Object.assign(new Error(`records: write not stored (${outcome.status}${outcome.reason ? `: ${outcome.reason}` : ''})`), outcome.code ? { code: outcome.code } : {});
       return read(space, id);
     }
 

@@ -147,7 +147,7 @@ export interface DeviceApi {
   removeLock(passphrase: string): Promise<void>;
   /** register a YubiKey (USB/NFC) or passkey that unlocks this identity on any device - call from a click */
   addKey(options?: { name?: string; kind?: 'security-key' | 'passkey'; lock?: boolean; rpName?: string }): Promise<{ id: string; synced: boolean }>;
-  keys(): Promise<Array<{ id: string; name: string; created: number }>>;
+  keys(): Promise<Array<{ id: string; name: string; type: 'security-key' | 'passkey' | null; transports: string[]; model: string | null; created: number }>>;
   removeKey(id: string): Promise<void>;
 }
 
@@ -179,6 +179,15 @@ export interface PushApi {
   labels(map: Record<string, string>): Promise<void>;
   ring(space: Space, options?: { kind?: 'call' | 'message' }): Promise<number>;
 }
+
+export interface ArchiveApi {
+  export(options?: { spaces?: Array<Space | string>; passphrase?: string }): Promise<Uint8Array>;
+  download(options?: { spaces?: Array<Space | string>; passphrase?: string }, filename?: string): Promise<number>;
+  import(bytes: Uint8Array): Promise<{ spaces: number; stored: number; duplicate: number; rejected: number }>;
+}
+
+/** a type (`'string'`, `'number[]?'` …), a shape (field -> type) or a check */
+export type SchemaRule = string | Record<string, string> | ((value: any, record: QuRecord) => boolean | string | void);
 
 export interface DevTools {
   help(): void;
@@ -232,6 +241,12 @@ export interface Qu extends Kernel {
   background: BackgroundApi;
   /** plugin `push` */
   push: PushApi;
+  /** plugin `live`: re-runs the query on changes; returns stop */
+  live<V = unknown>(query: QueryOptions, render: (rows: QuRecord<V>[]) => void, options?: { onError?: (error: Error) => void }): () => void;
+  /** plugin `schema`: add a rule for a path (or `prefix/`) */
+  schema(path: string, rule: SchemaRule): void;
+  /** plugin `archive` */
+  archive: ArchiveApi;
   /** delete a record (or a keyed entry) - own ones, or anyone's as admin (plugin `compaction`) */
   del(space: Space, recordOrId: QuRecord | string): Promise<void>;
   del(space: Space, path: string, key: string): Promise<void>;

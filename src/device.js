@@ -330,15 +330,17 @@ export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = global
        * also on other devices (`createClient({ unlock: 'key' })`). Call from a click; register a
        * second key as a spare.
        * @param {{name?: string, kind?: 'security-key'|'passkey', lock?: boolean, rpName?: string}} [options]
+       *   `name`: shown in `keys()` (default: what the browser tells, e.g. 'Security key (USB, NFC)',
+       *   'Passkey (Google Password Manager)').
        *   `lock`: from now on this device keeps no usable identity - every start needs the key.
        * @returns {Promise<{id: string, synced: boolean}>} `synced`: the relay holds the tresor (other devices can unlock)
        */
       async addKey(options = {}) {
         return (await vault()).addKey(options);
       },
-      /** @returns {Promise<Array<{id: string, name: string, created: number}>>} keys that unlock this identity */
+      /** @returns {Promise<Array<{id: string, name: string, type: 'security-key'|'passkey'|null, transports: string[], model: string|null, created: number}>>} keys that unlock this identity (`type`/`transports`/`model` as far as the browser tells) */
       async keys() {
-        return ((await storage.get(VAULT_KEY))?.wraps ?? []).map(({ id, name, created }) => ({ id, name, created }));
+        return ((await storage.get(VAULT_KEY))?.wraps ?? []).map(({ id, name, created, type = null, transports = [], model = null }) => ({ id, name, type, transports, model, created }));
       },
       /**
        * Removes a key (lost or replaced): it no longer opens the tresor, here or at the relay.
