@@ -109,7 +109,7 @@ const qu = await createClient({ url: 'https://relay.example', name: 'my-app', ex
 
 | Option | Default | |
 |---|---|---|
-| `url` | – | relay origin; installs `relay` transport (WebSocket, SSE fallback) |
+| `url` | – | relay origin, or an array of origins for redundancy (each kept connected); installs the `relay` transport (WebSocket, SSE fallback) |
 | `name` | `'qu-lite'` | IndexedDB database name |
 | `store` | `['indexeddb', {name}]` if IndexedDB exists, else `'memory'` | any `createPeer` store spec |
 | `plugins` | `CLIENT_PLUGINS`: `records, user, members, inbox, sync({ackFrom:'mirror'}), status, compaction, device` | replaces the defaults |
@@ -697,7 +697,7 @@ of them unchanged.
 | `connectInProcess(a, b, {scope?}?)` | two peers in one process (tests, examples); `{ready, disconnect(), stats, peer()}` |
 | `connectWs(qu, url, opts?)` | one WebSocket with reconnect (backoff + jitter, `online` event); `{close(), connected, peer, url}` |
 | `wsTransport({connect: [url], …})` | plugin form: `qu.transports.ws.{connect(url), disconnect(url?), status()}` |
-| `relayTransport({url, isolate?, prefer?, wsAttempts?, retryWsMs?, wsPath?, ssePath?})` | WebSocket first (`wss://…/ws`), falls back to HTTPS + SSE (`https://…/sse`); a path in `url` is kept (`https://example.org/qu` → `wss://example.org/qu/ws`), for relays behind a proxy prefix; `qu.transports.relay.{via, status(), disconnect()}`. `isolate: true` gives each space its own connection and network id. |
+| `relayTransport({url, isolate?, prefer?, wsAttempts?, retryWsMs?, wsPath?, ssePath?})` | WebSocket first (`wss://…/ws`), falls back to HTTPS + SSE (`https://…/sse`); a path in `url` is kept (`https://example.org/qu` → `wss://example.org/qu/ws`), for relays behind a proxy prefix; `qu.transports.relay.{via, urls, status(), connect(origins), disconnect()}`. `isolate: true` gives each space its own connection and network id. `url` may be an array: every relay is kept connected (redundancy; one going down changes nothing, it catches up by reconcile when back). |
 | `connectSse(qu, base, opts?)` / `sseTransport({connect: [url]})` | SSE only |
 | `rtc({mode, iceServers, maxMesh, fanout})` | WebRTC between members; signaling sealed through the space; `await qu.rtc.track(space)`, `qu.rtc.setMode('auto'\|'mesh'\|'relay-only')`. Needs `status`. |
 | `topology({mode, mirrors, peers, maxMesh, fanout, connect})` | `star`, `mesh` or `auto` over URL endpoints; `qu.topology.{setPeers, setMode, endpoints(), close()}` |

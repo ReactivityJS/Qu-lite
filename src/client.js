@@ -19,7 +19,7 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
 
 /**
  * @param {{
- *   url?: string,
+ *   url?: string|string[],
  *   name?: string,
  *   store?: string|[string, object]|object,
  *   plugins?: Array<string|[string, object]|Function>,
@@ -32,7 +32,8 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   registry?: import('./registry.js').Registry,
  *   identity?: object|'persisted',
  * }} [options]
- *   `url`: relay origin (http(s):// or ws(s)://). `name`: IndexedDB database name (one per app).
+ *   `url`: relay origin (http(s):// or ws(s)://), or several for redundancy - every one is
+ *   kept connected, one going down changes nothing. `name`: IndexedDB database name (one per app).
  *   `extra`: plugins added to the defaults (e.g. ['text', 'blobs']). `relay`: options for the relay
  *   transport (e.g. {isolate: true}). `transports`: replaces the relay transport entirely.
  *   `persist`: ask the browser right away to keep this origin's storage (may
@@ -55,7 +56,7 @@ export async function createClient({
   restore,
 } = {}) {
   store ??= globalThis.indexedDB ? ['indexeddb', { name }] : 'memory';
-  transports ??= url ? [['relay', { url, ...relay }]] : [];
+  transports ??= url && [url].flat().length ? [['relay', { url, ...relay }]] : [];
   const tools = devtools ? [['devtools', devtools === true ? {} : devtools]] : [];
   const qu = await createPeer({ registry, store, identity, restore, plugins: [...plugins, ...extra, ...tools], transports });
   if (persist && qu.device) await qu.device.persist().catch((error) => qu.bus.error(error, 'device.persist'));

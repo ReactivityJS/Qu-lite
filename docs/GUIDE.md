@@ -327,6 +327,12 @@ geschlossen. Durch Outbox + Negentropy geht dabei nichts verloren.
 
 **Interaktive Konsole am laufenden Relay:** `--repl` – siehe [CONSOLE.md](CONSOLE.md#relay-repl).
 
+**Ausfallsicherheit mit zwei Relays:** `createClient({ url: ['https://relay-a.example', 'https://relay-b.example'] })`
+hält zu beiden eine Verbindung. Geschrieben wird an beide; ein Record gilt als zugestellt, sobald einer
+ihn gespeichert hat. Fällt ein Relay aus, merkt die App nichts. Kommt er zurück, gleicht der Client ab
+und liefert nach, was er verpasst hat. Die Relays kennen sich nicht und brauchen keine Konfiguration
+füreinander – nur getrennte Datenbanken.
+
 **Skalierung:** Ein Relay ist ein einzelner Prozess mit einer SQLite-Datei (WAL). Für mehr Last:
 mehrere Relays mit `--allow` für disjunkte Space-Mengen (Sharding nach Space), oder Redundanz, indem
 Clients mit mehreren Relays verbunden sind (`transports: [['ws', {connect: [a, b]}]]`) – ein Client

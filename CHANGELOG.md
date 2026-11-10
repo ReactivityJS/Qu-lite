@@ -61,6 +61,10 @@ Stability, scalability and one base for client and relay.
   completely on a new device (content comes from the relay). Refuses to overwrite another identity
   that has groups unless `force`. `qu.device.persist()` / `status()` for the browser's storage grant;
   `createClient({ persist: true })`.
+- **Several relays**: `createClient({ url: [a, b] })` / `relayTransport({ url: [...] })` keeps every relay
+  connected (each with its own WebSocket -> SSE fallback, with `isolate` one connection per space and
+  relay). One relay going down changes nothing for the app; when it is back, the reconcile delivers
+  what it missed. `qu.transports.relay.urls`.
 
 ## [Unreleased]
 
