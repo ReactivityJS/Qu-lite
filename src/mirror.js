@@ -105,16 +105,35 @@ export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota
         await storage.set(usageKey(sid), { records: Math.max(0, u.records - count), bytes: Math.max(0, u.bytes - bytes) });
       })
     );
+    // Records that arrive before their grant (unknown space or epoch) are dropped
+    // unacked. Remember who sent them, so they can be fetched once the grant is
+    // here - also from members whose grant came second (two clients reconnecting
+    // to a fresh mirror: only the first grant is new). Bounded: a peer that never
+    // sends a grant costs at most one entry per space, all dropped when it leaves.
+    const early = new Map(); // sid -> Set<peer>
+    const EARLY_SPACES = 4096;
+    bus.on('qu.record.unknown-space', ({ from, sid }) => {
+      if (!from || typeof sid !== 'string') return;
+      let set = early.get(sid);
+      if (!set) {
+        if (early.size >= EARLY_SPACES) return;
+        early.set(sid, (set = new Set()));
+      }
+      if (set.size < 64) set.add(from);
+    });
+    bus.on('net.peer.down', ({ peer }) => {
+      for (const [sid, set] of early) if (set.delete(peer) && !set.size) early.delete(sid);
+    });
     bus.on('qu.grant.accepted', async ({ sid, isNew, changed, accepted, from }) => {
       const stored = (await storage.get(`mirror/grants/${sid}`)) ?? [];
       await storage.set(`mirror/grants/${sid}`, [...stored, ...accepted]);
       await bus.notify('mirror.grant', { sid, changed, from });
-      if (isNew) {
-        await watchSpace(sid);
-        // Records the offerer pushed before the grant were refused (unknown space);
-        // a mirror doesn't reconcile with clients on its own, so fetch them now.
-        if (typeof qu.resync === 'function') qu.resync({ space: { sid }, peer: from }).catch(() => {});
-      }
+      if (isNew) await watchSpace(sid);
+      // a mirror doesn't reconcile with clients on its own, so fetch what was refused now
+      const peers = new Set(early.get(sid));
+      early.delete(sid);
+      if (isNew && from) peers.add(from);
+      if (typeof qu.resync === 'function') for (const peer of peers) qu.resync({ space: { sid }, peer }).catch(() => {});
     });
 
     /** Re-verifies every stored grant chain into the keyring and watches those spaces. */

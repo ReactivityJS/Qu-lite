@@ -473,6 +473,32 @@ test('grants on reconnect: a key rotation made offline changes the fingerprint -
   await Promise.all([client.close(), mirror.close()]);
 });
 
+test('grants on reconnect: records that reached the mirror before their grant are fetched from every sender once a grant arrives', async () => {
+  // A fresh mirror, two members reconnecting. A's record arrives before any grant
+  // (refused: unknown space); then B's grant makes the space known. The mirror must
+  // fetch from A too - not only from B, whose grant was the new one.
+  const { createClient } = await import('../src/index.js');
+  const mirror = await (await import('../src/peer.js')).createPeer({ plugins: [['sync', { role: 'mirror', retryMs: 0 }], 'mirror'] });
+  const a = await createClient({ devtools: false, transports: [] });
+  const b = await createClient({ devtools: false, transports: [] });
+  const group = await a.createGroup();
+  await b.acceptInvite(await (await a.members(group)).invite());
+  const early = await a.write(group, 'chat', 'early');
+  a.bus.on('net.out.*.grantsum', (_, ctx) => ctx.stop()); // A's grant is late (never, here)
+  const la = connectInProcess(a, mirror);
+  await la.ready;
+  await settle(200);
+  assert.equal((await mirror.mirror.spaces()).length, 0, 'no grant yet');
+  const lb = connectInProcess(b, mirror);
+  await lb.ready;
+  await until(async () => (await mirror.mirror.spaces()).includes(group.id), 3000, "B's grant");
+  await until(() => mirror.storage.has(`rec/${group.id}/${early.id}`), 3000, "A's early record fetched");
+  // (A's own profile space stays in its outbox: no member but A could ever bring its grant here)
+  await until(async () => (await a.storage.keys(`sync/out/${group.id}/`)).length === 0, 3000, 'A sees it acked');
+  await Promise.all([la.disconnect(), lb.disconnect()]);
+  await Promise.all([a.close(), b.close(), mirror.close()]);
+});
+
 test('short acks: 8-byte prefixes clear the outbox; a peer without ack8 gets full ids', async () => {
   for (const offer of [true, false]) {
     const mirror = await peer({ role: 'mirror' });

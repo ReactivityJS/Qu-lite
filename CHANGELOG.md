@@ -87,12 +87,20 @@ Stability, scalability and one base for client and relay.
   grant fingerprint, `grantFingerprint()`); the mirror answers `grantneed` with the spaces it lacks or holds
   differently, and only those grants are sent. Older mirrors get all grants. Plugins can offer hello
   features via `netOf(qu).features`. Reconnect without changes (20 spaces): 6.6 -> 3.6 KiB, 24 -> 5 frames.
+  A mirror remembers who sent records for a space it did not know yet and fetches them from each of those
+  peers when the grant arrives - not only from the peer whose grant was new (two clients reconnecting to a
+  restarted relay could otherwise wait for the 30 s retry).
 - **Short acks** (feature `ack8`): acks carry 8-byte id prefixes, matched against the receiver's outbox
   (acks for records not in the outbox are dropped - they carried no information). Ack volume -74 %,
   first upload of 4,000 records 1,609 -> 1,512 KiB (-6 %).
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **TypeScript declarations** for all entry points (`npm run types`, run on `npm pack`; `types/` is
+  generated, not committed). `createClient()`/`createPeer()` return `Qu` with typed plugin members
+  (`write<V>`, `query<V>`, `members`, `status`, `device`, `dev`, …). Option JSDoc completed where it
+  lacked options (`sync`, `createLink`, `connectWs`, `connectSse`, `topology`, drivers). CI checks a
+  typed sample app (`test/types/app.ts`).
 
 ## [Unreleased]
 
