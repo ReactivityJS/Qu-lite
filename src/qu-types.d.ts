@@ -131,6 +131,10 @@ export interface DeviceStatus {
   backupAt: number | null;
   groups: number;
   locked: boolean;
+  /** security keys / passkeys registered */
+  keys: number;
+  /** every start needs a key */
+  keyLocked: boolean;
 }
 
 export interface DeviceApi {
@@ -141,6 +145,10 @@ export interface DeviceApi {
   lock(passphrase: string): Promise<void>;
   changePassphrase(oldPassphrase: string, newPassphrase: string): Promise<void>;
   removeLock(passphrase: string): Promise<void>;
+  /** register a YubiKey (USB/NFC) or passkey that unlocks this identity on any device - call from a click */
+  addKey(options?: { name?: string; kind?: 'security-key' | 'passkey'; lock?: boolean; rpName?: string }): Promise<{ id: string; synced: boolean }>;
+  keys(): Promise<Array<{ id: string; name: string; created: number }>>;
+  removeKey(id: string): Promise<void>;
 }
 
 export interface TransportApi {

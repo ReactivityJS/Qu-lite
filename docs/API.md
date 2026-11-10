@@ -698,15 +698,20 @@ identities. Example: [09-stats.mjs](../examples/09-stats.mjs).
 
 ## device
 
-`qu.use(device({ iterations = 600000, navigator? }))` – device backup and browser storage
-persistence. `createClient()` installs it.
+`qu.use(device({ iterations = 600000, navigator?, credentials?, relay?, rpId?, vaultDelayMs = 1000 }))` – device
+backup, browser storage persistence, security keys / passkeys. `createClient()` installs it.
+`credentials` (default `navigator.credentials`) and `rpId` (default: the page's host) are for
+WebAuthn; `relay` is where tresors go (default: the relay transport's url).
 
 | Method | |
 |---|---|
 | `qu.device.exportBackup(passphrase) → string` | the device-only keys (`qu/identity`, `members/groups/`, `members/keys/`), sealed: PBKDF2-SHA256 (`iterations`) + AES-256-GCM, header authenticated; one line `qu-backup.…`. Passphrase ≥ 8 characters. Records `qu/backup-at`, notifies `qu.device.backup {groups}` |
 | `qu.device.downloadBackup(passphrase, filename = 'qu-backup.txt')` | browser: the same, offered as a file |
 | `qu.device.persist() → boolean \| null` | `navigator.storage.persist()` (may prompt); `null` where unsupported; `qu.device.persist {granted}` |
-| `qu.device.status() → {persisted, usage, quota, backupAt, groups, locked}` | `null` for what the runtime cannot tell |
+| `qu.device.status() → {persisted, usage, quota, backupAt, groups, locked, keys, keyLocked}` | `null` for what the runtime cannot tell |
+| `qu.device.addKey({name?, kind?, lock?, rpName?}) → {id, synced}` | registers a security key (YubiKey: USB, NFC) or passkey that unlocks this identity, here and on other devices; one tap (two on keys without PRF on creation). `kind`: `'security-key'` \| `'passkey'` (default: the browser offers both). `lock: true`: this device keeps no usable identity, every start needs the key. `synced`: the relay holds the tresor. Call from a click |
+| `qu.device.keys() → [{id, name, created}]` | registered keys |
+| `qu.device.removeKey(id)` | the key no longer opens the tresor (here and at the relay); the last key of a key-locked device stores the identity plain again |
 | `qu.device.lock(passphrase)` / `changePassphrase(old, new)` / `removeLock(passphrase)` | identity lock at runtime (see below) |
 
 `readBackup(text, passphrase) → {identity, entries, created}` checks a backup without using it (wrong
@@ -723,6 +728,33 @@ one was read back). Every start then needs it: without, the start rejects with `
 'QU_LOCKED'`, with a wrong one `'QU_WRONG_PASSPHRASE'`. Protects data at rest (copied disk, profile,
 database file), not a compromised running page. `restore` into a locked storage needs that storage's
 `passphrase` or `force`.
+
+**Security keys and passkeys** (`keys.js`): `createClient({ url, unlock: 'key' })` (or
+`unlock: {kind?, remember?, rpId?, credentials?}`, `createPeer({ unlock: {relay, …} })`) opens the identity
+with one tap, as follows:
+
+- **plain identity in the store:** nothing to do, no tap;
+- **tresor on this device (key lock):** opens locally;
+- **empty store:** the tresor comes from the relay, and the identity and group keys are written.
+  `remember: false` keeps a new device key-locked.
+
+Then `await qu.restoreGroups()`. Errors: `QU_KEY_CANCELLED` (dismissed, timed out),
+`QU_KEY_UNSUPPORTED` (no WebAuthn PRF), `QU_KEY_UNKNOWN` (no tresor for this key at this address),
+`QU_KEY_EXISTS`, `QU_KEY_FAILED`. A key-locked store started without `unlock` rejects with
+`QU_LOCKED` (`error.unlock === 'key'`) and never creates a new identity.
+
+How it works:
+
+- **PRF:** WebAuthn's PRF extension (CTAP2 `hmac-secret`) gives a 32-byte secret per credential and
+  address. With it, `HKDF(secret | salt)` wraps a random DEK.
+- **Tresor:** the DEK encrypts `{identity, entries}` with AES-256-GCM (entries: `members/groups/`,
+  `members/keys/`).
+- **Storage:** `qu/vault` (the tresor), `qu/vault-dek` (only where the identity is stored plain
+  anyway), `qu/vault-lock`. The relay keeps one copy per key (`GET`/`POST /id/<sha256(credential
+  id)>`, written only with the identity's signature, `at` must grow, mirror option `vault`). The
+  tresor is re-sealed when group or epoch keys change (`qu.device.vault {synced}`).
+- **Credentials:** discoverable (resident), so no user name is needed. They are bound to the
+  page's host (`rpId`): use one address for all devices.
 
 ## devtools
 
@@ -1034,7 +1066,10 @@ These are exported for tools, tests and custom plugins. Apps rarely need them.
 - **Transports by hand**: `attachSocket(qu, socket, options)` turns an open WebSocket into a link
   (both ends); `inprocTransport()` / `connectInProcess(a, b)` link two peers in one process
   (tests, workers).
-- **Device**: `BACKUP_ITERATIONS` (PBKDF2 rounds of backups, 600,000).
+- **Device**: `BACKUP_ITERATIONS` (PBKDF2 rounds of backups, 600,000); `unlockWithKey(store, options)`
+  (what `createPeer({ unlock })` calls).
+- **Security keys** (`keys.js`): `registerKey(options)`, `keySecret(options)` → `{id, secret}` (one tap
+  each), `sealVault`, `openVault`, `wrapFor`, `vaultClient(relay)` (`get`/`put` of a tresor at the relay).
 - **Drop lists**: `GC_HORIZON_MS`, `gcCutoff(now)`, `encodeEntries`, `decodeEntries`, `mayDrop`.
 - **Traffic by type**: `netOf(qu).traffic` (Map type -> `{framesIn, bytesIn, framesOut, bytesOut}`, all links
   since `trafficSince`, unknown types as `other`), `FRAME_TYPES` (type -> meaning; from `devtools.js`, so client bundles without devtools skip the texts); `stats` reports it as

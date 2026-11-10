@@ -6,7 +6,7 @@ robust sync (Negentropy reconciliation, partial sync, resync/repair, durable out
 reconciles), atomic writes, persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket,
 HTTPS + SSE fallback, WebRTC), one peer base for clients and relays/mirrors, group membership with roles,
 admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing, sent,
-delivered, read), queries by any field, deletion and compaction, attachments, open spaces with moderation,
+delivered, read), queries by any field, login with a YubiKey or passkey, deletion and compaction, attachments, open spaces with moderation,
 public reads without membership, background sync and payload-free push, a hardened mirror (quotas, rate
 limits, padding, one connection per space) and - optional - collaborative text. Started as `packages/lite` in [QuV5](https://github.com/ReactivityJS/QuV5); it
 shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).

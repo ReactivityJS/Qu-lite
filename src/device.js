@@ -37,6 +37,15 @@
  * runs the keys are in memory, as always - the lock protects data at rest,
  * not a compromised page.
  *
+ * SECURITY KEYS / PASSKEYS (keys.js): `addKey()` puts identity and group
+ * keys into a tresor that a YubiKey (USB, NFC) or a passkey opens; the
+ * relay keeps a copy for other devices. A new device starts with
+ * `createClient({ url, unlock: 'key' })` - one tap, same identity, then
+ * `restoreGroups()`. `addKey({ lock: true })` keeps no usable identity on
+ * this device: every start needs the key (`error.code` 'QU_LOCKED' without
+ * `unlock`). Local records: `qu/vault` (the tresor), `qu/vault-dek` (its key,
+ * only where the identity is stored plain anyway), `qu/vault-lock`.
+ *
  * Why the browser grant matters: without `navigator.storage.persist()` a
  * browser may evict the origin's IndexedDB under storage pressure - and with
  * it the identity. Requesting it can show a prompt (Firefox), so it is up to
@@ -44,10 +53,14 @@
  * `qu.device.persist()` whenever the app chooses (e.g. after the first group).
  */
 import * as crypto from './crypto.js';
+/** Security-key code (keys.js) loads only when a key is used - not with every client. */
+const keysJs = () => import('./keys.js');
 
 const PREFIX = 'qu-backup.';
 const PLAIN_KEY = 'qu/identity';
 const LOCKED_KEY = 'qu/identity-locked';
+const VAULT_KEY = 'qu/vault';
+const VAULT_LOCK = 'qu/vault-lock';
 /** Keys that exist only on this device and make up a backup. */
 const DEVICE_KEYS = ['members/groups/', 'members/keys/'];
 export const BACKUP_ITERATIONS = 600_000;
@@ -210,11 +223,56 @@ export async function restoreInto(store, { backup, passphrase, force = false, lo
 }
 
 /**
- * @param {{iterations?: number, navigator?: object}} [options] - `iterations` for exports (default 600 000)
+ * Unlocks with a security key or passkey before a peer is built (createPeer's
+ * `unlock`; keys.js `unlockStore`, loaded only now).
+ * - identity stored plain here: nothing to do (returns null)
+ * - tresor here (key lock): one tap opens it locally
+ * - nothing here: one tap, the tresor comes from the relay; identity and groups are written
+ * @param {object} store - a driver
+ * @param {{relay?: string, credentials?: object, rpId?: string, kind?: 'security-key'|'passkey', remember?: boolean, fetch?: typeof fetch}} [options]
+ *   `remember` (new device): keep the identity usable on this device (default true; false: every start taps).
+ * @returns {Promise<object|null>} the identity, or null if the store holds a plain one
+ * @throws QU_KEY_CANCELLED, QU_KEY_UNSUPPORTED, QU_KEY_UNKNOWN (no tresor for this key), QU_LOCKED (passphrase lock, no tresor)
  */
-export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = globalThis.navigator } = {}) {
+export async function unlockWithKey(store, options = {}) {
+  if (await store.get(PLAIN_KEY)) return null;
+  return (await keysJs()).unlockStore(store, options);
+}
+
+/** True if this storage needs a key to start (createPeer asks before it would create a new identity). */
+export async function needsKey(store) {
+  return !(await store.get(PLAIN_KEY)) && !(await store.get(LOCKED_KEY)) && Boolean(await store.get(VAULT_KEY));
+}
+
+/**
+ * @param {{iterations?: number, navigator?: object, credentials?: object, relay?: string, rpId?: string, fetch?: typeof fetch, vaultDelayMs?: number}} [options]
+ *   `iterations` for exports (default 600 000); `credentials`/`rpId` for security keys (tests inject them);
+ *   `relay`: where tresors go (default: the relay transport's url).
+ */
+export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = globalThis.navigator, credentials, relay, rpId, fetch, vaultDelayMs = 1000 } = {}) {
   const plugin = (qu) => {
     const storage = qu.storage;
+
+    // --- the tresor (security keys / passkeys): keys.js, loaded on first use ---
+    let lastRelay = relay ?? null;
+    let manager = null;
+    const vault = () =>
+      (manager ??= keysJs().then(({ vaultManager }) =>
+        vaultManager(qu, { credentials, rpId, fetch, delayMs: vaultDelayMs, relay: () => relay ?? qu.transports?.relay?.urls?.[0] ?? lastRelay }),
+      ));
+    qu.bus.on('net.peer.up', () => {
+      lastRelay = relay ?? qu.transports?.relay?.urls?.[0] ?? lastRelay;
+      manager?.then((m) => m.retry());
+    });
+    // the tresor follows new groups and epochs, so a key opens everything on the next device
+    const offWrites = storage.afterWrite?.('members/', (keys) => {
+      if (keys.some((k) => DEVICE_KEYS.some((p) => k.startsWith(p)))) storage.get(VAULT_KEY).then((v) => v && vault().then((m) => m.schedule()));
+    });
+    qu.onClose?.(() => {
+      offWrites?.();
+      manager?.then((m) => m.close());
+    });
+
     const api = {
       /** @returns {Promise<string>} the encrypted backup of this device's keys */
       async exportBackup(passphrase) {
@@ -267,7 +325,30 @@ export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = global
         await storage.remove(LOCKED_KEY);
         await qu.bus.notify('qu.device.lock', { locked: false });
       },
-      /** @returns {Promise<{persisted: boolean|null, usage: number|null, quota: number|null, backupAt: number|null, groups: number, locked: boolean}>} */
+      /**
+       * Registers a security key (YubiKey: USB or NFC) or a passkey that unlocks this identity -
+       * also on other devices (`createClient({ unlock: 'key' })`). Call from a click; register a
+       * second key as a spare.
+       * @param {{name?: string, kind?: 'security-key'|'passkey', lock?: boolean, rpName?: string}} [options]
+       *   `lock`: from now on this device keeps no usable identity - every start needs the key.
+       * @returns {Promise<{id: string, synced: boolean}>} `synced`: the relay holds the tresor (other devices can unlock)
+       */
+      async addKey(options = {}) {
+        return (await vault()).addKey(options);
+      },
+      /** @returns {Promise<Array<{id: string, name: string, created: number}>>} keys that unlock this identity */
+      async keys() {
+        return ((await storage.get(VAULT_KEY))?.wraps ?? []).map(({ id, name, created }) => ({ id, name, created }));
+      },
+      /**
+       * Removes a key (lost or replaced): it no longer opens the tresor, here or at the relay.
+       * Removing the last key of a key-locked device stores the identity plain again.
+       */
+      async removeKey(id) {
+        return (await vault()).removeKey(id);
+      },
+
+      /** @returns {Promise<{persisted: boolean|null, usage: number|null, quota: number|null, backupAt: number|null, groups: number, locked: boolean, keys: number, keyLocked: boolean}>} */
       async status() {
         const persisted = typeof nav?.storage?.persisted === 'function' ? await nav.storage.persisted() : null;
         const estimate = typeof nav?.storage?.estimate === 'function' ? await nav.storage.estimate() : {};
@@ -278,6 +359,8 @@ export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = global
           backupAt: (await storage.get('qu/backup-at')) ?? null,
           groups: (await storage.keys('members/groups/')).length,
           locked: Boolean(await storage.get(LOCKED_KEY)),
+          keys: ((await storage.get(VAULT_KEY))?.wraps ?? []).length,
+          keyLocked: Boolean(await storage.get(VAULT_LOCK)),
         };
       },
     };

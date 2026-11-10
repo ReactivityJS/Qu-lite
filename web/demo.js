@@ -10,6 +10,7 @@
  *   &offline         start without connecting
  *   &relay=https://… another relay (base URL; WebSocket at <base>/ws, SSE fallback at <base>/sse)
  *   &transport=sse   force HTTPS + SSE instead of WebSocket
+ *   &unlock          start by unlocking with a security key or passkey (a button: browsers want a click)
  *   #g=<sid>         open a known group      #i=<invite>  accept an invite link
  */
 import { createPeer, peekEnvelope, crypto } from '../src/index.js';
@@ -24,14 +25,31 @@ const el = (tag, text, attrs = {}) => Object.assign(document.createElement(tag),
 const toUrl = (obj) => btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const fromUrl = (text) => JSON.parse(atob(text.replace(/-/g, '+').replace(/_/g, '/')));
 
-const qu = await createPeer({
+const peerOptions = {
   store: ['indexeddb', { name: `qu-lite-demo-${profile}` }],
-  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction', 'text', ['stats', { emitMs: 1000 }]],
+  plugins: ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror', releaseMs: 5000 }], 'status', 'compaction', 'text', ['stats', { emitMs: 1000 }], 'device'],
   transports: [
     ['relay', { url: params.has('offline') ? undefined : relayUrl, prefer: params.get('transport') === 'sse' ? 'sse' : 'ws', minDelayMs: 300 }],
     ['webrtc', { mode: params.get('rtc') ?? localStorage.getItem('qu-demo-rtc') ?? 'auto' }],
   ],
-});
+};
+// ?unlock: the identity comes from a security key / passkey (keys.js) - started by a click
+async function unlockFirst() {
+  const gate = el('button', 'Mit Sicherheitsschlüssel / Passkey anmelden', { id: 'unlockGate' });
+  document.body.prepend(gate);
+  for (;;) {
+    await new Promise((resolve) => (gate.onclick = resolve));
+    try {
+      const peer = await createPeer({ ...peerOptions, unlock: { relay: relayUrl } });
+      await peer.restoreGroups();
+      gate.remove();
+      return peer;
+    } catch (error) {
+      gate.textContent = `${error.code ?? 'Fehler'}: ${error.message} – nochmal versuchen`;
+    }
+  }
+}
+const qu = params.has('unlock') ? await unlockFirst() : await createPeer(peerOptions);
 globalThis.qu = qu; // for the console and the e2e test
 
 // live traffic (stats plugin): throughput of the last 10 s and totals, per peer in the tooltip
@@ -98,6 +116,21 @@ $('mypub').textContent = me.id;
 $('name').value = (await me.get('name')) ?? '';
 $('note').value = (await me.getPrivate('note')) ?? '';
 $('saveName').addEventListener('click', () => me.set('name', $('name').value));
+// security key / passkey: register here, unlock elsewhere with demo.html?name=<new>&unlock
+async function renderKeys() {
+  const keys = await qu.device.keys();
+  $('keys').textContent = keys.length ? `${keys.map((k) => k.name).join(', ')} – anderes Gerät: demo.html?name=neu&unlock` : 'keiner';
+}
+$('addKey').addEventListener('click', async () => {
+  try {
+    const { synced } = await qu.device.addKey({ name: prompt('Name des Schlüssels', 'YubiKey') || 'Schlüssel' });
+    if (!synced) alert('Registriert, aber der Relay ist nicht erreichbar – andere Geräte erst nach dem nächsten Verbinden.');
+  } catch (error) {
+    alert(`${error.code ?? 'Fehler'}: ${error.message}`);
+  }
+  renderKeys();
+});
+renderKeys();
 $('saveNote').addEventListener('click', () => me.set('note', $('note').value, { visibility: 'private' }));
 $('doLookup').addEventListener('click', async () => {
   const node = await qu.user($('lookup').value.trim());

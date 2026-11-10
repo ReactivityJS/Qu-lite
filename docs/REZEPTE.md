@@ -130,7 +130,9 @@ So bleibt es zuverlässig:
   Home-Bildschirm-App).
 - **Daten sparen:** Ein Reconnect ohne Änderungen kostet etwa 3,6 KiB für 20 Spaces.
   `qu.dev.traffic()` zeigt, wofür Bytes fließen.
-- **Gerät wechseln:** `qu.device.exportBackup(passphrase)` und `createClient({ restore })`.
+- **Gerät wechseln:** YubiKey oder Passkey (`qu.device.addKey()`, dann auf dem neuen Gerät
+  `createClient({ url, unlock: 'key' })`, ein Antippen), oder Backup-Datei
+  (`qu.device.exportBackup(passphrase)` und `createClient({ restore })`).
   `qu.device.persist()` bittet den Browser, die Daten nicht zu räumen.
 
 Mehr: [GUIDE.md](GUIDE.md) (Einführung), [API.md](API.md) (Referenz), [CONSOLE.md](CONSOLE.md) (Fehlersuche).

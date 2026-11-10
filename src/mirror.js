@@ -22,6 +22,8 @@
  *     drop lists are always accepted - they free space.
  *   - PUBLIC READS and offline delivery over plain HTTP (public.js): public
  *     records indexed by path, served with the grants to verify them;
+ *   - TRESORS of users who unlock with a security key or passkey (keys.js,
+ *     vault-relay.js; `vault: false` turns it off);
  *   - OPEN SPACES (members.js `open`): the PUBLIC moderation records under
  *     `_mod` are applied blind - a banned alias's new envelopes are refused
  *     ('banned'), and in an open space every author except owner and admins
@@ -40,12 +42,13 @@ import { signals } from './signals.js';
 import { readPublic } from './envelope.js';
 import { GC_TYPE } from './gc.js';
 import { publicRelay } from './public-relay.js';
+import { vaultRelay } from './vault-relay.js';
 import { parseHlc } from './hlc.js';
 
 /**
- * @param {{allow?: string[]|null, expireEveryMs?: number, quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null, openRate?: {rate: number, burst: number}|null}} [options]
+ * @param {{allow?: string[]|null, expireEveryMs?: number, quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null, openRate?: {rate: number, burst: number}|null, vault?: boolean|{maxBytes?: number, maxEntries?: number, rate?: number}}} [options]
  */
-export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota = null, maxEnvelopeBytes = 256 * 1024, maxSpaces = null, openRate = { rate: 0.2, burst: 20 } } = {}) {
+export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota = null, maxEnvelopeBytes = 256 * 1024, maxSpaces = null, openRate = { rate: 0.2, burst: 20 }, vault = true } = {}) {
   return (qu) => {
     const { bus, storage } = qu;
     const env = envelopes()(qu);
@@ -55,6 +58,7 @@ export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota
     const allowed = (sid) => !allow || allow.includes(sid);
 
     publicRelay(qu, env, { allowed }); // GET /q/<sid>/<path> (public reads), POST /q/in (offline delivery)
+    if (vault) vaultRelay(qu, vault === true ? {} : vault); // /id/<handle>: tresors of security-key users (keys.js)
 
     const watchSpace = (sid) => (typeof qu.watch === 'function' ? qu.watch({ space: { sid } }) : undefined);
 

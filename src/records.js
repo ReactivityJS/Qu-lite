@@ -212,11 +212,12 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, cac
      *   {reject: reason}         refused - the envelope is removed again
      */
     async function admit(space, id, bytes, { from, local = false }, ws) {
+      const gen = reindexGen.get(space.id) ?? 0;
       let record;
       try {
         record = await openEnvelope(space, bytes, { verify: false, id });
       } catch (error) {
-        if (/unknown epoch/.test(error.message)) return defer(space, id, ws);
+        if (/unknown epoch/.test(error.message)) return defer(space, id, ws, gen);
         if (/no key to read/.test(error.message)) return 'blind';
         return { reject: error.message };
       }
@@ -224,7 +225,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, cac
         if (!clock.recv(record.hlc)) return { reject: 'clock drift' };
         const accepted = await bus.emit('qu.accept', record, { space, from });
         if (accepted.stopped) return { reject: accepted.reason ?? 'hook' };
-        if (accepted.defer) return defer(space, id, ws);
+        if (accepted.defer) return defer(space, id, ws, gen);
       }
       const control = record.type === GC_TYPE;
       if (control !== isGcPath(record.path) || (control && record.visibility !== 'public')) return { reject: 'drop list malformed or path reserved' };
@@ -245,9 +246,15 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, cac
       return 'indexed';
     }
 
-    function defer(space, id, ws) {
+    // A record deferred WHILE a reindex ran (the rule changed meanwhile, e.g. its author's
+    // member entry arrived) was not yet in `defer/` when that reindex listed it: check again.
+    const reindexGen = new Map(); // sid -> reindex runs started
+    function defer(space, id, ws, gen) {
       ws.set(`defer/${space.id}/${id}`, 1);
-      ws.after(() => bus.notify('qu.record.deferred', { space: space.id, id }));
+      ws.after(() => {
+        if (gen !== undefined && (reindexGen.get(space.id) ?? 0) !== gen) setTimeout(() => reindex(space).catch((error) => bus.error(error, 'records.reindex')), 0);
+        return bus.notify('qu.record.deferred', { space: space.id, id });
+      });
       return 'deferred';
     }
 
@@ -290,6 +297,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, cac
      */
     async function reindex(spaceRef) {
       const space = spaceOf(spaceRef);
+      reindexGen.set(space.id, (reindexGen.get(space.id) ?? 0) + 1);
       const counts = { admitted: 0, rejected: 0, deferred: 0 };
       for (const key of await storage.keys(`defer/${space.id}/`)) {
         const id = key.slice(key.lastIndexOf('/') + 1);

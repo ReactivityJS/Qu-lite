@@ -71,6 +71,7 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  *   netId?: string,
  *   restore?: {backup: string, passphrase: string, force?: boolean},
  *   passphrase?: string,
+ *   unlock?: {relay?: string, credentials?: object, rpId?: string, kind?: 'security-key'|'passkey', remember?: boolean},
  * }} [options]
  *   `identity: 'persisted'` (default) loads the identity from the store or
  *   creates and saves one - so a reload keeps who you are.
@@ -80,11 +81,13 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  *   `passphrase`: the identity is kept encrypted in the store (device.js
  *   IDENTITY LOCK); a locked store needs it on every start (errors with
  *   `code` 'QU_LOCKED' / 'QU_WRONG_PASSPHRASE').
+ *   `unlock`: open the identity with a security key or passkey (keys.js): a
+ *   tresor on this device, or - on a new device - the one at `relay`.
  *   A transport whose API has a `ready` promise (a server binding its port)
  *   is awaited, so a failure surfaces here and not later.
  * @returns {Promise<import('./qu-types.js').Qu>}
  */
-export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId, restore, passphrase } = {}) {
+export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId, restore, passphrase, unlock } = {}) {
   const [storeName, storeOptions] = typeof store === 'object' && !Array.isArray(store) ? [null, store] : entry(store);
   const root = storeName ? await registry.create('store', storeName, storeOptions) : storeOptions;
 
@@ -93,6 +96,12 @@ export async function createPeer({ registry = defaultRegistry(), store = 'memory
     if (restore) {
       await (await import('./device.js')).restoreInto(root, { ...restore, lockPassphrase: passphrase });
       identity = 'persisted';
+    }
+    if (identity === 'persisted' && unlock) {
+      identity = (await (await import('./device.js')).unlockWithKey(root, unlock)) ?? 'persisted';
+    } else if (identity === 'persisted' && passphrase == null && (await root.get('qu/vault'))) {
+      // a key-locked device must not silently get a new identity
+      if (await (await import('./device.js')).needsKey(root)) throw Object.assign(new Error('identity is locked: start with unlock (security key or passkey)'), { code: 'QU_LOCKED', unlock: 'key' });
     }
     if (identity === 'persisted' && (passphrase != null || (await root.get('qu/identity-locked')))) {
       identity = await (await import('./device.js')).loadIdentity(root, { passphrase });

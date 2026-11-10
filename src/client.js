@@ -30,6 +30,7 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   persist?: boolean,
  *   restore?: {backup: string, passphrase: string, force?: boolean},
  *   passphrase?: string,
+ *   unlock?: 'key'|{kind?: 'security-key'|'passkey', remember?: boolean, rpId?: string, credentials?: object},
  *   registry?: import('./registry.js').Registry,
  *   identity?: object|'persisted',
  * }} [options]
@@ -43,6 +44,9 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   old device); then `await qu.restoreGroups()`.
  *   `passphrase`: keep the identity encrypted in storage; every start needs it
  *   (`error.code` 'QU_LOCKED' without, 'QU_WRONG_PASSPHRASE' with a wrong one).
+ *   `unlock: 'key'`: open the identity with a security key (YubiKey, USB/NFC) or passkey -
+ *   on a new device the tresor comes from the relay (`qu.device.addKey()` registers keys).
+ *   Errors: 'QU_KEY_CANCELLED', 'QU_KEY_UNSUPPORTED', 'QU_KEY_UNKNOWN'. Call from a click.
  * @returns {Promise<import('./qu-types.js').Qu>}
  */
 export async function createClient({
@@ -59,11 +63,13 @@ export async function createClient({
   persist = false,
   restore,
   passphrase,
+  unlock,
 } = {}) {
   store ??= globalThis.indexedDB ? ['indexeddb', { name }] : 'memory';
   transports ??= url && [url].flat().length ? [['relay', { url, ...relay }]] : [];
   const tools = devtools ? [['devtools', devtools === true ? {} : devtools]] : [];
-  const qu = await createPeer({ registry, store, identity, restore, passphrase, plugins: [...plugins, ...extra, ...tools], transports });
+  const unlockWith = unlock ? { ...(unlock === 'key' ? {} : unlock), relay: [url].flat()[0] } : undefined;
+  const qu = await createPeer({ registry, store, identity, restore, passphrase, unlock: unlockWith, plugins: [...plugins, ...extra, ...tools], transports });
   if (persist && qu.device) await qu.device.persist().catch((error) => qu.bus.error(error, 'device.persist'));
   return qu;
 }

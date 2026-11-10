@@ -48,3 +48,5 @@ export { push, pushMessage, ringMessage } from './push.js';
 export { pushRelay } from './push-relay.js';
 export { quServiceWorker, deliverOutbox, showPending, openFromNotification } from './sw.js';
 export { FRAME_TYPES } from './devtools.js';
+export { registerKey, keySecret, sealVault, openVault, wrapFor, vaultClient } from './keys.js';
+export { unlockWithKey } from './device.js';

@@ -96,6 +96,13 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Security keys and passkeys** (`keys.js`): `qu.device.addKey()` registers a YubiKey (USB, NFC)
+  or a passkey via WebAuthn PRF. `createClient({ url, unlock: 'key' })` opens identity and group keys
+  on any device with one tap. Nothing is read out of the key; it only wraps the key of a tresor.
+  The relay keeps the tresor per key (`/id/<handle>`, written only with the identity's signature),
+  and the tresor follows new groups and epochs. `addKey({ lock: true })` keeps no usable identity on
+  the device. Also `keys()`, `removeKey()`, error codes `QU_KEY_*`, and two buttons in the demo.
+  Tested with a simulated key and in Chromium with a virtual authenticator (PRF).
 - **Bounded memory**: the decrypted-record cache is bounded by bytes too (`cacheBytes`, 4 MiB;
   records over 1/8 of it are not cached). Before, reading a 20 MiB file could keep ~30 MB of
   chunks. Field indexes are bounded by total entries (`maxIndexEntries`) and keep only the field's

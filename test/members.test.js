@@ -170,3 +170,32 @@ test('invites expire: signed window, refused after it - by the invitee and by ev
   await until(async () => (await alice.members(group)).list().length === 3, 5000, 'a token without a window still works');
   assert.ok(joined);
 });
+
+test('a record deferred while its author\'s member entry is applied is admitted (no lost message)', async () => {
+  // The race: the chat record is judged "unknown author -> defer" just before the member entry
+  // arrives; the reindex that entry triggers lists defer/ before the chat record is committed there.
+  const { createClient } = await import('../src/index.js');
+  const anna = await createClient({ devtools: false });
+  const ben = await createClient({ devtools: false });
+  const group = await anna.createGroup();
+  const g = await ben.acceptInvite(await (await anna.members(group)).invite());
+  const hello = await ben.write(g, 'chat', 'hallo');
+  const bytesOf = async (qu, id) => qu.storage.get(`rec/${group.id}/${id}`);
+  const memberIds = (await ben.storage.keys(`rec/${group.id}/`)).map((k) => k.split('/').pop()).filter((id) => id !== hello.id);
+  // hold the chat record's admission until the member entry is in and its reindex has listed defer/
+  let release;
+  const gate = new Promise((r) => (release = r));
+  anna.bus.on('qu.accept', async (record) => {
+    if (record.id === hello.id) await gate;
+  });
+  const deliver = (bytes) => anna.bus.emit('net.in.ben.rec', { bytes });
+  const chat = deliver(await bytesOf(ben, hello.id));
+  for (const id of memberIds) await deliver(await bytesOf(ben, id));
+  await new Promise((r) => setTimeout(r, 50)); // the reindex ran (nothing deferred yet)
+  release();
+  await chat;
+  await until(async () => (await anna.query({ space: group, path: 'chat' })).length === 1, 3000, 'admitted after all');
+  assert.equal((await anna.storage.keys(`defer/${group.id}/`)).length, 0);
+  await anna.close();
+  await ben.close();
+});

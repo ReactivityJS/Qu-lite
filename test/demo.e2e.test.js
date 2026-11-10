@@ -302,6 +302,8 @@ test('the two-console walkthrough of docs/CONSOLE.md runs as written, in two bro
     };
     const until = async (page, check, what, ms = 15_000) => {
       for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) if (await page.evaluate(check)) return;
+      const diag = async (p) => p.evaluate(async () => ({ sync: await qu.syncStatus(), defer: (await qu.storage.keys('defer/')).length, out: await qu.storage.keys('sync/out/'), links: qu.dev.links().length, chat: (await qu.query({ space: g, path: 'chat' })).length, members: (await qu.members(g)).list().map((m) => m.role) }));
+      console.log('DIAG A', JSON.stringify(await diag(pages['konsole-a'])), 'B', JSON.stringify(await diag(pages['konsole-b'])));
       throw new Error(`timed out: ${what}`);
     };
     const results = [];
@@ -320,6 +322,52 @@ test('the two-console walkthrough of docs/CONSOLE.md runs as written, in two bro
     assert.equal(at(3, 'konsole-b'), 'Inhalt der Notiz', 'B got the file');
     assert.deepEqual(await run(pages['konsole-a'], "(await qu.query({ space: g, path: 'chat' })).map((r) => r.value.text)"), ['Hallo von B', 'Hallo zurück', 'Datei anbei', 'offline geschrieben']);
     assert.deepEqual(await run(pages['konsole-b'], "(await qu.query({ space: g, path: 'events', where: { start: { gte: Date.parse('2026-11-01') } } })).map((r) => r.value.title)"), ['Treffen']);
+  } finally {
+    await browser.close();
+    await relay.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a security key (virtual, with PRF) registers on one device and unlocks the identity on another', { skip: !chromium && 'playwright not installed', timeout: 120_000 }, async (t) => {
+  let browser;
+  for (const executablePath of [undefined, process.env.QU_CHROMIUM, '/opt/pw-browsers/chromium'].filter((p, i) => i === 0 || p)) {
+    try {
+      browser = await chromium.launch({ ...visible, ...(executablePath ? { executablePath } : {}) });
+      break;
+    } catch {
+      browser = null;
+    }
+  }
+  if (!browser) return t.skip('no Chromium available');
+  const dir = mkdtempSync(join(tmpdir(), 'qu-lite-e2e-'));
+  await buildWeb();
+  const relay = await startMirror({ port: 0, db: join(dir, 'relay.sqlite'), static: demoDir, log: () => {} });
+  try {
+    const page = await (await browser.newContext()).newPage();
+    await page.goto(`http://localhost:${relay.port}/`); // WebAuthn needs a domain: localhost, not 127.0.0.1
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('WebAuthn.enable');
+    const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: { protocol: 'ctap2', ctap2Version: 'ctap2_1', transport: 'usb', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, hasPrf: true, automaticPresenceSimulation: true },
+    });
+    // two "devices" = two databases in one browser; the virtual key is the same YubiKey for both
+    const result = await page.evaluate(async () => {
+      const { createClient } = await import('/dist/qu-client.js');
+      const pc = await createClient({ url: location.origin, name: 'device-pc', devtools: false });
+      const group = await pc.createGroup();
+      await pc.write(group, 'chat', 'from the PC');
+      const added = await pc.device.addKey({ name: 'YubiKey', kind: 'security-key' });
+      const phone = await createClient({ url: location.origin, name: 'device-phone', devtools: false, unlock: 'key' });
+      const [space] = await phone.restoreGroups();
+      for (let i = 0; i < 200 && !(await phone.query({ space, path: 'chat' })).length; i++) await new Promise((r) => setTimeout(r, 50));
+      const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+      return { synced: added.synced, same: hex(phone.identity.publicKey) === hex(pc.identity.publicKey), chat: (await phone.query({ space, path: 'chat' })).map((r) => r.value) };
+    });
+    assert.deepEqual(result, { synced: true, same: true, chat: ['from the PC'] });
+    const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId });
+    assert.equal(credentials.length, 1);
+    assert.equal(credentials[0].isResidentCredential, true, 'discoverable: unlock needs no user name');
   } finally {
     await browser.close();
     await relay.close().catch(() => {});

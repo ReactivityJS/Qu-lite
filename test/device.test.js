@@ -104,7 +104,7 @@ test('restore never silently replaces another identity that has groups on this s
 test('storage status and persistence: null where unsupported, the browser answer where it is', async () => {
   const plain = await createQu();
   plain.use(device(fast));
-  assert.deepEqual(await plain.device.status(), { persisted: null, usage: null, quota: null, backupAt: null, groups: 0, locked: false });
+  assert.deepEqual(await plain.device.status(), { persisted: null, usage: null, quota: null, backupAt: null, groups: 0, locked: false, keys: 0, keyLocked: false });
   assert.equal(await plain.device.persist(), null);
   await plain.close();
 
@@ -123,7 +123,7 @@ test('storage status and persistence: null where unsupported, the browser answer
   assert.equal((await qu.device.status()).persisted, false);
   assert.equal(await qu.device.persist(), true);
   assert.deepEqual(granted, [true]);
-  assert.deepEqual(await qu.device.status(), { persisted: true, usage: 1234, quota: 1e9, backupAt: null, groups: 0, locked: false });
+  assert.deepEqual(await qu.device.status(), { persisted: true, usage: 1234, quota: 1e9, backupAt: null, groups: 0, locked: false, keys: 0, keyLocked: false });
   await qu.close();
 });
 

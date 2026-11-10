@@ -43,6 +43,10 @@ async function main(): Promise<void> {
   week.map((r) => r.value.start);
   // @ts-expect-error - unknown condition
   await qu.query({ space: forum, path: 'events', where: { start: { after: 1 } } });
+  const { synced } = await qu.device.addKey({ name: 'YubiKey', kind: 'security-key' });
+  const unlocked = await createClient({ url: [`http://127.0.0.1:${relay.port}`], unlock: 'key' });
+  await unlocked.close();
+  void synced;
   const { records } = await qu.background.progress();
   await qu.push.ring(forum);
 

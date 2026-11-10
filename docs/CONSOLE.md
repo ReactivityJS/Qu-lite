@@ -282,7 +282,11 @@ Am Relay: `qu.pushRelay.size()` (gespeicherte Push-Abos), `dev.trace('push.**')`
 ## Geräte-Backup und Speicher
 
 ```js
-await qu.device.status()                    // {persisted, usage, quota, backupAt, groups}
+await qu.device.addKey({ name: 'YubiKey' })  // Sicherheitsschlüssel / Passkey: antippen
+await qu.device.keys()                       // registrierte Keys
+// anderes Gerät, gleiche Adresse:
+// await (await import('/dist/qu-client.js')).createClient({ url: location.origin, name: 'neu', unlock: 'key' })
+await qu.device.status()                    // {persisted, usage, quota, backupAt, groups, locked, keys, keyLocked}
 await qu.device.persist()                   // Browser bitten, den Speicher nicht zu räumen
 await qu.device.downloadBackup('lange passphrase hier')   // Backup als Datei
 await qu.device.lock('lange passphrase hier')             // Identität nur noch verschlüsselt speichern

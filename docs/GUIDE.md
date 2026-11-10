@@ -498,8 +498,76 @@ await qu.restoreGroups();                                   // Gruppen öffnen, 
   Laufzeit: `qu.device.lock(p)`, `changePassphrase(alt, neu)`, `removeLock(p)`. Das schützt kopierte
   Festplatten, Browser-Profile und Datenbankdateien – nicht eine kompromittierte, laufende Seite. Ohne
   Passphrase und ohne Backup ist die Identität bei vergessener Passphrase verloren: Backup anbieten!
-- **Status für die UI:** `await qu.device.status()` → `{persisted, usage, quota, backupAt, groups, locked}` – z. B.
+- **Status für die UI:** `await qu.device.status()` → `{persisted, usage, quota, backupAt, groups, locked, keys, keyLocked}` – z. B.
   „Kein Backup seit 30 Tagen“ oder „Speicher nicht geschützt“ anzeigen.
+
+### Anmelden mit YubiKey oder Passkey
+
+Statt Backup-Datei und Passphrase: Ein **Sicherheitsschlüssel** (YubiKey per USB am PC, per NFC am
+Handy) oder ein **Passkey** (Face ID, Fingerabdruck, Windows Hello; von Apple bzw. Google zwischen den
+eigenen Geräten synchronisiert) öffnet die Identität auf jedem Gerät.
+
+```js
+// Einrichten (einmal, aus einem Klick heraus): Key antippen
+await qu.device.addKey({ name: 'YubiKey blau' });
+await qu.device.addKey({ name: 'YubiKey Ersatz' });            // empfohlen: ein zweiter Key
+
+// Neues Gerät ("Einloggen"): Key einstecken oder ans Handy halten, antippen
+const qu = await createClient({ url, unlock: 'key' });
+await qu.restoreGroups();                                      // alle Gruppen, Inhalte kommen vom Relay
+```
+
+So funktioniert es:
+
+- **Nichts wird ausgelesen.** Der Key liefert über die WebAuthn-Erweiterung PRF ein Geheimnis, das nur er
+  erzeugen kann.
+- **Tresor:** Damit wird ein Tresor verschlüsselt, der die Identität und die Gruppenschlüssel enthält.
+  Der Relay bewahrt ihn für andere Geräte auf, kann ihn aber nicht öffnen. Ändern oder löschen kann ihn
+  nur die Identität selbst (signiert).
+- **Kein Benutzername nötig:** Der Browser bietet den passenden Schlüssel von sich aus an.
+- **Der Tresor folgt den Gruppen:** Neue Gruppen und neue Epochen kommen automatisch hinein.
+
+Einstellungen:
+
+- **Nur mit Key starten (geteilte Geräte):** `addKey({ lock: true })`. Dann liegt auf dem Gerät keine
+  nutzbare Identität mehr, und jeder Start braucht `createClient({ url, unlock: 'key' })`. Ohne
+  `unlock` bricht der Start mit `QU_LOCKED` ab und legt nie stillschweigend eine neue Identität an.
+  Auf einem neuen Gerät entscheidet `unlock: { remember: false }` dasselbe.
+- **Art des Schlüssels vorgeben:** `kind: 'security-key'` oder `kind: 'passkey'` bei `addKey` und
+  `unlock` (ohne Angabe bietet der Browser beides an). Verwalten mit `qu.device.keys()` und
+  `qu.device.removeKey(id)`.
+
+Fehler, die die App abfangen sollte:
+
+```js
+try {
+  qu = await createClient({ url, unlock: 'key' });
+} catch (e) {
+  if (e.code === 'QU_KEY_CANCELLED') zeige('Abgebrochen – nochmal antippen');
+  else if (e.code === 'QU_KEY_UNKNOWN') zeige('Dieser Schlüssel gehört zu keiner Identität hier – neu anlegen?');
+  else if (e.code === 'QU_KEY_UNSUPPORTED') zeige('Key oder Browser kann das nicht – Backup-Datei verwenden');
+  else throw e;
+}
+```
+
+Grenzen:
+
+- **Adresse:** Die Registrierung gilt pro Web-Adresse. PC und Handy müssen dieselbe App-Domain öffnen.
+  `http://localhost` geht zum Entwickeln, eine IP-Adresse nicht.
+- **Klick nötig:** Browser verlangen einen Klick des Nutzers, sonst bricht der Aufruf ab. Safari ist
+  dabei streng.
+- **Plattformen:**
+  - Am PC laufen Chrome, Edge und Firefox mit YubiKey per USB.
+  - iPhone und Mac (Safari ab 26.4) können Keys per USB und NFC. Ein Fehler in 26.4 ist in späteren
+    Versionen behoben.
+  - Bei Android mit NFC hängt es vom Gerät ab, bitte einmal testen.
+  - Passkeys gehen fast überall.
+  - Rückfall bleibt immer das Backup.
+- **Key verloren:** Vom anderen Key aus `removeKey(id)` aufrufen. Was jemand mit dem verlorenen Key schon
+  geöffnet hat, lässt sich nicht zurückholen. Deshalb am YubiKey eine **PIN** setzen: Ohne PIN genügt
+  der Besitz des Keys.
+- **Die Demo** zeigt beides: „Sicherheitsschlüssel / Passkey hinzufügen“ und auf dem zweiten Gerät
+  `demo.html?name=neu&unlock`.
 
 ## 11. Testen
 
