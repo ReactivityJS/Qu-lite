@@ -9,6 +9,13 @@
  * falls back to `keys(prefix)` + filter + sort, correct but O(prefix size).
  * Every driver sees the FULL key (unstorage strips the mount base; we don't,
  * so a driver can be moved between mounts without its data changing shape).
+ *
+ * WRITE HOOKS - `afterWrite(prefix, fn)` calls `fn(keys)` once a write that
+ * touched keys under `prefix` has COMPLETED (after the driver's set/remove/
+ * batch resolved), synchronously, before the write's promise resolves to
+ * the caller. Caches derived from stored data (sync.js: the sync index per
+ * space) invalidate there - whoever wrote, whatever plugin. A hook that
+ * throws is reported on `bus.error` and never fails the write.
  */
 import { memoryDriver } from './drivers/memory.js';
 
@@ -26,6 +33,20 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
   const mountsFor = (prefix) => {
     const owner = resolve(prefix);
     return mounts.filter((m) => m === owner || (m.base.startsWith(prefix) && m.base.length > prefix.length));
+  };
+
+  /** @type {Array<{prefix: string, fn: (keys: string[]) => void}>} */
+  const hooks = [];
+  const written = (keys) => {
+    for (const { prefix, fn } of hooks) {
+      const hit = keys.filter((k) => k.startsWith(prefix));
+      if (!hit.length) continue;
+      try {
+        fn(hit);
+      } catch (error) {
+        bus?.error?.(error, 'store.afterWrite');
+      }
+    }
   };
 
   /** Keys under `prefix` that actually belong to `m` (not shadowed by a deeper mount). */
@@ -68,11 +89,27 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
       if (typeof driver.has === 'function') return driver.has(key);
       return (await driver.get(key)) !== null;
     },
-    set(key, value) {
-      return resolve(key).driver.set(key, value);
+    async set(key, value) {
+      const out = await resolve(key).driver.set(key, value);
+      if (hooks.length) written([key]);
+      return out;
     },
-    remove(key) {
-      return resolve(key).driver.remove(key);
+    async remove(key) {
+      const out = await resolve(key).driver.remove(key);
+      if (hooks.length) written([key]);
+      return out;
+    },
+    /**
+     * @param {string} prefix @param {(keys: string[]) => void} fn - called after completed writes under `prefix`
+     * @returns {() => void} remove the hook
+     */
+    afterWrite(prefix, fn) {
+      const hook = { prefix, fn };
+      hooks.push(hook);
+      return () => {
+        const at = hooks.indexOf(hook);
+        if (at !== -1) hooks.splice(at, 1);
+      };
     },
     /**
      * Applies `[{op: 'set', key, value} | {op: 'remove', key}]`. Ops are
@@ -88,9 +125,14 @@ export function createMountRouter({ root = memoryDriver(), bus } = {}) {
         if (!groups.has(m)) groups.set(m, []);
         groups.get(m).push(op);
       }
-      for (const [{ driver }, group] of groups) {
-        if (typeof driver.batch === 'function') await driver.batch(group);
-        else for (const { op, key, value } of group) await (op === 'set' ? driver.set(key, value) : driver.remove(key));
+      try {
+        for (const [{ driver }, group] of groups) {
+          if (typeof driver.batch === 'function') await driver.batch(group);
+          else for (const { op, key, value } of group) await (op === 'set' ? driver.set(key, value) : driver.remove(key));
+        }
+      } finally {
+        // also after a failed batch: part of it may have landed (across mounts) - invalidating too often is harmless
+        if (hooks.length) written(ops.map((o) => o.key));
       }
     },
     async keys(prefix = '') {

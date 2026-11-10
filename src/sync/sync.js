@@ -60,6 +60,17 @@
  *   - PACED SENDING: bulk record sends (pull, want, push, outbox) wait while
  *     the link's send buffer is full (`whenWritable`), so a large space never
  *     trips the transport's slow-consumer limit.
+ *   - INDEX CACHE: the sealed (ts, id) vector of a whole space or shard is
+ *     cached (with its fingerprint) and shared by every session, digest
+ *     check and pull until the space's sync index changes - a reconnect
+ *     storm costs one index load per space, not one per client and session.
+ *     Invalidation is by a per-space generation that the storage router
+ *     bumps AFTER every completed write under `sx/<sid>/` (mount.js
+ *     `afterWrite`), whoever wrote it. A load only enters the cache if no
+ *     write completed while it ran; concurrent requests for the same scope
+ *     share one read (no thundering herd). Bounded by `indexCacheItems` (LRU);
+ *     time windows are never cached. Sessions keep the vector they started
+ *     with (a sealed vector is never mutated).
  *   - ONE SESSION PER (peer, scope): a reconcile already running for the same
  *     peer and scope is joined, never started twice (an app's watch() racing
  *     the reconnect's hello used to fetch everything twice).
@@ -138,6 +149,9 @@ const SETTLED = new Set(['stored', 'duplicate', 'superseded', 'deferred', 'blind
 const MINUTE = 60_000;
 /** Ids per want/ack frame (128 KiB): frames stay far below transport limits (ws-server maxFrameBytes, SSE posts). */
 const IDS_PER_FRAME = 4096;
+/** Sync-index keys read per storage call; the event loop runs between pages. */
+const INDEX_PAGE = 5000;
+const yieldToLoop = () => new Promise((resolve) => (globalThis.setImmediate ?? setTimeout)(resolve));
 const idChunks = (list) => Array.from({ length: Math.ceil(list.length / IDS_PER_FRAME) }, (_, i) => list.slice(i * IDS_PER_FRAME, (i + 1) * IDS_PER_FRAME));
 const packIds = (list) => {
   const ids = new Uint8Array(list.length * 32);
@@ -172,6 +186,9 @@ const later = (fn, ms) => {
  *   `digest`: offer and use the digest pre-check (see TRAFFIC above).
  *   `pull`: offer and use the direct download for scopes this device holds
  *   nothing of (see TRAFFIC above).
+ *   `indexCacheItems`: items of cached sync-index vectors kept at most
+ *   (~300 bytes each: mirror default 250 000 ~ 71 MiB, peer 50 000 ~ 14 MiB;
+ *   0 disables the cache).
  */
 export function sync({
   releaseMs = 30_000,
@@ -186,6 +203,7 @@ export function sync({
   ackDelayMs = 20,
   digest = true,
   pull = true,
+  indexCacheItems = role === 'mirror' ? 250_000 : 50_000,
   stale = 'retire',
 } = {}) {
   return (qu) => {
@@ -312,22 +330,106 @@ export function sync({
       };
     }
 
-    /** All (ts, id) items of a scope, from the public sync index only. */
-    async function loadItems({ sid, shard, from, to }) {
+    // --- sync-index cache (see INDEX CACHE) -------------------------------------
+    /** @type {Map<string, number>} sid -> generation, bumped after every completed sx/<sid>/ write */
+    const generations = new Map();
+    /** @type {Map<string, {gen: number, vector: object, items: number, fp?: Promise<Uint8Array>}>} `${sid}/${shard}` -> cached vector, LRU order */
+    const vectors = new Map();
+    let cachedItems = 0;
+    /** @type {Map<string, {gen: number, promise: Promise<object>}>} reads in flight per scope */
+    const reading = new Map();
+    const genOf = (sid) => generations.get(sid) ?? 0;
+    const dropCached = (key) => {
+      const entry = vectors.get(key);
+      if (!entry) return;
+      vectors.delete(key);
+      cachedItems -= entry.items;
+    };
+    const offWrites = storage.afterWrite?.('sx/', (keys) => {
+      const touched = new Set();
+      for (const key of keys) touched.add(key.slice(3, key.indexOf('/', 3) === -1 ? undefined : key.indexOf('/', 3)));
+      for (const sid of touched) {
+        generations.set(sid, genOf(sid) + 1);
+        for (const key of [...vectors.keys()]) if (key.startsWith(`${sid}/`)) dropCached(key);
+      }
+    });
+    if (offWrites) qu.onClose?.(offWrites);
+    // without write hooks (a foreign storage object) there is no safe invalidation: no cache
+    const caching = indexCacheItems > 0 && Boolean(offWrites);
+
+    /**
+     * The sealed (ts, id) vector of a scope - from the cache when the space
+     * did not change since it was loaded. Never mutate the result.
+     */
+    async function loadItems(scope) {
+      const windowed = scope.from != null || scope.to != null;
+      if (!caching || windowed) return readItems(scope);
+      const key = `${scope.sid}/${scope.shard ?? ''}`;
+      const gen = genOf(scope.sid);
+      const hit = vectors.get(key);
+      if (hit && hit.gen === gen) {
+        vectors.delete(key); // most recently used last
+        vectors.set(key, hit);
+        bus.notify('sync.index', { sid: scope.sid, shard: scope.shard ?? null, items: hit.items, ms: 0, cached: true });
+        return hit.vector;
+      }
+      // single flight: concurrent requests for the same scope and generation share one read
+      const running = reading.get(key);
+      if (running && running.gen === gen) return running.promise;
+      const promise = readItems(scope);
+      reading.set(key, { gen, promise });
+      let vector;
+      try {
+        vector = await promise;
+      } finally {
+        if (reading.get(key)?.promise === promise) reading.delete(key);
+      }
+      // only if no write completed meanwhile (it could be missing from what was read)
+      if (genOf(scope.sid) === gen && vector.size() <= indexCacheItems) {
+        dropCached(key);
+        vectors.set(key, { gen, vector, items: vector.size() });
+        cachedItems += vector.size();
+        for (const old of vectors.keys()) {
+          if (cachedItems <= indexCacheItems) break;
+          dropCached(old);
+        }
+      }
+      return vector;
+    }
+
+    /** Size and fingerprint of a whole-space/shard scope, cached with its vector. */
+    async function fingerprintOf(scope) {
+      const vector = await loadItems(scope);
+      const entry = vectors.get(`${scope.sid}/${scope.shard ?? ''}`);
+      const fp = entry?.vector === vector ? (entry.fp ??= vector.fingerprint(0, vector.size())) : vector.fingerprint(0, vector.size());
+      return { n: vector.size(), fp: await fp };
+    }
+
+    /** All (ts, id) items of a scope, read from the public sync index. */
+    async function readItems({ sid, shard, from, to }) {
+      const t0 = performance.now();
       const lo = from !== null && from !== undefined ? floorMinute(from) : null;
       const hi = to !== null && to !== undefined ? floorMinute(to - 1) + MINUTE : null;
       const prefix = shard ? `sx/${sid}/${shard}/` : `sx/${sid}/`;
-      const keys = shard
-        ? (await storage.range(prefix, { gte: lo !== null ? prefix + pad(lo) : undefined, lt: hi !== null ? prefix + pad(hi) : undefined })).map((r) => r.key)
-        : await storage.keys(prefix);
       const vector = new NegentropyStorageVector();
-      for (const key of keys) {
+      const add = (key) => {
         const last = key.slice(key.lastIndexOf('/') + 1);
         const ts = Number(last.slice(0, 13));
-        if ((lo !== null && ts < lo) || (hi !== null && ts >= hi)) continue;
+        if ((lo !== null && ts < lo) || (hi !== null && ts >= hi)) return;
         vector.insert(ts, last.slice(14));
+      };
+      // in pages, yielding between them: a large space never blocks the event loop in one piece
+      let gte = shard && lo !== null ? prefix + pad(lo) : undefined;
+      const lt = shard && hi !== null ? prefix + pad(hi) : undefined;
+      for (;;) {
+        const page = await storage.range(prefix, { gte, lt, limit: INDEX_PAGE });
+        for (const { key } of page) add(key);
+        if (page.length < INDEX_PAGE) break;
+        gte = `${page[page.length - 1].key}\u0000`;
+        await yieldToLoop();
       }
       vector.seal();
+      bus.notify('sync.index', { sid, shard: shard ?? null, items: vector.size(), ms: performance.now() - t0, cached: false });
       return vector;
     }
 
@@ -465,9 +567,8 @@ export function sync({
         const { sid, shard, n, fp } = items[i] ?? {};
         if (typeof sid !== 'string' || (shard != null && typeof shard !== 'string') || !(fp instanceof Uint8Array) || fp.length !== 16) continue;
         if (!allows(peer, sid)) continue;
-        const vector = await loadItems({ sid, shard: shard ?? null, from: null, to: null });
-        if (vector.size() !== n) continue;
-        if (sameBytes(await vector.fingerprint(0, vector.size()), fp)) same.push(i);
+        const mine = await fingerprintOf({ sid, shard: shard ?? null, from: null, to: null });
+        if (mine.n === n && sameBytes(mine.fp, fp)) same.push(i);
       }
       await send(peer, 'digestr', { id, same });
     });
@@ -507,7 +608,8 @@ export function sync({
         pulled = await pullScope(peer, scope);
         skip = pulled.complete;
       } else if (digest && !windowed && offered?.has('digest') && peers.has(peer)) {
-        skip = await digestCheck(peer, scope, local.size(), await local.fingerprint(0, local.size()));
+        const mine = await fingerprintOf(scope);
+        skip = await digestCheck(peer, scope, mine.n, mine.fp);
       }
 
       if (skip) release ??= () => {};
@@ -575,8 +677,8 @@ export function sync({
       if (p.done || p.checking || p.expect === null || p.received < p.expect) return;
       p.checking = true;
       try {
-        const local = await loadItems(p.scope);
-        const same = local.size() === p.remote.n && sameBytes(await local.fingerprint(0, local.size()), p.remote.fp);
+        const mine = await fingerprintOf(p.scope);
+        const same = mine.n === p.remote.n && sameBytes(mine.fp, p.remote.fp);
         p.end(same, same ? undefined : 'different set');
       } catch (error) {
         p.end(false, error.message);

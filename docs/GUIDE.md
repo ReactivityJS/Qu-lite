@@ -191,6 +191,11 @@ noch nichts hat (neues Gerät, frisch beigetreten), wird direkt geladen (`pull`)
 Ende per Fingerprint geprüft; bei Abweichung läuft der normale Abgleich. Große Downloads werden nach dem
 Sendepuffer getaktet. Messen: `node bench/sync-bytes.mjs` (Vergleich: `PULL=0`, `DIGEST=0`).
 
+**Last am Relay:** Der Sync-Index eines Space wird einmal geladen und von allen Sitzungen geteilt,
+bis sich der Space ändert. Ein Reconnect-Sturm nach einem Relay-Neustart kostet so einen
+Ladevorgang pro Space statt einen pro Client. Messen: `node bench/relay-load.mjs [clients] [records]`.
+Speicher: `sync({ indexCacheItems })`, etwa 300 Byte pro Eintrag.
+
 **Zustellung prüfen:** `qu.syncState(sid, id)` → `'pending' | 'sent'`; `qu.syncStatus()` →
 `{outbox, pending}`. Mit `ackFrom: 'mirror'` (Standard in `createClient`) gilt ein Record erst als
 gesendet, wenn ein **Relay** ihn dauerhaft gespeichert hat.

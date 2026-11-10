@@ -262,7 +262,10 @@ structured-clonable (objects, Uint8Array). Keys are `/`-separated. Every driver 
 
 **Mounts** follow unstorage: the longest prefix wins and the root `''` is always mounted.
 `createMountRouter({root, bus})` is the router that `createQu` uses. A batch is atomic within
-a mount, not across mounts.
+a mount, not across mounts. `qu.storage.afterWrite(prefix, fn) → off` calls `fn(keys)` after every
+completed `set`/`remove`/`batch` touching `prefix`, before the write resolves to its caller - the hook
+for caches derived from stored data (sync uses it for its index cache). Writes that bypass `qu.storage`
+(straight to a driver) are not seen.
 
 ```js
 qu.mount('sync/', memoryDriver());   // e.g. keep sync bookkeeping in memory
@@ -373,6 +376,7 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `maxConcurrentPerPeer` | `4` | own reconciles running at once per peer; more scopes queue instead of being declined |
 | `digest` | `true` | offer/use the digest pre-check: identical whole-space/shard sets are confirmed with one 16-byte fingerprint each, batched into one frame; only differing scopes run Negentropy. Used only when both sides announce it in `hello` |
 | `ackDelayMs` | `20` | acks are collected this long and sent as one frame per space |
+| `indexCacheItems` | mirror `250000`, peer `50000` | sync-index entries kept in memory (~300 bytes each, LRU; `0` = off). The (ts, id) vector of a whole space or shard and its fingerprint are shared by all sessions, digest checks and pulls until the space's index changes (generation bumped by `storage.afterWrite`); concurrent reads of one scope share one load |
 | `pull` | `true` | offer/use the direct download: a scope this device holds nothing of is fetched with one `pull` request instead of a reconcile (no id lists), checked by fingerprint at the end; on any difference, decline or timeout the normal reconcile runs. Used only when both sides announce it in `hello` |
 | `frameSizeLimit` | `262144` | max Negentropy message in bytes (0 = unlimited); bigger differences take more rounds. `want`/`ack` id lists go out in batches of 4096 ids |
 | `stale` | `'retire'` | a scope not completely synced for longer than the drop-list horizon retires old records the peer lacks instead of pushing them (they may have been deleted meanwhile); `'push'`: push anyway |
@@ -387,6 +391,11 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 | `qu.staleSpaces() → [{sid, last}]` | spaces this device has not completely synced within the horizon - check at start-up to warn the user |
 
 `members()`, `user()` and `inbox()` call `watch()` for their spaces themselves.
+
+**Relay load** (`bench/relay-load.mjs`, 20 devices reconnecting at once, 20,000 records, SQLite): 20 index loads and a
+1,081 ms event-loop stall before, 1 load and 67 ms now; after one new record 40 loads / 1,778 ms before,
+1 load / 15 ms now. The index is read in pages of 5,000 keys with the event loop running in between.
+`sync.index {sid, shard, items, ms, cached}` reports every load (`cached: true` = served from memory).
 
 **Traffic**: a reconcile waits up to 5 s for the peer's `hello` (its role and features decide the path).
 An empty scope is pulled (`sync.pull {peer, sid, shard, received, complete, reason?}`; `sync.start` has

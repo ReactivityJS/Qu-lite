@@ -94,7 +94,7 @@ qu.dev.trace('qu.accept')              // jeder Record vor der Indizierung
 
 **„Was macht der Abgleich?“**
 ```js
-qu.dev.trace('sync.**')                // sync.done {sent, received}, sync.pull {complete, reason}, sync.busy, sync.stale …
+qu.dev.trace('sync.**')                // sync.done, sync.pull {complete}, sync.index {items, ms, cached}, sync.busy …
 await qu.resync({ space: qu.space(qu.dev.spaces()[0].sid) })   // sofort abgleichen
 ```
 

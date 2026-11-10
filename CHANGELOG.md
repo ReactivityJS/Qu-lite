@@ -44,6 +44,12 @@ Stability, scalability and one base for client and relay.
   burst were dropped, the relay closed the link after 50 drops and the client re-sent its whole
   outbox on every reconnect (2,000 records: 47 s, 195 reconnects, ~280,000 dropped frames; now 13 s,
   one connection, none dropped). `bench/upload-rate.mjs`.
+- **Sync-index cache** (`indexCacheItems`): the (ts, id) vector and fingerprint of a space are loaded
+  once and shared by every session, digest and pull until the index changes; generation-based
+  invalidation through the new `storage.afterWrite(prefix, fn)` hook (after every completed write,
+  whoever wrote); single-flight reads; index read in pages with the event loop running between them.
+  Reconnect storm of 20 devices on 20,000 records: index loads 20 -> 1, longest event-loop stall
+  1,081 ms -> 67 ms; after a change 40 -> 1 loads, 1,778 ms -> 15 ms. `bench/relay-load.mjs`.
 
 ## [Unreleased]
 
