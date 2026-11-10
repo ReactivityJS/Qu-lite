@@ -75,6 +75,10 @@ Stability, scalability and one base for client and relay.
   up to 64 records / 64 KiB per frame; any other sync frame flushes first. Rate limits and the send
   budget count records (`frameUnits`), not frames. Acks for a batch go out together. First upload of
   4,000 records: 4,564 -> 167 frames, -5 % bytes; fresh device -6.5 %.
+- **Traffic by message type**: every link counts frames and bytes per type for the whole session
+  (`netOf(qu).traffic`); `qu.dev.traffic()`, `watchTraffic(seconds)`, `resetTraffic()` in the console;
+  `traffic.byType` and `qu_lite_traffic_bytes_total{direction,type}` in stats and `/metrics`.
+  `bench/idle-traffic.mjs` measures an idle client: presence heartbeats cost ~1.3 MiB/hour for 10 groups.
 
 ## [Unreleased]
 

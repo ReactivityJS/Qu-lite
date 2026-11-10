@@ -658,7 +658,7 @@ database file), not a compromised running page. `restore` into a locked storage 
 the relay REPL. `global`: name on `globalThis` (browser default `'qu'`, Node default none, `false` = none).
 `createClient()` installs it in browsers, `createRelay()` always (without a global).
 
-`qu.dev.help()`, `info()`, `links()`, `transports()`, `trace(pattern, {persist?, filter?}) → stop`,
+`qu.dev.help()`, `info()`, `links()`, `transports()`, `traffic()`, `watchTraffic(seconds) → stop`, `resetTraffic()`, `trace(pattern, {persist?, filter?}) → stop`,
 `untrace()`, `spaces()`, `pending()`, `ls(prefix, limit)`, `get(key)`, `dump(prefix, limit)`, `stats()`,
 `listeners(topic)`, `emit(topic, payload)`. The identity (`qu/identity`) is always masked.
 `?qu-trace=<pattern>` in the page URL, or `trace(p, {persist: true})`, traces from start-up.
@@ -825,6 +825,9 @@ These are exported for tools, tests and custom plugins. Apps rarely need them.
   `randomBytes`, `toHex`/`fromHex`, `toBase64`/`fromBase64` and `concat`.
 - **HLC**: `createClock({now?, maxDriftMs?})`, `formatHlc(ms, counter)`, `parseHlc(hlc)`.
 - **Drop lists**: `GC_HORIZON_MS`, `gcCutoff(now)`, `encodeEntries`, `decodeEntries`, `mayDrop`.
+- **Traffic by type**: `netOf(qu).traffic` (Map type -> `{framesIn, bytesIn, framesOut, bytesOut}`, all links
+  since `trafficSince`, unknown types as `other`), `FRAME_TYPES` (type -> meaning); `stats` reports it as
+  `traffic.byType` and `qu_lite_traffic_bytes_total{direction, type}` / `qu_lite_traffic_frames_total`.
 - **Frames**: `encodeFrame(type, payload)`, `decodeFrame(bytes)` (strict), `peekFrameType(bytes)`,
   `PROTOCOL_VERSION`. `netOf(qu)` holds the link scopes, open links (`links`: `{via, since, version, stats}`)
   and `helloTimeoutMs`.

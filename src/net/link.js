@@ -65,6 +65,50 @@ import { encodeFrame, decodeFrame, peekFrameType, frameUnits } from './frame.js'
 export const PROTOCOL_VERSION = 1;
 /** Frame types are bus topic segments: no dots, no wildcards. */
 const FRAME_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
+/**
+ * TRAFFIC BY TYPE: every link adds frames and bytes per frame type to
+ * `netOf(qu).traffic` (Map type -> {framesIn, bytesIn, framesOut, bytesOut}),
+ * summed over all links since `netOf(qu).trafficSince` - links that closed
+ * included. Bytes are frame bytes (what the transport is given), without
+ * WebSocket/TLS/TCP framing. Types this code does not send are counted as
+ * `other`, so a remote inventing types cannot grow the map.
+ */
+export const FRAME_TYPES = Object.freeze({
+  hi: 'link handshake',
+  hello: 'sync handshake: role, subscriptions, features',
+  grant: 'space access grants (a relay stores only granted spaces)',
+  sub: 'subscribe to a space (partial sync)',
+  unsub: 'unsubscribe',
+  rec: 'one record (sealed envelope)',
+  recs: 'several records in one frame',
+  ack: 'records stored by the receiver',
+  nack: 'record refused (quota, size)',
+  neg: 'reconcile request (Negentropy)',
+  negr: 'reconcile answer',
+  negend: 'reconcile finished',
+  negerr: 'reconcile declined (busy)',
+  want: 'ids the initiator asks for',
+  wantmiss: 'ids the responder does not have',
+  digest: 'fingerprint check before a reconcile',
+  digestr: 'fingerprint answer',
+  pull: 'direct download request (empty scope)',
+  pullend: 'direct download finished',
+  sig: 'ephemeral signal: presence heartbeat, typing, WebRTC signaling',
+  other: 'any other type',
+});
+const countType = (net, type, dir, bytes) => {
+  const key = Object.hasOwn(FRAME_TYPES, type) ? type : 'other';
+  let row = net.traffic.get(key);
+  if (!row) net.traffic.set(key, (row = { framesIn: 0, bytesIn: 0, framesOut: 0, bytesOut: 0 }));
+  if (dir === 'in') {
+    row.framesIn++;
+    row.bytesIn += bytes;
+  } else {
+    row.framesOut++;
+    row.bytesOut += bytes;
+  }
+};
+
 /** Inbound frames processed at once per link (the rest queue in order). */
 export const MAX_INFLIGHT = 64;
 const INBOUND_HIGH = 4 * 1024 * 1024;
@@ -86,6 +130,9 @@ export function netOf(qu) {
       scopes,
       isolated,
       links,
+      /** @type {Map<string, {framesIn: number, bytesIn: number, framesOut: number, bytesOut: number}>} per frame type, all links */
+      traffic: new Map(),
+      trafficSince: Date.now(),
       /** ms a remote has to say `hi` before the link is closed (0 = no limit). */
       helloTimeoutMs: 15_000,
       /** A scoped link carries only its sids; a shared link no isolated sid. */
@@ -144,6 +191,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
   const transmit = (frame) => {
     stats.sent += frame.length;
     stats.framesOut++;
+    countType(net, frame.kind, 'out', frame.length);
     send(frame);
   };
   // outbound budget from the remote's announced inbound limits (null: send at once)
@@ -178,6 +226,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
   const sendFrame = (type, payload) => {
     if (!open) return;
     const frame = encodeFrame(type, payload);
+    frame.kind = type;
     if (!bucket) return transmit(frame);
     frame.units = type === 'recs' ? frameUnits(frame) : 1;
     queue.push(frame);
@@ -216,8 +265,10 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       try {
         type = peekFrameType(bytes);
       } catch {
+        countType(net, 'other', 'in', bytes.length);
         return qu.bus.notify('net.error', { via, reason: 'bad frame', peer: remote });
       }
+      countType(net, type, 'in', bytes.length);
       if (!remote && type !== 'hi') {
         if (++early > MAX_EARLY_FRAMES) refuse('no hello');
         return;

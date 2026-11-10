@@ -17,12 +17,14 @@
 import * as esbuild from 'esbuild';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { rmSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 export async function buildWeb() {
   const common = { bundle: true, format: 'esm', platform: 'browser', target: 'es2022', minify: true, sourcemap: true, logLevel: 'warning' };
   await esbuild.build({ ...common, entryPoints: [join(here, '..', 'src', 'index.js')], outfile: join(here, 'dist', 'qu-lite.js') });
+  rmSync(join(here, 'dist', 'chunks'), { recursive: true, force: true }); // hashed names: drop chunks of earlier builds
   await esbuild.build({ ...common, entryPoints: { 'qu-client': join(here, '..', 'src', 'browser.js') }, outdir: join(here, 'dist'), splitting: true, chunkNames: 'chunks/[name]-[hash]' });
   await esbuild.build({ ...common, entryPoints: [join(here, 'demo.js')], outfile: join(here, 'dist', 'demo.js') });
   return join(here, 'dist');

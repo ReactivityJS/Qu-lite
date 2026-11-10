@@ -118,6 +118,8 @@ export function stats({ windowMs = 10_000, sampleMs = 1000, emitMs = 0, storageC
           framesOut: t.framesOut,
           inBps: rate(now, t.received, first && { t: first.t, value: first.in }),
           outBps: rate(now, t.sent, first && { t: first.t, value: first.out }),
+          /** per frame type since net.trafficSince: {type: {framesIn, bytesIn, framesOut, bytesOut}} */
+          byType: Object.fromEntries([...net.traffic].map(([type, r]) => [type, { ...r }])),
         },
         peers,
         records: { local: { ...records.local }, remote: { ...records.remote } },
@@ -173,6 +175,9 @@ export function stats({ windowMs = 10_000, sampleMs = 1000, emitMs = 0, storageC
       metric('sent_bytes_total', 'counter', 'Bytes sent over all links.', one(r.traffic.bytesOut));
       metric('received_frames_total', 'counter', 'Frames received over all links.', one(r.traffic.framesIn));
       metric('sent_frames_total', 'counter', 'Frames sent over all links.', one(r.traffic.framesOut));
+      const byType = (field, dir) => Object.entries(r.traffic.byType ?? {}).map(([type, v]) => [`{direction="${dir}",type="${type}"}`, v[field]]);
+      metric('traffic_bytes_total', 'counter', 'Frame bytes by direction and message type.', [...byType('bytesIn', 'in'), ...byType('bytesOut', 'out')]);
+      metric('traffic_frames_total', 'counter', 'Frames by direction and message type.', [...byType('framesIn', 'in'), ...byType('framesOut', 'out')]);
       metric('receive_bytes_per_second', 'gauge', `Receive throughput over the last ${windowMs / 1000} s.`, one(r.traffic.inBps));
       metric('send_bytes_per_second', 'gauge', `Send throughput over the last ${windowMs / 1000} s.`, one(r.traffic.outBps));
       metric('connections', 'gauge', 'Open connections.', one(r.connections.open));

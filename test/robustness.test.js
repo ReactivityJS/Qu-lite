@@ -450,3 +450,34 @@ test('rate limits count batched records: frameUnits, guard and send budget', asy
   assert.deepEqual(limited, ['recs']);
   await qu.close();
 });
+
+test('traffic by type: counted per frame type over all links (closed ones too), unknown types as other; devtools and stats show it', async () => {
+  const { netOf } = await import('../src/net/link.js');
+  const qu = await createQu();
+  qu.use(devtools({ global: false, log: () => {}, table: () => {} }));
+  const { stats } = await import('../src/stats.js');
+  qu.use(stats());
+  const sent = [];
+  const link = createLink(qu, { send: (b) => sent.push(b.length), via: 'test' });
+  link.receive(encodeFrame('hi', { peer: '0123456789abcdef', v: 1 }));
+  await qu.bus.emit('net.out.0123456789abcdef.sig', { bytes: new Uint8Array(300) });
+  link.receive(encodeFrame('sig', { bytes: new Uint8Array(100) }));
+  for (let i = 0; i < 40; i++) link.receive(encodeFrame(`made-up-${i}`, {}));
+  link.closed();
+  const t = netOf(qu).traffic;
+  assert.equal(t.get('sig').framesOut, 1);
+  assert.equal(t.get('sig').framesIn, 1);
+  assert.ok(t.get('sig').bytesOut > 300 && t.get('sig').bytesIn > 100);
+  assert.equal(t.get('other').framesIn, 40, 'invented types do not grow the map');
+  assert.ok(t.size <= 4, [...t.keys()].join());
+  assert.equal(t.get('hi').framesOut, 1);
+
+  const view = qu.dev.traffic();
+  assert.equal(view.frames, 44);
+  assert.equal(view.bytes, sent.reduce((a, b) => a + b, 0) + [...t.values()].reduce((a, r) => a + r.bytesIn, 0));
+  assert.equal(qu.stats.snapshot().traffic.byType.sig.framesOut, 1);
+  assert.match(await qu.stats.prometheus(), /qu_lite_traffic_bytes_total\{direction="out",type="sig"\} \d+/);
+  qu.dev.resetTraffic();
+  assert.equal(qu.dev.traffic().frames, 0);
+  await qu.close();
+});

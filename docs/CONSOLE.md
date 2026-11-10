@@ -149,6 +149,42 @@ qu.transports.relay.connect(location.origin) // … und zurück
 await qu.close()                            // Peer sauber beenden
 ```
 
+## Datenvolumen und Durchsatz
+
+Jede Verbindung zählt Frames und Bytes pro Nachrichtentyp, für die ganze Sitzung (auch über
+Reconnects hinweg):
+
+```js
+qu.dev.traffic()          // Tabelle: Typ, raus/rein, Frames, Anteil, Hochrechnung pro Stunde, Bedeutung
+qu.dev.watchTraffic(10)   // alle 10 s: "last 10 s: 3.7 KiB (378 B/s) - sig 3.7 KiB"; gibt stop() zurück
+qu.dev.resetTraffic()     // ab jetzt neu zählen (z. B. vor einem Test)
+qu.dev.links()            // pro Verbindung: Bytes/Frames, Warteschlangen
+```
+
+So findet man einen Volumenfresser: `resetTraffic()`, die App eine Weile so benutzen (oder liegen
+lassen) wie im Verdachtsfall, dann `traffic()`. Die Spalte *what* erklärt jeden Typ:
+
+| Typ | Was |
+|---|---|
+| `rec` / `recs` | Records (Nachrichten, Profile, Quittungen) – Nutzdaten |
+| `sig` | flüchtige Signale: **Präsenz-Herzschlag**, Tippen, WebRTC-Aufbau |
+| `ack` / `nack` | Bestätigungen des Relays |
+| `neg` / `negr` / `want` / `wantmiss` / `negend` | Abgleich (Negentropy) |
+| `digest` / `digestr` | Fingerprint-Vergleich beim Verbinden |
+| `pull` / `pullend` | Direkt-Download eines leeren Space |
+| `hi` / `hello` / `grant` / `sub` / `unsub` | Verbindungsaufbau, Freigaben, Abos |
+
+Die Bytes sind Frame-Bytes. Auf der Leitung kommen pro Frame grob 60 Byte für WebSocket, TLS und
+TCP hinzu (`traffic()` zeigt die Schätzung). WebSocket-Pings des Relays (alle 25 s) sind nicht enthalten.
+
+**Bekannter Posten:** Präsenz kostet pro Gruppe und anwesendem Mitglied alle 20 s einen `sig` von etwa
+380 Byte – in 10 Gruppen mit einem weiteren Mitglied rund 1,3 MiB pro Stunde, solange die App
+verbunden ist (`bench/idle-traffic.mjs`). Wer das nicht braucht: `status({ presence: false })` oder
+`status(group)` nur für sichtbare Gruppen öffnen.
+
+Am Relay stehen dieselben Zahlen in `/metrics` (`qu_lite_traffic_bytes_total{direction, type}`) und in
+`/stats` (`traffic.byType`).
+
 ## Geräte-Backup und Speicher
 
 ```js

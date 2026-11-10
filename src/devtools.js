@@ -21,7 +21,11 @@
  * Optional plugin: nothing in the core imports it.
  */
 import { toHex } from './crypto.js';
-import { netOf } from './net/link.js';
+import { netOf, FRAME_TYPES } from './net/link.js';
+
+/** Rough per-frame cost below our frame bytes: WebSocket header + TLS record + share of TCP/IP headers. */
+const WIRE_OVERHEAD = 60;
+const kb = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(2)} MiB`);
 
 const SECRET_KEYS = new Set(['qu/identity', 'qu/identity-locked']);
 const TRACE_KEY = 'qu:trace';
@@ -68,6 +72,7 @@ const storageSet = (key, value) => {
 export function devtools({ global = typeof window !== 'undefined' ? 'qu' : false, log = console.log, table = console.table ?? console.log } = {}) {
   const plugin = (qu) => {
     const traces = new Map(); // pattern -> stop
+    const watchers = new Set(); // watchTraffic stops
     let exposedAs = null;
     const started = Date.now();
     const browser = typeof window !== 'undefined';
@@ -114,6 +119,9 @@ export function devtools({ global = typeof window !== 'undefined' ? 'qu' : false
           'get(key)': 'one stored value (identity masked)',
           'dump(prefix)': 'stored values under a prefix as plain JSON (for bug reports)',
           'stats()': 'operating figures (stats plugin)',
+          'traffic()': 'bytes and frames in/out per message type since start (or reset), with a per-hour rate',
+          'watchTraffic(seconds)': 'log the traffic of every interval live, per type; returns stop()',
+          'resetTraffic()': 'start counting traffic from zero',
           'listeners(topic)': 'how many handlers a topic reaches',
           'emit(topic, payload)': 'fire a bus event by hand (bus.emit)',
         };
@@ -189,9 +197,62 @@ export function devtools({ global = typeof window !== 'undefined' ? 'qu' : false
         return qu.stats.report();
       },
       listeners: (topic) => qu.bus.listenerCount(topic),
+      traffic() {
+        const net = netOf(qu);
+        const seconds = Math.max(1, (Date.now() - net.trafficSince) / 1000);
+        const rows = [...net.traffic]
+          .map(([type, r]) => ({
+            type,
+            out: kb(r.bytesOut),
+            in: kb(r.bytesIn),
+            framesOut: r.framesOut,
+            framesIn: r.framesIn,
+            perHour: kb(Math.round(((r.bytesOut + r.bytesIn) * 3600) / seconds)),
+            total: r.bytesOut + r.bytesIn,
+            what: FRAME_TYPES[type] ?? '',
+          }))
+          .sort((a, b) => b.total - a.total);
+        const sum = rows.reduce((t, r) => t + r.total, 0);
+        const frames = [...net.traffic.values()].reduce((t, r) => t + r.framesIn + r.framesOut, 0);
+        for (const r of rows) r.share = sum ? `${Math.round((r.total / sum) * 100)} %` : '-';
+        log(
+          `[qu-lite] traffic since ${new Date(net.trafficSince).toLocaleTimeString()} (${Math.round(seconds)} s): ${kb(sum)} in ${frames} frames ` +
+            `≈ ${kb(Math.round((sum * 3600) / seconds))}/hour; on the wire roughly +${kb(frames * WIRE_OVERHEAD)} (WebSocket/TLS/TCP)`
+        );
+        print(rows.map(({ total, ...r }) => r));
+        return { since: net.trafficSince, seconds: Math.round(seconds), bytes: sum, frames, wireEstimate: sum + frames * WIRE_OVERHEAD, byType: Object.fromEntries(net.traffic) };
+      },
+      resetTraffic() {
+        const net = netOf(qu);
+        net.traffic.clear();
+        net.trafficSince = Date.now();
+      },
+      watchTraffic(seconds = 10) {
+        const net = netOf(qu);
+        let last = new Map([...net.traffic].map(([t, r]) => [t, { ...r }]));
+        const stop = qu.timers.interval(() => {
+          const parts = [];
+          let total = 0;
+          for (const [type, r] of net.traffic) {
+            const before = last.get(type) ?? { bytesIn: 0, bytesOut: 0 };
+            const delta = r.bytesIn - before.bytesIn + (r.bytesOut - before.bytesOut);
+            if (delta) parts.push([type, delta]);
+            total += delta;
+          }
+          last = new Map([...net.traffic].map(([t, r]) => [t, { ...r }]));
+          parts.sort((a, b) => b[1] - a[1]);
+          log(`[qu-lite] last ${seconds} s: ${kb(total)} (${kb(Math.round(total / seconds))}/s)${parts.length ? ' - ' + parts.map(([t, d]) => `${t} ${kb(d)}`).join(', ') : ''}`);
+        }, seconds * 1000);
+        watchers.add(stop);
+        return () => {
+          stop();
+          watchers.delete(stop);
+        };
+      },
       emit: (topic, payload) => qu.bus.emit(topic, payload),
       close() {
         for (const stop of [...traces.values()]) stop();
+        for (const stop of watchers) stop();
         if (exposedAs && globalThis[exposedAs] === qu) delete globalThis[exposedAs];
       },
     };
