@@ -26,7 +26,7 @@ export const MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
  * Wires one already-created socket into a link.
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {WebSocket} socket
- * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} [options]
+ * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>, maxBufferedBytes?: number}} [options]
  *   `localId`/`scope`: a scoped link (link.js) - one connection per space.
  */
 export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, scope, maxBufferedBytes = MAX_BUFFERED_BYTES } = {}) {
@@ -92,7 +92,7 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, sc
  * One self-healing client connection.
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {string} url
- * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number, connectTimeoutMs?: number, localId?: string, scope?: Iterable<string>, onConnecting?: (attempt: number) => void}} [options]
+ * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number, connectTimeoutMs?: number, localId?: string, scope?: Iterable<string>, onConnecting?: (attempt: number) => void, maxBufferedBytes?: number}} [options]
  * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null, readonly url: string}}
  */
 export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000, connectTimeoutMs = 10_000, localId, scope, onConnecting, maxBufferedBytes } = {}) {

@@ -89,6 +89,11 @@ Einstieg `qu-client.js` ist ~4 KB (gzip); der Rest kommt in Chunks nach Bedarf. 
 (`node:sqlite`, `ws`) liegt ausschließlich hinter `@qu/lite/node` – ein Browser-Bundle kann ihn nicht
 versehentlich enthalten.
 
+**TypeScript:** Alle Einstiege bringen Typdeklarationen mit (`npm run types`, läuft auch bei `npm pack`).
+`createClient()` liefert den Typ `Qu` – mit `write<V>()`, `query<V>()`, `members()`, `status()`,
+`device`, `dev`. Ein Tippfehler wie `qu.query(group, 'chat')` statt `qu.query({ space: group, path: 'chat' })`
+fällt schon im Editor auf. Reines JavaScript bekommt dieselben Hinweise über JSDoc.
+
 ## 4. Ein Peer, drei Rollen
 
 Alle drei Rollen sind `createPeer()` mit anderen Namen aus der Registry. Die Presets sind nur

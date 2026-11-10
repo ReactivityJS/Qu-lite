@@ -43,6 +43,7 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   old device); then `await qu.restoreGroups()`.
  *   `passphrase`: keep the identity encrypted in storage; every start needs it
  *   (`error.code` 'QU_LOCKED' without, 'QU_WRONG_PASSPHRASE' with a wrong one).
+ * @returns {Promise<import('./qu-types.js').Qu>}
  */
 export async function createClient({
   url,

@@ -75,6 +75,7 @@ export function sqliteDriver({ path = ':memory:' } = {}) {
     async keys(prefix = '') {
       return q.keys.all(prefix, prefixEnd(prefix)).map((r) => r.key);
     },
+    /** @param {string} prefix @param {{gte?: string, lt?: string, limit?: number, reverse?: boolean}} [options] */
     async range(prefix, { gte, lt, limit = Infinity, reverse = false } = {}) {
       const lower = gte !== undefined && gte > prefix ? gte : prefix;
       const upper = lt !== undefined && lt < prefixEnd(prefix) ? lt : prefixEnd(prefix);

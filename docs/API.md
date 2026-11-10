@@ -40,6 +40,13 @@ The library is plain ES modules and needs no build step. It has one runtime depe
 name is used, so `createPeer`/`createClient` load exactly the plugins they are given (a bundler
 puts each one into its own chunk; the relay serves them as `dist/qu-client.js` + `dist/chunks/`).
 
+**TypeScript**: every entry point ships declarations (`types/`, generated from the JSDoc by
+`npm run types`, also run on `npm pack`). `createClient()`/`createPeer()` return the `Qu` type
+(`src/qu-types.d.ts`): the kernel plus the members the standard plugins add - `write<V>()`,
+`query<V>()` → `QuRecord<V>[]`, `members()`, `status()`, `device`, `dev`, `transports`. Members of
+other plugins stay reachable as `any`. `test/types/app.ts` is a compiled example. Plain JavaScript
+projects get the same hints in editors that read JSDoc.
+
 A guided introduction (German) is [GUIDE.md](GUIDE.md); inspecting a running peer from the browser
 console or the relay REPL is [CONSOLE.md](CONSOLE.md).
 

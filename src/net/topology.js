@@ -11,6 +11,10 @@
  * `connect(endpoint)` must return something with `close()` (e.g. connectWs);
  * duplicates are harmless - records are deduplicated by id.
  */
+/**
+ * @param {{mode?: 'star'|'mesh'|'auto', mirrors?: string[], peers?: string[], maxMesh?: number, fanout?: number,
+ *   connect?: (endpoint: string) => {close: () => void}}} [options]
+ */
 export function topology({ mode = 'auto', mirrors = [], peers = [], maxMesh = 8, fanout = 3, connect } = {}) {
   if (typeof connect !== 'function') throw new Error('topology: `connect(endpoint)` is required');
   return (qu) => {

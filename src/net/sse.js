@@ -17,7 +17,7 @@ import { toHex, randomBytes, fromBase64 } from '../crypto.js';
  * One self-healing SSE connection.
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {string} base - e.g. 'https://relay.example/sse'
- * @param {{fetchImpl?: typeof fetch, minDelayMs?: number, maxDelayMs?: number}} [options]
+ * @param {{fetchImpl?: typeof fetch, minDelayMs?: number, maxDelayMs?: number, localId?: string, scope?: Iterable<string>}} [options]
  */
 export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs = 500, maxDelayMs = 30_000, localId, scope } = {}) {
   let closed = false;

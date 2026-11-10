@@ -182,7 +182,7 @@ export async function loadIdentity(store, { passphrase, generate = crypto.genera
  * A store that already belongs to ANOTHER identity is refused if that identity has
  * groups here (their keys would be lost) - unless `force`.
  * @param {object} store - a driver (get/set/remove/keys)
- * @param {{backup: string, passphrase: string, force?: boolean}} options
+ * @param {{backup: string, passphrase: string, force?: boolean, lockPassphrase?: string}} options
  * @returns {Promise<{identity: object, groups: number, replaced: boolean}>}
  */
 export async function restoreInto(store, { backup, passphrase, force = false, lockPassphrase }) {

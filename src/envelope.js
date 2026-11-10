@@ -47,7 +47,7 @@ export const VERSION = 2;
 /**
  * Padded length for an inner of `n` bytes (including the 0x00 terminator).
  * @param {number} n
- * @param {'quarter'|'pow2'|'none'} mode
+ * @param {'quarter'|'small'|'pow2'|'none'} [mode]
  */
 export function paddedLength(n, mode = 'quarter') {
   if (mode === 'none') return n;
@@ -91,7 +91,7 @@ export function peekEnvelope(bytes) {
 
 /**
  * @param {import('./space.js').Space} space
- * @param {{path: string, key?: string|null, hlc: string, value: *, visibility?: 'private'|'public'}} record
+ * @param {{path: string, key?: string|null, hlc: string, value: *, visibility?: 'private'|'public', type?: string, deleted?: boolean, padding?: 'quarter'|'small'|'pow2'|'none'}} record
  * @param {{publicKey: Uint8Array, privateKey: Uint8Array}} author - see `space.authorFor(identity)`.
  * @returns {Promise<{bytes: Uint8Array, id: string}>}
  */

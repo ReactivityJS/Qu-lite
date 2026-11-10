@@ -24,7 +24,7 @@ const done = (request) =>
   });
 
 /**
- * @param {{name?: string, store?: string, indexedDB?: IDBFactory, IDBKeyRange?: typeof IDBKeyRange}} [options]
+ * @param {{name?: string, store?: string, indexedDB?: IDBFactory, IDBKeyRange?: typeof IDBKeyRange, onBlocked?: () => void}} [options]
  */
 export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = globalThis.indexedDB, IDBKeyRange: KeyRange = globalThis.IDBKeyRange, onBlocked = () => {} } = {}) {
   if (!indexedDB || !KeyRange) throw new Error('indexedDbDriver: IndexedDB is not available here');
@@ -108,6 +108,7 @@ export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = gl
       const range = bounds(prefix);
       return range ? done((await objectStore('readonly')).getAllKeys(range)) : [];
     },
+    /** @param {string} prefix @param {{gte?: string, lt?: string, limit?: number, reverse?: boolean}} [options] */
     async range(prefix, { gte, lt, limit = Infinity, reverse = false } = {}) {
       const range = bounds(prefix, gte, lt);
       if (!range) return [];

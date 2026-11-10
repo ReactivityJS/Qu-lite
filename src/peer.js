@@ -79,6 +79,7 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  *   `code` 'QU_LOCKED' / 'QU_WRONG_PASSPHRASE').
  *   A transport whose API has a `ready` promise (a server binding its port)
  *   is awaited, so a failure surfaces here and not later.
+ * @returns {Promise<import('./qu-types.js').Qu>}
  */
 export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId, restore, passphrase } = {}) {
   const [storeName, storeOptions] = typeof store === 'object' && !Array.isArray(store) ? [null, store] : entry(store);

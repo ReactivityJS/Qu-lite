@@ -81,7 +81,7 @@ function staticHandler(dir) {
  *   default of 100 MiB would let any client make the relay buffer that much before rate limits apply.
  *   `maxConnections`: peers at once, WebSocket + SSE (default 10 000). `maxBufferedBytes`: send buffer per
  *   peer before it counts as a slow consumer and is closed (default 16 MiB). `ready`: readiness for /readyz.
- * @returns {Promise<{port: number, close: () => Promise<void>, connections: () => number, wss: WebSocketServer|null}>}
+ * @returns {Promise<{port: number, close: () => Promise<void>, connections: () => number, wss: import('ws').WebSocketServer|null}>}
  */
 export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024, maxConnections = 10_000, maxBufferedBytes, drainMs = 1000, ready = () => true } = {}) {
   const ownServer = !server;

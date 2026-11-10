@@ -153,7 +153,8 @@ const xorHex = (a, b) => Array.from({ length: a.length }, (_, i) => (parseInt(a[
 
 /**
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
- * @param {{send: (bytes: Uint8Array) => void, close?: () => void, via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} transport
+ * @param {{send: (bytes: Uint8Array) => void, close?: () => void, via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>,
+ *   buffered?: (() => number)|null, maxBuffered?: number, pause?: (() => void)|null, resume?: (() => void)|null, maxInflight?: number}} transport
  * @returns {{receive: (bytes: Uint8Array) => void, closed: () => void, close: () => void, stats: {sent: number, received: number, framesOut: number, framesIn: number}, readonly peer: string|null}}
  */
 export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onDown, localId, scope, buffered = null, maxBuffered = 0, pause = null, resume = null, maxInflight = netOf(qu).maxInflight ?? MAX_INFLIGHT }) {

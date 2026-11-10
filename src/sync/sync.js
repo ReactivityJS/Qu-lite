@@ -184,7 +184,8 @@ const later = (fn, ms) => {
 };
 
 /**
- * @param {{releaseMs?: number, timeoutMs?: number, sessionTtlMs?: number, retryMs?: number, frameSizeLimit?: number, role?: 'peer'|'mirror', ackFrom?: 'any'|'mirror', maxSessionsPerPeer?: number, stale?: 'retire'|'push'}} [options]
+ * @param {{releaseMs?: number, timeoutMs?: number, sessionTtlMs?: number, retryMs?: number, frameSizeLimit?: number, role?: 'peer'|'mirror', ackFrom?: 'any'|'mirror', maxSessionsPerPeer?: number, stale?: 'retire'|'push',
+ *   maxConcurrentPerPeer?: number, ackDelayMs?: number, digest?: boolean, pull?: boolean, batch?: boolean, indexCacheItems?: number}} [options]
  *   `releaseMs`: how long an unwatched scope stays subscribed (warm release).
  *   `timeoutMs`: how long a reconcile waits for wanted records to arrive.
  *   `retryMs`: how often pending reconciles are retried while connected.
