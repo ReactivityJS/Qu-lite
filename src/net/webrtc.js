@@ -201,6 +201,10 @@ export function rtc({ mode = 'auto', maxMesh = 6, fanout = 3, iceServers = [], c
         }
       },
     };
+    /** Closes every direct link (qu.close() calls this). */
+    api.close = async () => {
+      for (const t of tracked.values()) (await t).closeAll('closed');
+    };
     qu.rtc = api;
     return api;
   };

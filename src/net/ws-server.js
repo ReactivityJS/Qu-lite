@@ -3,7 +3,10 @@
  *
  *   WebSocket upgrade (any path, e.g. /ws)   -> peers (ws.js attachSocket)
  *   GET/POST /sse/<session>                  -> peers via HTTPS + SSE (sse-server.js)
- *   GET /healthz                             -> 200 "ok" (reverse proxy / container health)
+ *   GET /healthz                             -> 200 "ok" (liveness: the process answers)
+ *   GET /readyz                              -> 200 "ready" once `ready()` resolved truthy,
+ *                                               503 before and while shutting down (readiness:
+ *                                               load balancers send traffic only then)
  *   GET /info                                -> {name, version, transports, uptime} (no space data)
  *   GET /stats, /metrics                     -> operating figures as JSON / Prometheus text
  *                                               (stats.js), only with `statsToken` - sent as
@@ -12,6 +15,13 @@
  *                                               localhost, so an address check would mean nothing
  *   anything else                            -> static files (`static`): the client start
  *                                               page, the demo, the browser bundle (web/)
+ *
+ * CAPACITY: at most `maxConnections` peers (WebSocket + SSE together); beyond
+ * that a WebSocket is closed with 1013 "try again later" and an SSE stream
+ * gets 503 - clients back off and retry, other peers stay unaffected.
+ * Shutdown is graceful: readiness goes to 503, clients get a 1001 "going
+ * away" close (they reconnect elsewhere or later), stragglers are
+ * terminated after `drainMs`.
  *
  * Both transports end in the same `createLink`. Made to sit behind a reverse
  * proxy doing TLS (wss:// and https:// on one origin, also under a path
@@ -30,6 +40,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { attachSocket } from './ws.js';
+import { PROTOCOL_VERSION } from './link.js';
 import { createSseHandler } from './sse-server.js';
 
 const VERSION = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version;
@@ -62,16 +73,22 @@ function staticHandler(dir) {
 
 /**
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
- * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, ws?: boolean, sse?: boolean|object, pingMs?: number}} [options]
+ * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, ws?: boolean, sse?: boolean|object, pingMs?: number,
+ *   statsToken?: string, maxFrameBytes?: number, maxConnections?: number, maxBufferedBytes?: number, drainMs?: number, ready?: () => boolean|Promise<boolean>}} [options]
  *   `pingMs`: WebSocket heartbeat (0 = off); a client that did not answer the previous ping is closed.
  *   `statsToken`: enables /stats and /metrics (needs the stats plugin) for requests carrying this token.
  *   `maxFrameBytes`: largest WebSocket message accepted (bigger: connection closed, 1009) - the `ws`
  *   default of 100 MiB would let any client make the relay buffer that much before rate limits apply.
- * @returns {Promise<{port: number, close: () => Promise<void>, wss: WebSocketServer|null}>}
+ *   `maxConnections`: peers at once, WebSocket + SSE (default 10 000). `maxBufferedBytes`: send buffer per
+ *   peer before it counts as a slow consumer and is closed (default 16 MiB). `ready`: readiness for /readyz.
+ * @returns {Promise<{port: number, close: () => Promise<void>, connections: () => number, wss: WebSocketServer|null}>}
  */
-export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024 } = {}) {
+export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024, maxConnections = 10_000, maxBufferedBytes, drainMs = 1000, ready = () => true } = {}) {
   const ownServer = !server;
-  const sseHandler = sse ? createSseHandler(qu, typeof sse === 'object' ? sse : {}) : null;
+  let wss = null;
+  let stopping = false;
+  const connections = () => (wss?.clients.size ?? 0) + (sseHandler?.size() ?? 0);
+  const sseHandler = sse ? createSseHandler(qu, { maxBufferedBytes, ...(typeof sse === 'object' ? sse : {}), canOpen: () => !stopping && connections() < maxConnections }) : null;
   const files = dir ? staticHandler(dir) : null;
   const started = Date.now();
   const transports = [...(ws ? ['ws'] : []), ...(sse ? ['sse'] : [])];
@@ -79,8 +96,15 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, ws =
     if (sseHandler?.(req, res)) return;
     const path = new URL(req.url, 'http://x').pathname;
     if ((req.method === 'GET' || req.method === 'HEAD') && path === '/healthz') return res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' }).end('ok');
+    if ((req.method === 'GET' || req.method === 'HEAD') && path === '/readyz') {
+      Promise.resolve()
+        .then(() => !stopping && ready())
+        .catch(() => false)
+        .then((ok) => res.writeHead(ok ? 200 : 503, { 'content-type': 'text/plain', 'cache-control': 'no-store' }).end(ok ? 'ready' : 'not ready'));
+      return;
+    }
     if (req.method === 'GET' && path === '/info') {
-      const info = { name: 'qu-lite', version: VERSION, transports, uptime: Math.round((Date.now() - started) / 1000) };
+      const info = { name: 'qu-lite', version: VERSION, protocol: PROTOCOL_VERSION, transports, uptime: Math.round((Date.now() - started) / 1000) };
       return res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(info));
     }
     if (req.method === 'GET' && (path === '/stats' || path === '/metrics')) return serveStats(req, res, path);
@@ -107,13 +131,18 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, ws =
   }
   server = server ?? createServer();
   server.on('request', onRequest);
-  const wss = ws ? new WebSocketServer({ server, perMessageDeflate: false, maxPayload: maxFrameBytes }) : null;
+  wss = ws ? new WebSocketServer({ server, perMessageDeflate: false, maxPayload: maxFrameBytes }) : null;
   const refuseUpgrade = (req, socket) => socket.destroy();
   if (!ws) server.on('upgrade', refuseUpgrade);
   wss?.on('connection', (socket) => {
+    // the new socket is already in wss.clients
+    if (stopping || connections() > maxConnections) {
+      qu.bus.notify('net.refused', { via: 'ws-server', reason: stopping ? 'stopping' : 'capacity' });
+      return socket.close(stopping ? 1001 : 1013, stopping ? 'going away' : 'try again later');
+    }
     socket.alive = true;
     socket.on('pong', () => (socket.alive = true));
-    attachSocket(qu, socket, { via: 'ws-server' });
+    attachSocket(qu, socket, { via: 'ws-server', maxBufferedBytes });
   });
   // heartbeat: keeps idle connections open through proxies, closes the ones that went silent
   const heartbeat =
@@ -131,24 +160,34 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, ws =
       : null;
   heartbeat?.unref?.();
   if (ownServer) await new Promise((ok, fail) => server.once('error', fail).listen(port, host, ok));
+  let closingPromise = null;
   return {
     wss,
     port: server.address().port,
+    /** @returns {number} open peer connections (WebSocket + SSE) */
+    connections,
     close: () =>
-      new Promise((done) => {
+      (closingPromise ??= new Promise((done) => {
+        stopping = true;
         sseHandler?.close();
         clearInterval(heartbeat);
-        server.off('request', onRequest);
-        server.off('upgrade', refuseUpgrade);
         const finish = () => {
+          server.off('request', onRequest);
+          server.off('upgrade', refuseUpgrade);
           if (!ownServer) return done();
           server.close(() => done());
           server.closeAllConnections?.(); // keep-alive sockets of SSE posts would hold close() open
         };
         if (!wss) return finish();
-        for (const client of wss.clients) client.terminate();
-        wss.close(finish);
-      }),
+        // graceful: "going away" first, terminate whoever is still there after drainMs
+        for (const client of wss.clients) client.close(1001, 'going away');
+        const drain = setTimeout(() => {
+          for (const client of wss.clients) client.terminate();
+        }, drainMs);
+        drain.unref?.();
+        wss.close(() => (clearTimeout(drain), finish()));
+        if (wss.clients.size === 0) clearTimeout(drain);
+      })),
   };
 }
 
@@ -162,7 +201,8 @@ export const listenWs = (qu, options = {}) => listenHttp(qu, { sse: false, ...op
 export function httpServerTransport(options = {}) {
   return (qu) => {
     const ready = listenHttp(qu, options);
-    const api = { ready, close: async () => (await ready).close() };
+    ready.catch(() => {}); // surfaced by whoever awaits `ready` (createPeer does)
+    const api = { ready, close: async () => (await ready.catch(() => null))?.close() };
     qu.transports = { ...qu.transports, 'http-server': api, 'ws-server': api };
     return api;
   };

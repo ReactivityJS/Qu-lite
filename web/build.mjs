@@ -4,6 +4,9 @@
  *   dist/qu-lite.js   the browser-safe library as ONE ES module - apps (and
  *                     the start page, index.html) import it from the relay:
  *                     `import { createPeer } from 'https://relay.example/dist/qu-lite.js'`
+ *   dist/qu-client.js the small entry (createClient/createPeer + kernel); every
+ *                     plugin, store and transport is its own chunk in dist/chunks/,
+ *                     fetched only when a peer uses it
  *   dist/demo.js      the demo app (demo.html), bundled with the library
  *
  * `platform: 'browser'` makes esbuild refuse Node-only imports (node:sqlite,
@@ -20,6 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export async function buildWeb() {
   const common = { bundle: true, format: 'esm', platform: 'browser', target: 'es2022', minify: true, sourcemap: true, logLevel: 'warning' };
   await esbuild.build({ ...common, entryPoints: [join(here, '..', 'src', 'index.js')], outfile: join(here, 'dist', 'qu-lite.js') });
+  await esbuild.build({ ...common, entryPoints: { 'qu-client': join(here, '..', 'src', 'browser.js') }, outdir: join(here, 'dist'), splitting: true, chunkNames: 'chunks/[name]-[hash]' });
   await esbuild.build({ ...common, entryPoints: [join(here, 'demo.js')], outfile: join(here, 'dist', 'demo.js') });
   return join(here, 'dist');
 }

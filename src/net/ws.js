@@ -8,10 +8,19 @@
  * Each URL is kept alive: reconnect with exponential backoff + jitter, and
  * immediately on the browser's `online` event. `qu.transports.ws` exposes
  * connect()/disconnect()/status for UIs.
+ *
+ * BACKPRESSURE: a socket whose send buffer grows past `maxBufferedBytes`
+ * belongs to a peer that does not read (or a link that is too slow for the
+ * traffic). Dropping single frames would break running reconciles, so the
+ * link is closed instead (`net.slow`): everything is idempotent, the peer
+ * reconnects and resumes from its outbox and pending reconciles - and a
+ * relay never buffers unbounded memory for one slow client.
  */
 import { createLink } from './link.js';
 
 const OPEN = 1;
+/** Default send-buffer ceiling per socket before it counts as slow. */
+export const MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
 
 /**
  * Wires one already-created socket into a link.
@@ -20,11 +29,26 @@ const OPEN = 1;
  * @param {{via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} [options]
  *   `localId`/`scope`: a scoped link (link.js) - one connection per space.
  */
-export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, scope } = {}) {
+export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, scope, maxBufferedBytes = MAX_BUFFERED_BYTES } = {}) {
   socket.binaryType = 'arraybuffer';
   let link = null;
+  let slow = false;
+  const send = (bytes) => {
+    if (socket.readyState !== OPEN || slow) return;
+    if (maxBufferedBytes > 0 && socket.bufferedAmount > maxBufferedBytes) {
+      slow = true;
+      qu.bus.notify('net.slow', { via, peer: link?.peer ?? null, buffered: socket.bufferedAmount });
+      try {
+        socket.close(1013, 'slow consumer');
+      } catch {
+        socket.close();
+      }
+      return;
+    }
+    socket.send(bytes);
+  };
   const start = () => {
-    link = createLink(qu, { send: (bytes) => socket.readyState === OPEN && socket.send(bytes), close: () => socket.close(), via, onUp, onDown, localId, scope });
+    link = createLink(qu, { send, close: () => socket.close(), via, onUp, onDown, localId, scope });
   };
   if (socket.readyState === OPEN) start();
   else socket.addEventListener('open', start);
@@ -68,7 +92,7 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, sc
  * @param {{WebSocketImpl?: typeof WebSocket, minDelayMs?: number, maxDelayMs?: number, connectTimeoutMs?: number, localId?: string, scope?: Iterable<string>, onConnecting?: (attempt: number) => void}} [options]
  * @returns {{close: () => void, readonly connected: boolean, readonly peer: string|null, readonly url: string}}
  */
-export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000, connectTimeoutMs = 10_000, localId, scope, onConnecting } = {}) {
+export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDelayMs = 500, maxDelayMs = 30_000, connectTimeoutMs = 10_000, localId, scope, onConnecting, maxBufferedBytes } = {}) {
   let closed = false;
   let attempt = 0;
   let socket = null;
@@ -87,6 +111,7 @@ export function connectWs(qu, url, { WebSocketImpl = globalThis.WebSocket, minDe
     const attached = attachSocket(qu, socket, {
       localId,
       scope,
+      maxBufferedBytes,
       onUp: (remote) => {
         clearTimeout(guard);
         attempt = 0;
@@ -148,6 +173,7 @@ export function wsTransport({ connect = [], ...options } = {}) {
         }
       },
       status: () => [...conns.values()].map((c) => ({ url: c.url, connected: c.connected, peer: c.peer })),
+      close: () => api.disconnect(),
     };
     for (const url of connect) api.connect(url);
     qu.transports = { ...qu.transports, ws: api };

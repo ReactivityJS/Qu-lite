@@ -6,6 +6,14 @@
  *
  * `indexedDB`/`IDBKeyRange` are injectable so the driver also runs under
  * `fake-indexeddb` in Node tests.
+ *
+ * Connection robustness: browsers close IndexedDB connections behind our
+ * back (another tab upgrades the database -> `versionchange`; Safari drops
+ * connections of backgrounded pages; storage pressure). The driver closes
+ * on `versionchange` instead of blocking the other tab, forgets a closed
+ * connection, and retries an operation ONCE on a fresh connection when the
+ * old one turned out to be closed (InvalidStateError). A blocked open is
+ * reported through `onBlocked`.
  */
 const prefixEnd = (prefix) => prefix + '￿';
 
@@ -18,18 +26,41 @@ const done = (request) =>
 /**
  * @param {{name?: string, store?: string, indexedDB?: IDBFactory, IDBKeyRange?: typeof IDBKeyRange}} [options]
  */
-export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = globalThis.indexedDB, IDBKeyRange: KeyRange = globalThis.IDBKeyRange } = {}) {
+export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = globalThis.indexedDB, IDBKeyRange: KeyRange = globalThis.IDBKeyRange, onBlocked = () => {} } = {}) {
   if (!indexedDB || !KeyRange) throw new Error('indexedDbDriver: IndexedDB is not available here');
   let dbPromise = null;
+  let closedByUs = false;
   const db = () => {
     if (!dbPromise) {
       const request = indexedDB.open(name, 1);
       request.onupgradeneeded = () => request.result.createObjectStore(store);
-      dbPromise = done(request);
+      request.onblocked = () => onBlocked();
+      const current = (dbPromise = done(request).then((conn) => {
+        const forget = () => {
+          if (dbPromise === current) dbPromise = null;
+        };
+        conn.onversionchange = () => (conn.close(), forget()); // never block another tab's upgrade
+        conn.onclose = forget; // closed by the browser
+        return conn;
+      }));
+      current.catch(() => {
+        if (dbPromise === current) dbPromise = null; // the next call tries again
+      });
     }
     return dbPromise;
   };
-  const objectStore = async (mode) => (await db()).transaction(store, mode).objectStore(store);
+  /** A transaction on a live connection; a connection that turned out closed is replaced once. */
+  const transaction = async (mode) => {
+    if (closedByUs) throw new Error('indexeddb: driver closed');
+    try {
+      return (await db()).transaction(store, mode);
+    } catch (error) {
+      if (error?.name !== 'InvalidStateError') throw error;
+      dbPromise = null;
+      return (await db()).transaction(store, mode);
+    }
+  };
+  const objectStore = async (mode) => (await transaction(mode)).objectStore(store);
   const bounds = (prefix, gte, lt) => {
     const lower = gte !== undefined && gte > prefix ? gte : prefix;
     const upper = lt !== undefined && lt < prefixEnd(prefix) ? lt : prefixEnd(prefix);
@@ -53,7 +84,7 @@ export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = gl
     },
     /** All ops in one readwrite transaction: IndexedDB commits all or aborts all. */
     async batch(ops) {
-      const tx = (await db()).transaction(store, 'readwrite');
+      const tx = await transaction('readwrite');
       const os = tx.objectStore(store);
       const finished = new Promise((resolve, reject) => {
         tx.oncomplete = () => resolve();
@@ -97,8 +128,10 @@ export function indexedDbDriver({ name = 'qu-lite', store = 'kv', indexedDB = gl
       await done((await objectStore('readwrite')).clear());
     },
     async close() {
-      if (dbPromise) (await dbPromise).close();
+      closedByUs = true;
+      const pending = dbPromise;
       dbPromise = null;
+      if (pending) (await pending.catch(() => null))?.close();
     },
   };
 }

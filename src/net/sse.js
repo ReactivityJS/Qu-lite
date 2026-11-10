@@ -142,6 +142,7 @@ export function sseTransport({ connect = [], ...options } = {}) {
         }
       },
       status: () => [...conns.values()].map((c) => ({ url: c.url, connected: c.connected, peer: c.peer, via: 'sse' })),
+      close: () => api.disconnect(),
     };
     for (const url of connect) api.connect(url);
     qu.transports = { ...qu.transports, sse: api };

@@ -1,70 +1,45 @@
 #!/usr/bin/env node
 /**
- * Qu Lite relay/mirror: an ordinary Qu peer built from the same registry as
- * a browser client - SQLite store, `sync({role: 'mirror'})` + the `mirror`
- * policy, WebSocket server transport - that stores every granted space's
- * sealed envelopes and serves them. It verifies signatures; it never reads.
+ * Qu Lite relay/mirror CLI - a thin wrapper around `createRelay()`
+ * (src/server.js): an ordinary Qu peer built from the same registry as a
+ * browser client - SQLite store, `sync({role: 'mirror'})` + the `mirror`
+ * policy, HTTP server transport - that stores every granted space's sealed
+ * envelopes and serves them. It verifies signatures; it never reads.
  *
  *   node bin/mirror.mjs [--port 8787] [--host 0.0.0.0] [--db ./mirror.sqlite]
- *                                     [--allow sid1,sid2] [--static ./web] [--quiet]
- *                                     [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate frames/s]
- *                                     [--stats-token SECRET] [--max-spaces N]
+ *                       [--allow sid1,sid2] [--static ./web] [--quiet] [--log-format text|json]
+ *                       [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate frames/s]
+ *                       [--stats-token SECRET] [--max-spaces N] [--max-connections N] [--repl]
  *
  * Environment: QU_PORT / QU_HOST / QU_DB / QU_ALLOW / QU_STATIC /
  * QU_QUOTA_RECORDS / QU_QUOTA_BYTES / QU_MAX_ENVELOPE / QU_RATE (0 = no rate limit) /
- * QU_STATS_TOKEN (enables /stats and /metrics for requests with this token) / QU_MAX_SPACES.
+ * QU_STATS_TOKEN (enables /stats and /metrics for requests with this token) / QU_MAX_SPACES /
+ * QU_MAX_CONNECTIONS / QU_LOG_FORMAT.
  * Every QU_X can also come from a file named by QU_X_FILE (Docker/Swarm
  * secrets: QU_STATS_TOKEN_FILE=/run/secrets/qu_stats_token); the file wins.
  * Its identity and network id live in the database, so clients can resume
  * pending syncs across restarts.
  *
+ * `--repl` opens an interactive console next to the running relay with
+ * `qu` (the peer) and `dev` (= qu.dev, the same inspection API as in the
+ * browser console): `dev.links()`, `dev.trace('net.**')`, `dev.ls('mirror/')`.
+ *
  * With `--static ./web` (Docker: always) the same port also serves the
  * client start page (/), the demo (/demo.html) and the browser bundle
- * (/dist/qu-lite.js); /healthz and /info are always there. Put a reverse
- * proxy in front for TLS (docs/DEPLOY.md).
+ * (/dist/qu-lite.js); /healthz, /readyz and /info are always there. Put a
+ * reverse proxy in front for TLS (docs/DEPLOY.md).
  */
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createPeer } from '../src/peer.js';
-import { nodeRegistry } from '../src/node.js';
+import { createRelay } from '../src/server.js';
 
 /**
- * @param {{port?: number, host?: string, db?: string, allow?: string[]|null, static?: string, log?: (line: string) => void,
- *   quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, rate?: number}} [options]
- *   `rate`: inbound frames per second and connection (burst 2x, bytes 1 MiB/s); 0 disables.
- *   `statsToken`: installs the stats plugin and serves /stats + /metrics to requests carrying it.
- *   `maxSpaces`: how many spaces this mirror accepts at most (null = unlimited).
+ * Kept for existing callers (tests, scripts): same options as `createRelay()`.
+ * @param {Parameters<typeof createRelay>[0]} [options]
  */
-export async function startMirror({ port = 8787, host, db = ':memory:', allow = null, static: dir, log = console.log, quota = null, maxEnvelopeBytes, rate = 200, statsToken, maxSpaces = null } = {}) {
-  const limiter = rate > 0 ? [['limits', { frames: { rate, burst: 2 * rate } }]] : [];
-  const statistics = statsToken ? ['stats'] : [];
-  const qu = await createPeer({
-    registry: nodeRegistry(),
-    store: ['sqlite', { path: db }],
-    plugins: [...statistics, ...limiter, ['sync', { role: 'mirror' }], ['mirror', { allow, quota, maxSpaces, ...(maxEnvelopeBytes ? { maxEnvelopeBytes } : {}) }]],
-    transports: [['ws-server', { port, host, static: dir, statsToken }]],
-  });
-  const spaces = await qu.mirror.ready;
-  const server = await qu.transports['ws-server'].ready;
-
-  qu.bus.on('net.peer.up', ({ peer }) => log(`peer up   ${peer}`));
-  qu.bus.on('net.peer.down', ({ peer }) => log(`peer down ${peer}`));
-  qu.bus.on('mirror.grant', ({ sid, changed }) => log(`grant     ${sid} ${changed.join(',')}`));
-  qu.bus.on('mirror.quota', ({ sid }) => log(`quota     ${sid} full`));
-  qu.bus.on('mirror.full', ({ spaces }) => log(`refused   new space: ${spaces} spaces (--max-spaces)`));
-  qu.bus.on('net.limited', ({ peer, closed }) => closed && log(`limited   ${peer} (closed)`));
-  qu.bus.on('sync.done', ({ peer, sid, sent, received }) => (sent || received) && log(`sync      ${sid} with ${peer}: sent ${sent}, received ${received}`));
-  log(`qu-lite mirror ${qu.peerId} on ${dir ? 'http+' : ''}ws://${host ?? 'localhost'}:${server.port} (db ${db}, ${spaces.length} spaces${statsToken ? ', /stats + /metrics with token' : ''})`);
-
-  return {
-    qu,
-    port: server.port,
-    async close() {
-      await server.close();
-      qu.root.close();
-    },
-  };
+export async function startMirror(options = {}) {
+  return createRelay(options);
 }
 
 /** A setting from QU_X_FILE (secrets) or QU_X. */
@@ -83,15 +58,18 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       allow: { type: 'string', default: env('QU_ALLOW') ?? '' },
       static: { type: 'string', default: env('QU_STATIC') ?? '' },
       quiet: { type: 'boolean', default: false },
+      'log-format': { type: 'string', default: env('QU_LOG_FORMAT') ?? 'text' },
       'quota-records': { type: 'string', default: env('QU_QUOTA_RECORDS') ?? '' },
       'quota-bytes': { type: 'string', default: env('QU_QUOTA_BYTES') ?? '' },
       'max-envelope': { type: 'string', default: env('QU_MAX_ENVELOPE') ?? '' },
       rate: { type: 'string', default: env('QU_RATE') ?? '200' },
       'stats-token': { type: 'string', default: env('QU_STATS_TOKEN') ?? '' },
       'max-spaces': { type: 'string', default: env('QU_MAX_SPACES') ?? '' },
+      'max-connections': { type: 'string', default: env('QU_MAX_CONNECTIONS') ?? '' },
+      repl: { type: 'boolean', default: false },
     },
   });
-  const instance = await startMirror({
+  const relay = await createRelay({
     port: Number(args.port),
     host: args.host,
     db: args.db,
@@ -105,12 +83,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     rate: Number(args.rate),
     statsToken: args['stats-token'] || undefined,
     maxSpaces: args['max-spaces'] ? Number(args['max-spaces']) : null,
+    maxConnections: args['max-connections'] ? Number(args['max-connections']) : undefined,
+    logFormat: args['log-format'] === 'json' ? 'json' : 'text',
     log: args.quiet ? () => {} : console.log,
+    handleSignals: true,
   });
-  const shutdown = async () => {
-    await instance.close();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  if (args.repl) {
+    const { start } = await import('node:repl');
+    const repl = start({ prompt: 'qu> ' });
+    Object.assign(repl.context, { qu: relay.qu, dev: relay.qu.dev, relay });
+    console.log('qu, dev and relay are available - try dev.help()');
+    repl.on('exit', async () => {
+      await relay.close();
+      process.exit(0);
+    });
+  }
 }

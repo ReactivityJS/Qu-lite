@@ -23,11 +23,27 @@
  *     links to the same relay don't collide; `qu.net.allows(peer, sid)` tells
  *     sync/envelopes what may travel over which link.
  *
+ *   - HARDENING against untrusted remotes: a frame type must look like one
+ *     (`[a-z][a-z0-9_-]*`, at most 32 chars - it becomes a bus topic segment),
+ *     the inbound guard sees type and size BEFORE the JSON is parsed, a
+ *     remote that does not say `hi` within `helloTimeoutMs` or sends more
+ *     than a few frames before it is closed, and `hi` carries the protocol
+ *     version (`v`): a remote speaking a newer major version is refused
+ *     (`net.error {reason: 'protocol'}`) instead of being misunderstood,
+ *   - on `qu.close()` every open link is dropped.
+ *
  * Contract for a transport: call `createLink(qu, {send, close, via})` when a
  * byte channel opens, feed every incoming message to `link.receive(bytes)`
  * and call `link.closed()` when the channel goes away.
  */
-import { encodeFrame, decodeFrame } from './frame.js';
+import { encodeFrame, decodeFrame, peekFrameType } from './frame.js';
+
+/** Wire protocol version sent in `hi`. Bump on incompatible changes; a peer without `v` speaks 1. */
+export const PROTOCOL_VERSION = 1;
+/** Frame types are bus topic segments: no dots, no wildcards. */
+const FRAME_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
+/** Frames a remote may send before its `hi` (they are ignored) before the link is closed. */
+const MAX_EARLY_FRAMES = 8;
 
 /**
  * The per-Qu network registry (created on first use): which link may carry
@@ -38,13 +54,19 @@ export function netOf(qu) {
   if (!qu.net) {
     const scopes = new Map();
     const isolated = new Set();
+    const links = new Map();
     qu.net = {
       scopes,
       isolated,
-      links: new Map(),
+      links,
+      /** ms a remote has to say `hi` before the link is closed (0 = no limit). */
+      helloTimeoutMs: 15_000,
       /** A scoped link carries only its sids; a shared link no isolated sid. */
       allows: (peer, sid) => (scopes.has(peer) ? scopes.get(peer).has(sid) : !isolated.has(sid)),
     };
+    qu.onClose?.(() => {
+      for (const link of [...links.values()]) link.drop();
+    });
   }
   return qu.net;
 }
@@ -63,6 +85,7 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
   let off = null;
   let open = true;
 
+  let early = 0;
   const sendFrame = (type, payload) => {
     if (!open) return;
     const frame = encodeFrame(type, payload);
@@ -70,7 +93,14 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
     stats.framesOut++;
     send(frame);
   };
-  sendFrame('hi', { peer: localId ?? qu.peerId });
+  const refuse = (reason) => {
+    qu.bus.notify('net.error', { via, reason, peer: remote });
+    close();
+  };
+  sendFrame('hi', { peer: localId ?? qu.peerId, v: PROTOCOL_VERSION });
+  // a remote that never says hi would hold the socket (and a relay slot) forever
+  let helloTimer = net.helloTimeoutMs > 0 ? setTimeout(() => !remote && open && refuse('no hello'), net.helloTimeoutMs) : null;
+  helloTimer?.unref?.();
 
   const link = {
     stats,
@@ -81,34 +111,52 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       if (!open) return;
       stats.received += bytes.length;
       stats.framesIn++;
+      let type;
+      try {
+        type = peekFrameType(bytes);
+      } catch {
+        return qu.bus.notify('net.error', { via, reason: 'bad frame', peer: remote });
+      }
+      if (!remote && type !== 'hi') {
+        if (++early > MAX_EARLY_FRAMES) refuse('no hello');
+        return;
+      }
+      if (remote && type !== 'hi') {
+        // the guard (rate limits) decides on type and size - before any parsing work
+        const verdict = net.guard ? net.guard(remote, type, bytes.length) : true;
+        if (verdict === 'close') return close();
+        if (verdict === false) return;
+      }
+      if (!FRAME_TYPE.test(type)) return qu.bus.notify('net.error', { via, reason: 'bad type', peer: remote });
       let frame;
       try {
         frame = decodeFrame(bytes);
       } catch {
-        return qu.bus.notify('net.error', { via, reason: 'bad frame' });
+        return qu.bus.notify('net.error', { via, reason: 'bad frame', peer: remote });
       }
       if (frame.type === 'hi') {
         if (remote) return;
         const peer = String(frame.payload?.peer ?? '');
         if (!/^[0-9a-f]{16}$/.test(peer)) return close();
+        const version = frame.payload?.v ?? 1;
+        if (!Number.isInteger(version) || version < 1 || version > PROTOCOL_VERSION) return refuse('protocol');
+        clearTimeout(helloTimer);
+        helloTimer = null;
         remote = localId ? xorHex(peer, localId) : peer;
         net.links.get(remote)?.drop(); // newest wins - never two links under one name
         if (scope) net.scopes.set(remote, new Set(scope));
-        net.links.set(remote, { via, since: Date.now(), stats, drop: () => (link.closed(), close()) });
+        net.links.set(remote, { via, since: Date.now(), stats, version, drop: () => (link.closed(), close()) });
         off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
         onUp?.(remote);
         qu.bus.notify('net.peer.up', { peer: remote, via });
         return;
       }
-      if (!remote) return;
-      const verdict = net.guard ? net.guard(remote, frame.type, bytes.length) : true;
-      if (verdict === 'close') return close();
-      if (verdict === false) return;
       qu.bus.emit(`net.in.${remote}.${frame.type}`, frame.payload);
     },
     closed() {
       if (!open) return;
       open = false;
+      clearTimeout(helloTimer);
       off?.();
       if (remote) {
         if (scope) net.scopes.delete(remote);

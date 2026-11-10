@@ -5,6 +5,12 @@
  * replaced by `{"$b": index}` in the JSON part.
  *
  *   u8 typeLen | type (utf8) | u32 jsonLen | json | (u32 len | bytes)*
+ *
+ * Decoding is STRICT - frames come from untrusted peers: every length must
+ * fit, nothing may trail, a `{"$b": i}` must name an existing blob. Any
+ * violation throws (link.js reports it as `net.error` and drops the frame).
+ * `peekFrameType()` reads only the type, so a rate limit can be applied
+ * before the JSON is parsed.
  */
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -43,24 +49,44 @@ export function encodeFrame(type, payload) {
   return out;
 }
 
+const fatal = new TextDecoder('utf-8', { fatal: true });
+const bad = (why) => {
+  throw new Error(`frame: ${why}`);
+};
+
+/** The frame's type without decoding the rest. @param {Uint8Array} frame @returns {string} */
+export function peekFrameType(frame) {
+  if (!(frame instanceof Uint8Array) || frame.length < 5) bad('too short');
+  const typeLen = frame[0];
+  if (1 + typeLen + 4 > frame.length) bad('truncated type');
+  return fatal.decode(frame.subarray(1, 1 + typeLen));
+}
+
 /** @param {Uint8Array} frame @returns {{type: string, payload: *}} */
 export function decodeFrame(frame) {
+  const type = peekFrameType(frame);
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-  let offset = 0;
-  const typeLen = frame[offset++];
-  const type = dec.decode(frame.subarray(offset, offset + typeLen));
-  offset += typeLen;
+  let offset = 1 + frame[0];
   const jsonLen = view.getUint32(offset);
   offset += 4;
-  const jsonText = dec.decode(frame.subarray(offset, offset + jsonLen));
+  if (offset + jsonLen > frame.length) bad('truncated json');
+  const jsonText = fatal.decode(frame.subarray(offset, offset + jsonLen));
   offset += jsonLen;
   const blobs = [];
   while (offset < frame.length) {
+    if (offset + 4 > frame.length) bad('truncated blob length');
     const len = view.getUint32(offset);
     offset += 4;
+    if (offset + len > frame.length) bad('truncated blob');
     blobs.push(frame.slice(offset, offset + len));
     offset += len;
   }
-  const payload = JSON.parse(jsonText, (_k, v) => (v && typeof v === 'object' && typeof v.$b === 'number' && Object.keys(v).length === 1 ? blobs[v.$b] : v));
+  const payload = JSON.parse(jsonText, (_k, v) => {
+    if (v && typeof v === 'object' && typeof v.$b === 'number' && Object.keys(v).length === 1) {
+      if (!Number.isInteger(v.$b) || v.$b < 0 || v.$b >= blobs.length) bad('unknown blob');
+      return blobs[v.$b];
+    }
+    return v;
+  });
   return { type, payload };
 }

@@ -13,6 +13,11 @@
  *
  * `createSseHandler(qu)` returns `(req, res) => boolean` (true = handled),
  * mounted by http-server.js next to the WebSocket upgrade and static files.
+ *
+ * Limits: at most `maxSessions` open streams (503 beyond, `canOpen()` lets
+ * the server count them together with WebSockets), and a stream whose
+ * unsent output grows past `maxBufferedBytes` (a client that stopped
+ * reading) is ended - the same slow-consumer rule as ws.js.
  */
 import { createLink } from './link.js';
 import { unpackFrames, SESSION } from './sse-frames.js';
@@ -23,16 +28,28 @@ const toBase64 = (bytes) => Buffer.from(bytes).toString('base64');
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
  * @param {{path?: string, keepAliveMs?: number, maxBodyBytes?: number, cors?: string}} [options]
  */
-export function createSseHandler(qu, { path = '/sse', keepAliveMs = 15_000, maxBodyBytes = 1 << 20, cors = '*' } = {}) {
+export function createSseHandler(qu, { path = '/sse', keepAliveMs = 15_000, maxBodyBytes = 1 << 20, cors = '*', maxSessions = Infinity, maxBufferedBytes = 16 * 1024 * 1024, canOpen = () => true } = {}) {
   /** @type {Map<string, {link: object, res: import('node:http').ServerResponse}>} */
   const sessions = new Map();
   const headers = { 'access-control-allow-origin': cors, 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type' };
 
   function open(session, req, res) {
+    if (!sessions.has(session) && (sessions.size >= maxSessions || !canOpen())) {
+      qu.bus.notify('net.refused', { via: 'sse', reason: 'capacity' });
+      return res.writeHead(503, { ...headers, 'retry-after': '5' }).end('busy');
+    }
     sessions.get(session)?.res.end(); // a reconnect with the same id replaces the old stream
     res.writeHead(200, { ...headers, 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
     res.write(': qu-lite\n\n');
-    const link = createLink(qu, { send: (bytes) => res.write(`data:${toBase64(bytes)}\n\n`), close: () => res.end(), via: 'sse' });
+    const send = (bytes) => {
+      if (res.writableEnded) return;
+      if (maxBufferedBytes > 0 && res.writableLength > maxBufferedBytes) {
+        qu.bus.notify('net.slow', { via: 'sse', peer: link.peer, buffered: res.writableLength });
+        return res.end();
+      }
+      res.write(`data:${toBase64(bytes)}\n\n`);
+    };
+    const link = createLink(qu, { send, close: () => res.end(), via: 'sse' });
     const entry = { link, res };
     sessions.set(session, entry);
     const keepAlive = setInterval(() => res.write(':\n\n'), keepAliveMs);
@@ -80,6 +97,8 @@ export function createSseHandler(qu, { path = '/sse', keepAliveMs = 15_000, maxB
     else res.writeHead(405, headers).end();
     return true;
   };
+  /** @returns {number} open event streams */
+  handler.size = () => sessions.size;
   handler.close = () => {
     for (const { res } of sessions.values()) res.end();
     sessions.clear();

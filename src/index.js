@@ -34,3 +34,7 @@ export { GC_HORIZON_MS, gcCutoff, encodeEntries, decodeEntries, mayDrop } from '
 export { rtc } from './net/webrtc.js';
 export { connectSse, sseTransport } from './net/sse.js';
 export { relayTransport } from './net/relay.js';
+export { createClient, CLIENT_PLUGINS } from './client.js';
+export { devtools } from './devtools.js';
+export { PROTOCOL_VERSION } from './net/link.js';
+export { peekFrameType } from './net/frame.js';

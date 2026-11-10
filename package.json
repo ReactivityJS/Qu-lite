@@ -14,9 +14,11 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./src/browser.js",
     "./node": "./src/node.js",
     "./sqlite": "./src/drivers/sqlite.js",
-    "./ws-server": "./src/net/ws-server.js"
+    "./ws-server": "./src/net/ws-server.js",
+    "./devtools": "./src/devtools.js"
   },
   "bin": {
     "qu-lite-mirror": "./bin/mirror.mjs"
