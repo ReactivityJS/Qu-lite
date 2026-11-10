@@ -73,33 +73,10 @@ const FRAME_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
  * WebSocket/TLS/TCP framing. Types this code does not send are counted as
  * `other`, so a remote inventing types cannot grow the map.
  */
-export const FRAME_TYPES = Object.freeze({
-  hi: 'link handshake',
-  hello: 'sync handshake: role, subscriptions, features',
-  grant: 'space access grants (a relay stores only granted spaces)',
-  sub: 'subscribe to a space (partial sync)',
-  unsub: 'unsubscribe',
-  rec: 'one record (sealed envelope)',
-  recs: 'several records in one frame',
-  ack: 'records stored by the receiver',
-  nack: 'record refused (quota, size)',
-  neg: 'reconcile request (Negentropy)',
-  negr: 'reconcile answer',
-  negend: 'reconcile finished',
-  negerr: 'reconcile declined (busy)',
-  want: 'ids the initiator asks for',
-  wantmiss: 'ids the responder does not have',
-  digest: 'fingerprint check before a reconcile',
-  digestr: 'fingerprint answer',
-  pull: 'direct download request (empty scope)',
-  pullend: 'direct download finished',
-  sig: 'ephemeral signal: presence heartbeat, typing, WebRTC signaling',
-  grantsum: 'fingerprints of the grants a peer holds (asks which a mirror lacks)',
-  grantneed: 'spaces whose grants the mirror lacks',
-  other: 'any other type',
-});
+/** Frame types counted by name in `traffic` (the rest as 'other'); meanings: devtools.js FRAME_TYPES. */
+export const KNOWN_FRAME_TYPES = new Set(['hi', 'hello', 'grant', 'sub', 'unsub', 'rec', 'recs', 'ack', 'nack', 'neg', 'negr', 'negend', 'negerr', 'want', 'wantmiss', 'digest', 'digestr', 'pull', 'pullend', 'sig', 'grantsum', 'grantneed']);
 const countType = (net, type, dir, bytes) => {
-  const key = Object.hasOwn(FRAME_TYPES, type) ? type : 'other';
+  const key = KNOWN_FRAME_TYPES.has(type) ? type : 'other';
   let row = net.traffic.get(key);
   if (!row) net.traffic.set(key, (row = { framesIn: 0, bytesIn: 0, framesOut: 0, bytesOut: 0 }));
   if (dir === 'in') {

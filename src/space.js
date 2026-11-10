@@ -128,6 +128,19 @@ export async function verifyGrants(sidHex, grants, state) {
   return { state: next, changed };
 }
 
+const MEMO_MAX = 4096;
+/** Cached async value per key (the promise, so parallel callers share it); oldest leave first. */
+function memo(map, key, compute) {
+  let hit = map.get(key);
+  if (!hit) {
+    hit = compute();
+    hit.catch(() => map.delete(key));
+    map.set(key, hit);
+    if (map.size > MEMO_MAX) map.delete(map.keys().next().value);
+  }
+  return hit;
+}
+
 async function deriveEpoch(epochKey) {
   const { publicKey, privateKey } = await crypto.keypairFromSeed('Ed25519', await crypto.hkdf(epochKey, 'qu-lite/write'));
   return { key: epochKey, aesKey: await crypto.aesKey(epochKey), writePub: publicKey, writePriv: privateKey };
@@ -275,13 +288,18 @@ export class Space {
   // ------------------------------------------------------------- tags
   /** 8-byte opaque shard tag of a path's first segment. */
   async shardOf(path) {
-    return (await crypto.hmac(this.#shardKey, enc.encode(path.split('/')[0]))).slice(0, 8);
+    const segment = path.split('/')[0];
+    return (await memo(this.#shards, segment, async () => (await crypto.hmac(this.#shardKey, enc.encode(segment))).slice(0, 8))).slice();
   }
 
   /** Opaque local-index tag for a path or key (24 hex chars). */
-  async tag(text) {
-    return crypto.toHex((await crypto.hmac(this.#tagKey, enc.encode(text))).slice(0, 12));
+  tag(text) {
+    return memo(this.#tags, text, async () => crypto.toHex((await crypto.hmac(this.#tagKey, enc.encode(text))).slice(0, 12)));
   }
+
+  // tags and shard tags are pure functions of a secret: computed once, kept (bounded)
+  #shards = new Map();
+  #tags = new Map();
 
   // ------------------------------------------------------------- epochs
   hasEpoch(epoch) {

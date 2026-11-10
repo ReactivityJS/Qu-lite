@@ -96,6 +96,17 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Queries by field**: `qu.query({ where, orderBy })` on any field of the value (dot paths,
+  `$value`, `$key`, `$author`): equality, `in`, ranges, `prefix`, case-insensitive `contains`;
+  arrays match by element. The sorted index lives in memory: it is built on first use, kept up to
+  date by records.js, and limited by `maxIndexes`; nothing readable goes to disk. The code loads
+  only on the first such query. About 1 ms per query at 20,000 records.
+- **Faster reads and writes**: path and shard tags are memoized per space (an HMAC key import
+  each time before); reading a stored record skips re-hashing its id.
+- **Smaller clients**: frame type descriptions moved from the link to devtools (-0.4 KB gzip);
+  the relay side of public reads is its own module (`public-relay.js`).
+- **Docs**: recipes per app type in German (docs/REZEPTE.md); examples 10-calendar, 11-game and
+  12-forum-blog (run by the test suite).
 - **Background**: plugin `background`: `qu.background.progress()` and `qu.sync.progress` show
   what the outbox still holds. With a service worker, Background Sync delivers it after the tab
   was closed (Chromium; `POST /q/in`). Otherwise the screen is kept on as a fallback. The wake

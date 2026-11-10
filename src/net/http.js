@@ -76,6 +76,24 @@ export function json(res, status, body, { cache = 0 } = {}) {
   res.end(JSON.stringify(body));
 }
 
+/**
+ * A token bucket for one route (requests per second): plain HTTP bypasses the
+ * per-link limits (limits.js), so every writing route has its own ceiling.
+ * Global per route - behind a proxy every client has the same address.
+ * @returns {() => void} throws a 429 when over the limit
+ */
+export function rateLimit(rate, burst = rate * 2, now = () => Date.now()) {
+  let tokens = burst;
+  let at = now();
+  return () => {
+    const t = now();
+    tokens = Math.min(burst, tokens + ((t - at) / 1000) * rate);
+    at = t;
+    if (tokens < 1) throw httpError(429, 'too many requests');
+    tokens -= 1;
+  };
+}
+
 /** An error that becomes an HTTP status. */
 export const httpError = (status, message) => Object.assign(new Error(message), { status });
 

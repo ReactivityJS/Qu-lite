@@ -39,7 +39,7 @@ import { envelopes } from './envelopes.js';
 import { signals } from './signals.js';
 import { readPublic } from './envelope.js';
 import { GC_TYPE } from './gc.js';
-import { publicRelay } from './public.js';
+import { publicRelay } from './public-relay.js';
 import { parseHlc } from './hlc.js';
 
 /**

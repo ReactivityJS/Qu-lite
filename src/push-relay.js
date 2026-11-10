@@ -32,7 +32,7 @@
  * the push service reports gone (404/410) are dropped.
  */
 import * as crypto from './crypto.js';
-import { route, json, readJson, httpError } from './net/http.js';
+import { route, json, readJson, httpError, rateLimit } from './net/http.js';
 import { readPublic } from './envelope.js';
 import { GC_TYPE } from './gc.js';
 import { pushMessage, ringMessage } from './push.js';
@@ -59,6 +59,8 @@ export function pushRelay({ subject = 'mailto:admin@example.org', minIntervalMs 
     const seenRings = new Map();
     let vapid = null;
     const tokens = new Map(); // audience -> {jwt, exp}
+    const writeLimit = rateLimit(50); // subscribe / unsubscribe / ring: requests/s, all clients together
+    const pendingLimit = rateLimit(200);
 
     const hashOf = async (endpoint) => crypto.toHex(await crypto.sha256(enc.encode(endpoint))).slice(0, 32);
     const subKey = (h) => `push/subs/${h}`;
@@ -192,6 +194,7 @@ export function pushRelay({ subject = 'mailto:admin@example.org', minIntervalMs 
     route(qu, 'GET', '/push/key', async (req, res) => json(res, 200, { key: await ready }));
 
     route(qu, 'POST', '/push/subscribe', async (req, res) => {
+      writeLimit();
       await ready;
       const body = await readJson(req);
       const { endpoint, peer = null, spaces } = body ?? {};
@@ -217,6 +220,7 @@ export function pushRelay({ subject = 'mailto:admin@example.org', minIntervalMs 
     });
 
     route(qu, 'POST', '/push/unsubscribe', async (req, res) => {
+      writeLimit();
       await ready;
       const { endpoint, sids } = (await readJson(req)) ?? {};
       if (typeof endpoint !== 'string') throw httpError(400, 'expected {endpoint}');
@@ -233,6 +237,7 @@ export function pushRelay({ subject = 'mailto:admin@example.org', minIntervalMs 
     });
 
     route(qu, 'POST', '/push/pending', async (req, res) => {
+      pendingLimit();
       await ready;
       const { endpoint } = (await readJson(req)) ?? {};
       if (typeof endpoint !== 'string') throw httpError(400, 'expected {endpoint}');
@@ -243,6 +248,7 @@ export function pushRelay({ subject = 'mailto:admin@example.org', minIntervalMs 
     });
 
     route(qu, 'POST', '/push/ring', async (req, res) => {
+      writeLimit();
       await ready;
       const { sid, epoch, at, kind = 'call', sig, peer = null } = (await readJson(req)) ?? {};
       if (!SID.test(sid ?? '') || !Number.isSafeInteger(at) || Math.abs(Date.now() - at) > 120_000 || !['call', 'message'].includes(kind)) throw httpError(400, 'bad ring');

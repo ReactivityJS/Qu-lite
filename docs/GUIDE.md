@@ -173,12 +173,24 @@ await qu.get(group, 'settings', 'theme');                 // 'dark'
 // Abfragen: ein Pfad, zeitlich sortiert (HLC), optional Zeitfenster
 const lastHour = await qu.query({ space: group, path: 'chat/general', from: Date.now() - 3600_000 });
 
+// Abfragen nach beliebigem Feld (für jede App gleich: Termin, Aufgabe, Punktestand, Beitrag)
+await qu.query({ space: group, path: 'events', where: { start: { gte: montag, lt: sonntag } }, orderBy: 'start' });
+await qu.query({ space: group, path: 'tasks', where: { status: 'offen', tags: 'dringend' } });
+await qu.query({ space: group, path: 'posts', where: { title: { contains: 'sync' } }, limit: 20 });
+
 // Live: jeder neue Record, lokal oder remote
 qu.bus.on(`qu.record.${group.id}`, (rec) => render(rec));
 
 // Nur synchronisieren, was die App gerade zeigt (Partial Sync)
 const unwatch = await qu.watch({ space: group, path: 'chat/general' });
 ```
+
+**Feld-Abfragen** brauchen keine Vorbereitung. Beim ersten `where` auf ein Feld entsteht ein sortierter
+Index im Arbeitsspeicher (ein Durchgang über den Pfad, etwa 0,1 ms pro Record). Danach dauert eine
+Abfrage rund 1 ms und folgt jeder Änderung, auch von anderen Geräten. Auf die Platte kommt nichts
+Lesbares. Bedingungen: Wert (gleich), Array (eines davon), `gt`/`gte`/`lt`/`lte`, `prefix`, `contains`
+(Suche ohne Groß-/Kleinschreibung). Felder mit Punkt (`'ort.stadt'`) sowie `$value`, `$key` und
+`$author`. Mehr Rezepte je App-Typ: [REZEPTE.md](REZEPTE.md).
 
 **Validierung und Rechte** gehören in Hooks, nicht in die UI – sie gelten dann für lokale *und*
 empfangene Records:

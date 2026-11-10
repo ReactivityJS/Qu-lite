@@ -321,14 +321,15 @@ with `members()` installed, such a peer cannot write.
 
 ## records
 
-`qu.use(records({ author?, cacheSize?, padding? }))` – read and write records of joined spaces.
+`qu.use(records({ author?, cacheSize?, padding?, maxIndexes? }))` – read and write records of joined spaces.
 This plugin installs the blind envelope layer.
 
 | Option | Default | |
 |---|---|---|
 | `author` | `'alias'` | default signing key for group spaces (`'identity'` signs with the identity; user nodes always use the identity) |
 | `cacheSize` | `1000` | decrypted records kept in memory |
-| `padding` | `'quarter'` | private inners padded to size steps: `'quarter'`, `'pow2'` or `'none'` |
+| `padding` | `'quarter'` | private inners padded to size steps: `'quarter'`, `'small'`, `'pow2'` or `'none'` |
+| `maxIndexes` | `64` | in-memory field indexes kept for `where`/`orderBy` queries (least recently used leave) |
 
 | Method | |
 |---|---|
@@ -336,7 +337,7 @@ This plugin installs the blind envelope layer.
 | `qu.leave(space)` | stops using a space. With `status()` installed, `qu.leave()` is the clean presence leave instead; use `qu.records.leave(space)`. |
 | `qu.write(space, path, value, {key?, visibility?}?) → record` | `value`: any JSON. `key`: last-write-wins entry. `visibility: 'public'`: signed, not encrypted. Throws if a hook vetoes or the commit fails (retryable). |
 | `qu.get(space, path, key) → value \| null` | current value of a keyed entry (`null` if missing or deleted) |
-| `qu.query({space, path, from?, to?, limit?, reverse?, ensure?}) → record[]` | one path, ordered by HLC; `from` inclusive and `to` exclusive (ms); `ensure: true` reconciles the window first (needs `sync`) |
+| `qu.query({space, path, from?, to?, limit?, reverse?, ensure?, where?, orderBy?}) → record[]` | one path, ordered by HLC; `from` inclusive and `to` exclusive (ms); `ensure: true` reconciles the window first (needs `sync`); `where`/`orderBy`: by any field, see below |
 | `qu.scrub(space) → {checked, dropped, reindexed}` | local integrity repair without decrypting: drops broken envelopes (resync fetches them again) and re-indexes lost indexes |
 | `qu.forget(space) → number` | removes everything stored locally for a space (other peers keep theirs) |
 | `qu.space(sid) → space \| null` | a joined space by id |
@@ -352,6 +353,48 @@ This plugin installs the blind envelope layer.
 { id, path, key /* null for log entries */, value, hlc, author /* alias hex */, ts /* minute, ms */,
   epoch, visibility /* 'private'|'public' */, deleted? /* tombstone */, type? }
 ```
+
+**Queries by field.** `where` and `orderBy` work on any field of the value, the same way for
+every app:
+
+```js
+// calendar: one week, by start time (ms or ISO strings)
+await qu.query({ space, path: 'events', where: { start: { gte: monday, lt: nextMonday } }, orderBy: 'start' });
+// tasks: equality on several fields (AND); an array field matches if it contains the value
+await qu.query({ space, path: 'tasks', where: { status: 'open', tags: 'urgent' } });
+await qu.query({ space, path: 'tasks', where: { status: ['open', 'blocked'] } });          // in
+// search and prefix (case-insensitive substring / string prefix)
+await qu.query({ space, path: 'posts', where: { title: { contains: 'sync' } }, limit: 20 });
+await qu.query({ space, path: 'contacts', where: { name: { prefix: 'An' } }, orderBy: 'name' });
+// game: top 10 of a round; nested fields with dots
+await qu.query({ space, path: 'scores', where: { round: 7 }, orderBy: 'points', reverse: true, limit: 10 });
+await qu.query({ space, path: 'events', where: { 'place.city': 'Berlin' } });
+// the value itself, the entry key, the author
+await qu.query({ space, path: 'chat', where: { $value: { contains: 'hallo' } } });
+await qu.query({ space, path: 'events', where: { $key: { prefix: '2026-11' } } });
+```
+
+| Condition | Matches |
+|---|---|
+| `value` / `{eq}` | equal (`5` ≠ `'5'`) |
+| `[a, b]` / `{in}` | equal to one of them |
+| `{gt, gte, lt, lte}` | range; only values of the same type as the bound |
+| `{prefix}` | strings starting with it |
+| `{contains}` | strings containing it, case-insensitive |
+
+- **Order and paging:** comparable values are numbers, strings and booleans, ordered in that
+  type order. `orderBy` puts records without the field last. Without `orderBy`, results keep HLC
+  order. `reverse`, `limit`, `from` and `to` apply as in a plain query.
+- **What matches:** only current versions. For keyed entries that is the newest one; deleted
+  entries never match.
+- **Cost:** the first query on a field of a path builds a sorted index **in memory**, which is one
+  pass over that path (about 0.1 ms per record). After that it is kept up to date as records
+  arrive, change or are deleted, and a query takes about 1 ms even at 20,000 records
+  (`test/fields.test.js`).
+- **Privacy:** nothing readable is written to disk; the store keeps only sealed envelopes and
+  opaque pointers.
+- **Loading:** the code (`fields.js`, ~2 KB gzip) is loaded the first time a query uses `where`
+  or `orderBy`.
 
 **Hooks**:
 
@@ -956,9 +999,22 @@ These are exported for tools, tests and custom plugins. Apps rarely need them.
   sealed box), `aesKey`/`aesEncrypt`/`aesDecrypt`, `hkdf`, `hmac`, `sha256`, `keypairFromSeed`,
   `randomBytes`, `toHex`/`fromHex`, `toBase64`/`fromBase64` and `concat`.
 - **HLC**: `createClock({now?, maxDriftMs?})`, `formatHlc(ms, counter)`, `parseHlc(hlc)`.
+- **Field values**: `compareValues(a, b)` (the order `where`/`orderBy` use), `fieldOf(record, field)`.
+- **HTTP** (relay plugins): `route(qu, method, prefix, handler)` adds an endpoint to the relay's
+  HTTP server (CORS for any origin); `rateLimit(rate, burst?)` a per-route ceiling (429), because
+  plain HTTP bypasses the per-link limits. Built in: `POST /q/in` 20 requests/s, `GET /q/…` 200/s,
+  push writes 50/s, `/push/pending` 200/s; `packEnvelopes(list)` / `unpackEnvelopes(body)` (the
+  `POST /q/in` body), `httpOrigin(url)` (ws(s):// → http(s):// origin).
+- **Push / background**: `pushMessage(sid, endpoint)` and `ringMessage(sid, at, kind)` (what a
+  member signs with the write key), `OUTBOX_TAG` (`'qu-outbox'`, the Background Sync tag),
+  `awakeOf(qu)` (the shared wake lock: `set(reason, on)`, `held`, `reasons`).
+- **Transports by hand**: `attachSocket(qu, socket, options)` turns an open WebSocket into a link
+  (both ends); `inprocTransport()` / `connectInProcess(a, b)` link two peers in one process
+  (tests, workers).
+- **Device**: `BACKUP_ITERATIONS` (PBKDF2 rounds of backups, 600,000).
 - **Drop lists**: `GC_HORIZON_MS`, `gcCutoff(now)`, `encodeEntries`, `decodeEntries`, `mayDrop`.
 - **Traffic by type**: `netOf(qu).traffic` (Map type -> `{framesIn, bytesIn, framesOut, bytesOut}`, all links
-  since `trafficSince`, unknown types as `other`), `FRAME_TYPES` (type -> meaning); `stats` reports it as
+  since `trafficSince`, unknown types as `other`), `FRAME_TYPES` (type -> meaning; from `devtools.js`, so client bundles without devtools skip the texts); `stats` reports it as
   `traffic.byType` and `qu_lite_traffic_bytes_total{direction, type}` / `qu_lite_traffic_frames_total`.
 - **Frames**: `encodeFrame(type, payload)`, `decodeFrame(bytes)` (strict), `peekFrameType(bytes)`,
   `PROTOCOL_VERSION`. `netOf(qu)` holds the link scopes, open links (`links`: `{via, since, version, stats}`)

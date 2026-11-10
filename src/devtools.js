@@ -21,7 +21,34 @@
  * Optional plugin: nothing in the core imports it.
  */
 import { toHex } from './crypto.js';
-import { netOf, FRAME_TYPES } from './net/link.js';
+import { netOf } from './net/link.js';
+
+/** What each frame type carries - for `qu.dev.traffic()` (kept here, not in every client's link code). */
+export const FRAME_TYPES = Object.freeze({
+  hi: 'link handshake',
+  hello: 'sync handshake: role, subscriptions, features',
+  grant: 'space access grants (a relay stores only granted spaces)',
+  sub: 'subscribe to a space (partial sync)',
+  unsub: 'unsubscribe',
+  rec: 'one record (sealed envelope)',
+  recs: 'several records in one frame',
+  ack: 'records stored by the receiver',
+  nack: 'record refused (quota, size)',
+  neg: 'reconcile request (Negentropy)',
+  negr: 'reconcile answer',
+  negend: 'reconcile finished',
+  negerr: 'reconcile declined (busy)',
+  want: 'ids the initiator asks for',
+  wantmiss: 'ids the responder does not have',
+  digest: 'fingerprint check before a reconcile',
+  digestr: 'fingerprint answer',
+  pull: 'direct download request (empty scope)',
+  pullend: 'direct download finished',
+  sig: 'ephemeral signal: presence heartbeat, typing, WebRTC signaling',
+  grantsum: 'fingerprints of the grants a peer holds (asks which a mirror lacks)',
+  grantneed: 'spaces whose grants the mirror lacks',
+  other: 'any other type',
+});
 
 /** Rough per-frame cost below our frame bytes: WebSocket header + TLS record + share of TCP/IP headers. */
 const WIRE_OVERHEAD = 60;

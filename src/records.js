@@ -54,11 +54,12 @@ function compareVersion(a, b) {
 }
 
 /**
- * @param {{author?: 'alias'|'identity', cacheSize?: number, padding?: 'quarter'|'pow2'|'none'}} [options]
+ * @param {{author?: 'alias'|'identity', cacheSize?: number, padding?: 'quarter'|'small'|'pow2'|'none', maxIndexes?: number}} [options]
  *   `author`: default signing key for group spaces (user nodes always sign
  *   with the identity). Overridable per space in `join()`.
+ *   `maxIndexes`: in-memory field indexes kept for `query({where, orderBy})` (fields.js).
  */
-export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, padding = 'quarter' } = {}) {
+export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, padding = 'quarter', maxIndexes = 64 } = {}) {
   return (qu) => {
     const { bus, storage, clock, identity } = qu;
     const env = envelopeLayer()(qu);
@@ -109,8 +110,16 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
       if (cache.has(id)) return cache.get(id);
       const bytes = await storage.get(`rec/${space.id}/${id}`);
       if (!bytes) return null;
-      return remember(await openEnvelope(space, bytes, { verify: false }));
+      return remember(await openEnvelope(space, bytes, { verify: false, id })); // stored under its id: verified on ingest
     }
+
+    /** Current (indexed) pointers of one path, in HLC order. */
+    const current = async (space, path) => (await storage.range(`idx/${space.id}/${await space.tag(path)}/`, {})).map((row) => row.value);
+    // field queries (fields.js) load on first use - an app that never uses `where` never downloads them
+    let fields = null;
+    let fieldsLoading = null;
+    const loadFields = () =>
+      (fieldsLoading ??= import('./fields.js').then(({ fieldIndexes }) => (fields = fieldIndexes({ read: (space, id) => read(space, id), current, maxIndexes }))));
 
     /*
      * The index helpers below never write directly: they read the committed
@@ -133,7 +142,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
       if (isHead) ws.remove(loc.head);
       ws.remove(`loc/${sid}/${id}`);
       ws.remove(`defer/${sid}/${id}`);
-      ws.after(() => cache.delete(id));
+      ws.after(() => {
+        cache.delete(id);
+        fields?.removed(sid, id);
+      });
       return Boolean(loc?.idx || isHead);
     }
 
@@ -157,7 +169,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
         else {
           if (head) {
             await demote(space.id, head.id, ws);
-            ws.after(() => bus.notify('qu.record.superseded', { space: space.id, id: head.id, author: head.author }));
+            ws.after(() => {
+              fields?.removed(space.id, head.id);
+              return bus.notify('qu.record.superseded', { space: space.id, id: head.id, author: head.author });
+            });
           }
           ws.set(loc.head, pointer);
         }
@@ -209,6 +224,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
       });
       ws.after(async () => {
         remember(record);
+        if (current) fields?.added(space.id, record);
         if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: Boolean(local) });
         else await bus.notify('qu.record.superseded', { from, space: space.id, id, author: record.author });
       });
@@ -297,6 +313,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
     function leave(space) {
       const id = typeof space === 'string' ? space : space.id;
       spaces.delete(id);
+      fields?.dropSpace(id);
       bus.notify('qu.space.left', { space: id });
     }
 
@@ -368,16 +385,20 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
     }
 
     /**
-     * Time-window query over one path, ordered by HLC; decrypts on read.
+     * Query over one path; decrypts on read. Without `where`/`orderBy`: a
+     * time window in HLC order, straight from the pointer index. With them:
+     * by any field of the value (fields.js - in-memory index per field).
      * Runs the `qu.query.before` process first - the sync plugin hooks in
      * there to reconcile the window when `ensure: true`.
-     * @param {{space: import('./space.js').Space|string, path: string, from?: number, to?: number, limit?: number, reverse?: boolean, ensure?: boolean}} q
+     * @param {{space: import('./space.js').Space|string, path: string, from?: number, to?: number, limit?: number, reverse?: boolean, ensure?: boolean,
+     *   where?: Record<string, any>, orderBy?: string}} q
      *   `from` inclusive, `to` exclusive, both wall-clock ms.
      * @returns {Promise<object[]>}
      */
     async function query(q) {
       const space = spaceOf(q.space);
       await bus.emit('qu.query.before', { ...q, space });
+      if (q.where || q.orderBy) return (await loadFields()).select(space, q);
       const { path, from, to, limit, reverse } = q;
       const base = `idx/${space.id}/${await space.tag(path)}/`;
       const rows = await storage.range(base, {
@@ -483,6 +504,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
       }
       await env.exclusive(sid, () => ws.flush());
       cache.clear();
+      fields?.dropSpace(sid);
       if (spaces.has(sid)) leave(sid);
       await bus.notify('qu.space.forgotten', { space: sid, keys: count });
       return count;

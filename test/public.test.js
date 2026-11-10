@@ -65,6 +65,9 @@ test('offline delivery over HTTP: POST /q/in ingests sealed envelopes like a lin
   assert.deepEqual(results.map((r) => r.status), ['stored', 'duplicate', 'rejected']);
   assert.ok(await relay.qu.storage.has(`rec/${group.id}/${rec.id}`));
   assert.equal((await fetch(`${url}/q/in`, { method: 'POST', body: new Uint8Array([0, 0, 0, 9, 1]) })).status, 400);
+  // plain HTTP bypasses the per-link limits: the route has its own ceiling (20/s, burst 40)
+  const statuses = await Promise.all(Array.from({ length: 60 }, () => fetch(`${url}/q/in`, { method: 'POST', body: packEnvelopes([bytes]) }).then((r) => r.status)));
+  assert.ok(statuses.includes(429) && statuses.includes(200), 'some refused with 429');
   await a.close();
   await relay.close();
 });

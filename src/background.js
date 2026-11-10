@@ -38,12 +38,18 @@ export function background({ serviceWorker = globalThis.navigator?.serviceWorker
     let registered = false;
 
     /** @returns {Promise<{records: number, bytes: number}>} what the outbox still holds */
+    const sizes = new Map(); // outbox key -> envelope size: each one is read once, not on every update
     async function progress() {
       const keys = await storage.keys('sync/out/');
+      const present = new Set(keys);
+      for (const key of sizes.keys()) if (!present.has(key)) sizes.delete(key);
       let bytes = 0;
       for (const key of keys) {
-        const [, , sid, id] = key.split('/');
-        bytes += (await storage.get(`rec/${sid}/${id}`))?.length ?? 0;
+        if (!sizes.has(key)) {
+          const [, , sid, id] = key.split('/');
+          sizes.set(key, (await storage.get(`rec/${sid}/${id}`))?.length ?? 0);
+        }
+        bytes += sizes.get(key);
       }
       return { records: keys.length, bytes };
     }

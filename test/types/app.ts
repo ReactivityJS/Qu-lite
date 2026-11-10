@@ -39,6 +39,10 @@ async function main(): Promise<void> {
   const link = await (await qu.members(forum)).link();
   const posts = await fetchPublic(`http://127.0.0.1:${relay.port}`, forum.id, 'posts', { limit: 10 });
   posts.map((p) => p.value);
+  const week = await qu.query<{ start: number }>({ space: forum, path: 'events', where: { start: { gte: 0, lt: 1 }, tags: ['a', 'b'] }, orderBy: 'start' });
+  week.map((r) => r.value.start);
+  // @ts-expect-error - unknown condition
+  await qu.query({ space: forum, path: 'events', where: { start: { after: 1 } } });
   const { records } = await qu.background.progress();
   await qu.push.ring(forum);
 

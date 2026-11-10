@@ -6,12 +6,14 @@ robust sync (Negentropy reconciliation, partial sync, resync/repair, durable out
 reconciles), atomic writes, persistent drivers (IndexedDB, SQLite), transports as plugins (WebSocket,
 HTTPS + SSE fallback, WebRTC), one peer base for clients and relays/mirrors, group membership with roles,
 admin-signed key epochs, anonymous key packages, per-user inboxes, status (online, typing, sent,
-delivered, read), deletion and compaction, a hardened mirror (quotas, rate limits, padding, one
-connection per space) and - optional - collaborative text. Started as `packages/lite` in [QuV5](https://github.com/ReactivityJS/QuV5); it
+delivered, read), queries by any field, deletion and compaction, attachments, open spaces with moderation,
+public reads without membership, background sync and payload-free push, a hardened mirror (quotas, rate
+limits, padding, one connection per space) and - optional - collaborative text. Started as `packages/lite` in [QuV5](https://github.com/ReactivityJS/QuV5); it
 shares no code with the rest of Qu. Design reasons and known limits: [docs/DECISIONS.md](docs/DECISIONS.md).
 
-**Documentation:** [Developer guide (DE)](docs/GUIDE.md) · [Dev console & relay REPL (DE)](docs/CONSOLE.md) · [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
-WebSocket, groups, status, deleting, collaborative text, attachments - each one runs with `node examples/<file>`) ·
+**Documentation:** [Developer guide (DE)](docs/GUIDE.md) · [Recipes per app type (DE)](docs/REZEPTE.md) · [Dev console & relay REPL (DE)](docs/CONSOLE.md) · [API reference](docs/API.md) · [runnable examples](examples/) (records, sync, mirror over
+WebSocket, groups, status, deleting, collaborative text, attachments, calendar queries, a game, forum and blog -
+each one runs with `node examples/<file>`) ·
 [changelog](CHANGELOG.md) · [install a relay with Docker](docs/INSTALL.md) ·
 [Docker Swarm](docs/INSTALL.md#docker-swarm-with-caddy-docker-proxy) ·
 [deployment behind a proxy](docs/DEPLOY.md) · [testing, incl. browser tests](docs/TESTING.md).
@@ -27,10 +29,11 @@ npm run mirror -- --port 8787 --db ./mirror.sqlite
 docker compose up --build
 ```
 
-**Size** (minified + gzip, browser): core (records, sync, WebSocket, IndexedDB) ~18.5 KB; with members,
-user nodes, inbox, status and compaction ~26.6 KB; everything incl. SSE fallback, WebRTC and
-collaborative text ~31.5 KB. The optional plugins (`text`, `blobs`, `stats`, `rtc`/`topology`, `relayTransport`/SSE) are
-only bundled when imported.
+**Size** (minified + gzip, browser): core (records, sync, WebSocket, IndexedDB) ~25 KB; a chat client with
+members, user nodes, inbox, status and compaction ~34 KB; everything for the browser incl. SSE fallback,
+WebRTC, collaborative text, attachments, background sync, push and field queries ~49 KB. Optional plugins
+are only loaded when used (`createClient` loads them on demand; field queries on the first `where`).
+The service worker helper is ~3 KB.
 
 **Try it:** `npm run demo` (or `docker compose up --build`). `http://localhost:8787/` checks the connection and
 shows how an app connects. Then open `http://localhost:8787/demo.html?name=alice` and `…/demo.html?name=bob` in

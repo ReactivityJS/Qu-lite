@@ -42,7 +42,17 @@ export interface QueryOptions {
   reverse?: boolean;
   /** reconcile the window with connected peers first (needs sync) */
   ensure?: boolean;
+  /** conditions on fields of the value (dot paths, `$value`, `$key`, `$author`); several fields AND */
+  where?: Record<string, FieldCondition>;
+  /** sort by a field (records without it last) */
+  orderBy?: string;
 }
+
+export type FieldValue = number | string | boolean;
+export type FieldCondition =
+  | FieldValue
+  | FieldValue[]
+  | { eq?: FieldValue; in?: FieldValue[]; gt?: FieldValue; gte?: FieldValue; lt?: FieldValue; lte?: FieldValue; prefix?: string; contains?: string };
 
 export interface Member {
   alias: string;

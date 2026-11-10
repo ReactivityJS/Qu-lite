@@ -160,10 +160,10 @@ export async function verifyEnvelope(bytes, writePub) {
  * from local storage that only ever holds verified envelopes.
  * @param {import('./space.js').Space} space
  * @param {Uint8Array} bytes
- * @param {{verify?: boolean}} [options]
+ * @param {{verify?: boolean, id?: string}} [options] - `id`: the known id (skips hashing; only for bytes stored under it)
  * @returns {Promise<{id: string, path: string, key: string|null, hlc: string, author: string, value: *, epoch: number, ts: number, visibility: string}>}
  */
-export async function openEnvelope(space, bytes, { verify = true } = {}) {
+export async function openEnvelope(space, bytes, { verify = true, id } = {}) {
   const outer = peekEnvelope(bytes);
   if (outer.sid !== space.id) throw new Error('envelope: belongs to another space');
   if (!space.hasEpoch(outer.epoch)) throw new Error(`envelope: unknown epoch ${outer.epoch}`);
@@ -185,7 +185,7 @@ export async function openEnvelope(space, bytes, { verify = true } = {}) {
   const { p, k, h, v, t, d } = JSON.parse(dec.decode(end === -1 ? inner : inner.subarray(0, end)));
   if (crypto.toHex(await space.shardOf(p)) !== outer.shard) throw new Error('envelope: shard tag does not match path');
 
-  const record = { id: await envelopeId(bytes), path: p, key: k, hlc: h, author: outer.author, value: v, epoch: outer.epoch, ts: outer.ts, visibility: outer.visibility };
+  const record = { id: id ?? (await envelopeId(bytes)), path: p, key: k, hlc: h, author: outer.author, value: v, epoch: outer.epoch, ts: outer.ts, visibility: outer.visibility };
   if (t) record.type = t;
   if (d) record.deleted = true;
   return record;

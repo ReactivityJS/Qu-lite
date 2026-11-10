@@ -15,8 +15,11 @@ Each file is a complete program: `node examples/<file>` (Node ≥ 22.5, after `n
 | [07-text.mjs](07-text.mjs) | collaborative text: concurrent offline edits merge, anchors, snapshots |
 | [08-blobs.mjs](08-blobs.mjs) | attachments: offline put, upload progress, fetch on demand, delete |
 | [09-stats.mjs](09-stats.mjs) | operating figures: traffic per connection, throughput, storage, Prometheus text |
+| [10-calendar.mjs](10-calendar.mjs) | queries by field: ranges, equality, arrays, nested fields, search; results follow edits and deletes from other devices |
+| [11-game.mjs](11-game.mjs) | a multiplayer game: live moves as signals, the game state as keyed records, a leaderboard by field |
+| [12-forum-blog.mjs](12-forum-blog.mjs) | a blog read without membership (`fetchPublic`), an open forum with link, ban and delete, over a real relay |
 
-`_group.mjs` is shared setup for 05-07 (a mirror and two group members in one process).
+`_group.mjs` is shared setup for 05-07, 10 and 11 (a mirror and two group members in one process).
 In the browser, use the same code with `store: ['indexeddb', …]` and `transports: [['relay', { url }]]` -
 see [web/demo.js](../web/demo.js) for a complete app and [web/client.js](../web/client.js) for the
 minimal connection a relay's start page makes.
