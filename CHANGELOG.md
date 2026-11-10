@@ -96,6 +96,13 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Bounded memory**: the decrypted-record cache is bounded by bytes too (`cacheBytes`, 4 MiB;
+  records over 1/8 of it are not cached). Before, reading a 20 MiB file could keep ~30 MB of
+  chunks. Field indexes are bounded by total entries (`maxIndexEntries`) and keep only the field's
+  values while building. `qu.dev.memory()`, `qu.records.memory()` and `qu.sync.memory()` show what
+  the caches hold.
+- **Two browser consoles**: a step-by-step walkthrough in docs/CONSOLE.md. The browser test runs
+  its code blocks verbatim in two Chromium instances.
 - **Queries by field**: `qu.query({ where, orderBy })` on any field of the value (dot paths,
   `$value`, `$key`, `$author`): equality, `in`, ranges, `prefix`, case-insensitive `contains`;
   arrays match by element. The sorted index lives in memory: it is built on first use, kept up to

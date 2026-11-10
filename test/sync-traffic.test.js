@@ -466,7 +466,7 @@ test('grants on reconnect: a key rotation made offline changes the fingerprint -
   link = connectInProcess(client, mirror);
   await link.ready;
   await until(() => (out.grant ?? 0) >= 1, 3000, 'rotated grants sent');
-  assert.ok(mirror.keyring.epochs(group.id).has(1), 'the mirror knows epoch 1');
+  await until(() => mirror.keyring.epochs(group.id).has(1), 3000, 'the mirror knows epoch 1'); // sent is not yet processed
   await client.write(group, 'chat', 'after rotation');
   await until(async () => (await client.syncStatus()).outbox === 0, 3000, 'accepted by the mirror');
   await link.disconnect();

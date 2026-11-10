@@ -262,3 +262,67 @@ test('two browsers connect directly (WebRTC) and keep chatting when the relay go
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('the two-console walkthrough of docs/CONSOLE.md runs as written, in two browsers', { skip: !chromium && 'playwright not installed', timeout: 120_000 }, async (t) => {
+  let browser;
+  for (const executablePath of [undefined, process.env.QU_CHROMIUM, '/opt/pw-browsers/chromium'].filter((p, i) => i === 0 || p)) {
+    try {
+      browser = await chromium.launch({ ...visible, ...(executablePath ? { executablePath } : {}) });
+      break;
+    } catch {
+      browser = null;
+    }
+  }
+  if (!browser) return t.skip('no Chromium available');
+  const { readFileSync } = await import('node:fs');
+  // the ```js konsole-a / konsole-b blocks of the walkthrough, in document order
+  const doc = readFileSync(join(demoDir, '..', 'docs', 'CONSOLE.md'), 'utf8');
+  const blocks = [...doc.matchAll(/```js ((?:konsole-[ab] ?)+)\n([\s\S]*?)```/g)].map(([, who, code]) => ({ who: who.trim().split(' '), code }));
+  assert.ok(blocks.length >= 7, 'walkthrough found');
+  const dir = mkdtempSync(join(tmpdir(), 'qu-lite-e2e-'));
+  await buildWeb();
+  const relay = await startMirror({ port: 0, db: join(dir, 'relay.sqlite'), static: demoDir, log: () => {} });
+  const base = `http://127.0.0.1:${relay.port}/`;
+  try {
+    const pages = {};
+    let clipboard = null;
+    for (const who of ['konsole-a', 'konsole-b']) {
+      const page = await (await browser.newContext()).newPage();
+      page.on('dialog', (d) => d.accept(clipboard)); // prompt('Einladung einfügen') gets what copy() took
+      page.on('pageerror', (e) => console.log(`[${who}]`, e.message));
+      await page.goto(base);
+      await page.exposeFunction('copy', (text) => (clipboard = text)); // the DevTools console's copy()
+      pages[who] = page;
+    }
+    // each block like pasted into the console: statements in order, the last expression's value returned
+    const run = async (page, code) => {
+      const lines = code.trim().split('\n');
+      const last = lines.pop();
+      return page.evaluate(`(async () => {\n${lines.join('\n')}\nreturn ${last.replace(/;\s*(\/\/.*)?$/, '')};\n})()`);
+    };
+    const until = async (page, check, what, ms = 15_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) if (await page.evaluate(check)) return;
+      throw new Error(`timed out: ${what}`);
+    };
+    const results = [];
+    for (const [n, block] of blocks.entries()) {
+      for (const who of block.who) results.push({ n, who, value: await run(pages[who], block.code) });
+      // let the other side catch up where the next block reads what this one wrote
+      if (n === 1) await until(pages['konsole-a'], `(async () => (await qu.query({ space: g, path: 'chat' })).length >= 1)()`, 'A has B\'s message');
+      if (n === 2) await until(pages['konsole-b'], `(async () => (await qu.query({ space: g, path: 'chat' })).length >= 3 && (await qu.blobs.has(g, (await qu.query({ space: g, path: 'chat' })).at(-1).value.file)).complete)()`, 'B has the file');
+      if (n === 4) {
+        await new Promise((r) => setTimeout(r, 300));
+        for (const page of Object.values(pages)) await until(page, `[...st.online().values()].some((e) => e.online)`, 'presence');
+      }
+      if (n === 5) await until(pages['konsole-a'], `(async () => (await qu.query({ space: g, path: 'chat' })).length === 4)()`, 'offline message delivered');
+    }
+    const at = (n, who) => results.find((r) => r.n === n && r.who === who).value;
+    assert.equal(at(3, 'konsole-b'), 'Inhalt der Notiz', 'B got the file');
+    assert.deepEqual(await run(pages['konsole-a'], "(await qu.query({ space: g, path: 'chat' })).map((r) => r.value.text)"), ['Hallo von B', 'Hallo zurück', 'Datei anbei', 'offline geschrieben']);
+    assert.deepEqual(await run(pages['konsole-b'], "(await qu.query({ space: g, path: 'events', where: { start: { gte: Date.parse('2026-11-01') } } })).map((r) => r.value.title)"), ['Treffen']);
+  } finally {
+    await browser.close();
+    await relay.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1225,8 +1225,11 @@ export function sync({
       return out;
     }
 
-    const api = { watch, resync, reconcileWith, status, syncState, lastSync, staleSpaces };
+    /** @returns {{indexCache: {scopes: number, items: number, maxItems: number}}} memory held (sync index cache) */
+    const memory = () => ({ indexCache: { scopes: vectors.size, items: cachedItems, maxItems: indexCacheItems } });
+    const api = { watch, resync, reconcileWith, status, syncState, lastSync, staleSpaces, memory };
     Object.assign(qu, { watch, resync, syncStatus: status, syncState, lastSync, staleSpaces });
+    qu.sync ??= api;
     return api;
   };
 }

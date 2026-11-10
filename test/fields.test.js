@@ -92,3 +92,21 @@ test('field queries scale: 20,000 records, a range query after the first build t
   assert.ok(per < 50, `range query ${per} ms`);
   await qu.close();
 });
+
+test('memory stays bounded: field indexes by total entries, the record cache by bytes (file chunks)', async () => {
+  const { createPeer } = await import('../src/index.js');
+  const qu = await createPeer({ plugins: [['records', { maxIndexEntries: 150, cacheBytes: 64 * 1024 }], 'blobs'] });
+  const space = qu.join(await (await import('../src/index.js')).Space.create(qu.identity));
+  for (let i = 0; i < 100; i++) await qu.write(space, 'items', { a: i, b: i % 3 });
+  await qu.query({ space, path: 'items', where: { a: { gte: 50 } } });
+  assert.deepEqual(qu.records.memory().fields.entries, 100);
+  await qu.query({ space, path: 'items', where: { b: 1 } }); // 200 > 150: the older index leaves
+  assert.deepEqual(qu.records.memory().fields, { indexes: 1, entries: 100, maxEntries: 150 });
+  assert.equal((await qu.query({ space, path: 'items', where: { a: { gte: 98 } } })).length, 2, 'rebuilt when needed again');
+
+  const ref = await qu.blobs.put(space, new Uint8Array(1024 * 1024).fill(7));
+  await qu.blobs.get(space, ref);
+  const { cache } = qu.records.memory();
+  assert.ok(cache.bytes <= 64 * 1024, `record cache ${cache.bytes} bytes`);
+  await qu.close();
+});

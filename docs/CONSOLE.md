@@ -7,6 +7,7 @@ Plugin `devtools`, das `createClient()` im Browser automatisch installiert und `
 - [Befehle](#befehle)
 - [Rezepte für typische Fragen](#rezepte-für-typische-fragen)
 - [Tracing: Bus-Ereignisse mitlesen](#tracing-bus-ereignisse-mitlesen)
+- [Zwei Browser über einen Relay](#zwei-browser-über-einen-relay)
 - [Direkt mit dem Peer arbeiten](#direkt-mit-dem-peer-arbeiten)
 - [Relay-REPL](#relay-repl)
 - [Sicherheit](#sicherheit)
@@ -54,6 +55,7 @@ Konsole sagt welchen.
 | `await qu.dev.get(key)` | ein gespeicherter Wert |
 | `await qu.dev.dump(prefix, limit)` | Werte als JSON (Bytes als `hex:…`) – für Bug-Reports |
 | `await qu.dev.stats()` | Betriebszahlen (Plugin `stats`) |
+| `qu.dev.memory()` | Caches im RAM: entschlüsselte Records, Feld-Indizes, Sync-Index |
 | `qu.dev.listeners(topic)` | wie viele Handler ein Topic erreicht |
 | `await qu.dev.emit(topic, payload)` | Bus-Ereignis von Hand auslösen |
 
@@ -134,6 +136,80 @@ qu.dev.untrace()                            // wieder aus
 
 oder per URL: `https://app.example/?qu-trace=sync.**`
 
+## Zwei Browser über einen Relay
+
+Der schnellste Weg, Qu kennenzulernen: zwei Konsolen, ein Relay, kein eigener Code. Relay starten
+(`npm run demo` oder `npx qu-lite-mirror`), dann `http://localhost:8787/` in **zwei** Browsern öffnen
+(oder in zwei Fenstern desselben Browsers, die Namen `konsole-a` und `konsole-b` trennen die
+Identitäten) und jeweils F12 → Console. Die Blöcke laufen der Reihe nach; `test/demo.e2e.test.js`
+führt genau diesen Text in zwei Chromium-Instanzen aus.
+
+**A** – Peer anlegen, Gruppe gründen, Einladung kopieren:
+
+```js konsole-a
+const { createClient } = await import('/dist/qu-client.js');
+await createClient({ url: location.origin, name: 'konsole-a', extra: ['blobs'] });   // jetzt gibt es window.qu
+g = await qu.createGroup();
+copy(JSON.stringify(await (await qu.members(g)).invite()));   // Einladung liegt in der Zwischenablage
+qu.bus.on(`qu.record.${g.id}`, (r) => r.path.startsWith('_') || console.log('neu:', r.path, r.value));
+```
+
+**B** – Peer anlegen, Einladung einfügen, erste Nachricht:
+
+```js konsole-b
+const { createClient } = await import('/dist/qu-client.js');
+await createClient({ url: location.origin, name: 'konsole-b', extra: ['blobs'] });
+g = await qu.acceptInvite(JSON.parse(prompt('Einladung einfügen')));
+qu.bus.on(`qu.record.${g.id}`, (r) => r.path.startsWith('_') || console.log('neu:', r.path, r.value));
+await qu.write(g, 'chat', { text: 'Hallo von B' });
+```
+
+**A** – antworten, einen Termin und eine Datei schicken:
+
+```js konsole-a
+await qu.write(g, 'chat', { text: 'Hallo zurück' });
+await qu.write(g, 'events', { title: 'Treffen', start: Date.parse('2026-11-12T18:00Z') }, { key: 'treffen' });
+ref = await qu.blobs.put(g, new TextEncoder().encode('Inhalt der Notiz'), { name: 'notiz.txt', type: 'text/plain' });
+await qu.write(g, 'chat', { text: 'Datei anbei', file: ref });
+```
+
+**B** – lesen, nach Feld suchen, die Datei holen:
+
+```js konsole-b
+(await qu.query({ space: g, path: 'chat' })).map((r) => r.value.text);
+await qu.query({ space: g, path: 'events', where: { start: { gte: Date.parse('2026-11-01'), lt: Date.parse('2026-12-01') } } });
+anhang = (await qu.query({ space: g, path: 'chat', where: { 'file.name': 'notiz.txt' } }))[0];
+new TextDecoder().decode(await qu.blobs.get(g, anhang.value.file));   // 'Inhalt der Notiz'
+```
+
+**Beide** – Präsenz (jede Seite muss den Status einmal öffnen):
+
+```js konsole-a konsole-b
+st = await qu.status(g);
+st.online();   // nach ein paar Sekunden: die andere Seite mit online: true
+```
+
+**B** – offline schreiben und wieder verbinden:
+
+```js konsole-b
+qu.transports.relay.disconnect();
+await qu.write(g, 'chat', { text: 'offline geschrieben' });
+await qu.syncStatus();                        // {outbox: 1, …} – wartet auf den Relay
+qu.transports.relay.connect(location.origin); // A bekommt die Nachricht sofort
+```
+
+**A** – was übertragen wurde und was im Speicher liegt:
+
+```js konsole-a
+(await qu.query({ space: g, path: 'chat' })).map((r) => r.value.text);
+qu.dev.traffic();   // Bytes pro Nachrichtentyp
+qu.dev.memory();    // Caches (nur RAM)
+qu.dev.links();     // die Verbindung zum Relay
+```
+
+Ein Reload ändert nichts: Identität, Gruppe und Nachrichten liegen in IndexedDB. Nach dem Reload
+reichen die ersten zwei Zeilen (mit demselben `name`) und `g = (await qu.restoreGroups())[0]`.
+
 ## Direkt mit dem Peer arbeiten
 
 `window.qu` ist der echte Peer – alles aus der [API-Referenz](API.md) geht auch in der Konsole:
@@ -182,6 +258,10 @@ TCP hinzu (`traffic()` zeigt die Schätzung). WebSocket-Pings des Relays (alle 2
 verbunden und sichtbar ist (`bench/idle-traffic.mjs`). Im Hintergrund schlägt das Herz nur alle 5 min
 (~90 KiB pro Stunde). Weniger: `status({ presence: false })`, `status({ hiddenInterval: 0 })` (im
 Hintergrund offline) oder `status(group)` nur für sichtbare Gruppen öffnen.
+
+**Speicher:** `qu.dev.memory()` zeigt die Caches. Sie liegen nur im RAM: Auf die Platte oder ins Netz
+geht davon nichts. Jeder Cache hat eine feste Obergrenze (Records: 1000 Stück und 4 MiB; Feld-Indizes:
+200.000 Einträge à ~200 Byte). Übersicht: [API.md – Caches](API.md#caches-and-memory).
 
 Am Relay stehen dieselben Zahlen in `/metrics` (`qu_lite_traffic_bytes_total{direction, type}`) und in
 `/stats` (`traffic.byType`).

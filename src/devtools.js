@@ -146,6 +146,7 @@ export function devtools({ global = typeof window !== 'undefined' ? 'qu' : false
           'get(key)': 'one stored value (identity masked)',
           'dump(prefix)': 'stored values under a prefix as plain JSON (for bug reports)',
           'stats()': 'operating figures (stats plugin)',
+          'memory()': 'what the caches hold: decrypted records, field indexes, sync index (RAM only)',
           'traffic()': 'bytes and frames in/out per message type since start (or reset), with a per-hour rate',
           'watchTraffic(seconds)': 'log the traffic of every interval live, per type; returns stop()',
           'resetTraffic()': 'start counting traffic from zero',
@@ -218,6 +219,21 @@ export function devtools({ global = typeof window !== 'undefined' ? 'qu' : false
           out[key] = SECRET_KEYS.has(key) ? '(masked)' : JSON.parse(JSON.stringify(value, (_k, v) => (v instanceof Uint8Array ? `hex:${toHex(v)}` : v)));
         }
         return out;
+      },
+      /** What the caches hold right now (all in RAM; nothing of it is stored or sent). */
+      memory() {
+        const r = qu.records?.memory?.();
+        const s = qu.sync?.memory?.();
+        const kb = (n) => `${(n / 1024).toFixed(0)} KiB`;
+        const rows = {
+          'records cache': r ? `${r.cache.records} / ${r.cache.maxRecords} records, ${kb(r.cache.bytes)} / ${kb(r.cache.maxBytes)}` : '-',
+          'field indexes': r ? `${r.fields.indexes} indexes, ${r.fields.entries} / ${r.fields.maxEntries} entries (~${kb(r.fields.entries * 200)})` : '-',
+          'sync index cache': s ? `${s.indexCache.scopes} scopes, ${s.indexCache.items} / ${s.indexCache.maxItems} items (~${kb(s.indexCache.items * 300)})` : '-',
+        };
+        const heap = globalThis.performance?.memory?.usedJSHeapSize ?? globalThis.process?.memoryUsage?.().heapUsed;
+        if (heap) rows['JS heap (whole page/process)'] = kb(heap);
+        print(rows);
+        return { records: r ?? null, sync: s ?? null, heap: heap ?? null };
       },
       async stats() {
         if (!qu.stats) return "stats plugin not installed (plugins: [..., 'stats'])";

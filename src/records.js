@@ -54,24 +54,38 @@ function compareVersion(a, b) {
 }
 
 /**
- * @param {{author?: 'alias'|'identity', cacheSize?: number, padding?: 'quarter'|'small'|'pow2'|'none', maxIndexes?: number}} [options]
+ * @param {{author?: 'alias'|'identity', cacheSize?: number, cacheBytes?: number, padding?: 'quarter'|'small'|'pow2'|'none', maxIndexes?: number, maxIndexEntries?: number}} [options]
  *   `author`: default signing key for group spaces (user nodes always sign
  *   with the identity). Overridable per space in `join()`.
- *   `maxIndexes`: in-memory field indexes kept for `query({where, orderBy})` (fields.js).
+ *   `cacheSize` / `cacheBytes`: decrypted records kept in memory (count / envelope bytes, default 1000 / 4 MiB).
+ *   `maxIndexes` / `maxIndexEntries`: in-memory field indexes for `query({where, orderBy})` (fields.js),
+ *   by count and by total entries (~200 bytes each).
  */
-export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, padding = 'quarter', maxIndexes = 64 } = {}) {
+export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, cacheBytes = 4 << 20, padding = 'quarter', maxIndexes = 64, maxIndexEntries = 200_000 } = {}) {
   return (qu) => {
     const { bus, storage, clock, identity } = qu;
     const env = envelopeLayer()(qu);
     /** @type {Map<string, {space: import('./space.js').Space, author: string}>} */
     const spaces = new Map();
-    /** @type {Map<string, object>} id -> opened record (LRU by insertion order). */
+    /**
+     * Decrypted records, LRU by insertion order, bounded by count AND bytes
+     * (envelope size): a few file chunks must not hold tens of MB on a phone.
+     * @type {Map<string, {record: object, size: number}>}
+     */
     const cache = new Map();
-
-    const remember = (record) => {
-      cache.delete(record.id);
-      cache.set(record.id, record);
-      if (cache.size > cacheSize) cache.delete(cache.keys().next().value);
+    let cachedBytes = 0;
+    const uncache = (id) => {
+      const hit = cache.get(id);
+      if (!hit) return;
+      cache.delete(id);
+      cachedBytes -= hit.size;
+    };
+    const remember = (record, size = 0) => {
+      uncache(record.id);
+      if (size > cacheBytes / 8) return record; // big (a file chunk): read again when needed
+      cache.set(record.id, { record, size });
+      cachedBytes += size;
+      while (cache.size > cacheSize || cachedBytes > cacheBytes) uncache(cache.keys().next().value);
       return record;
     };
 
@@ -107,10 +121,10 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
 
     /** Opens a stored envelope (no re-verification: stored means verified). */
     async function read(space, id) {
-      if (cache.has(id)) return cache.get(id);
+      if (cache.has(id)) return cache.get(id).record;
       const bytes = await storage.get(`rec/${space.id}/${id}`);
       if (!bytes) return null;
-      return remember(await openEnvelope(space, bytes, { verify: false, id })); // stored under its id: verified on ingest
+      return remember(await openEnvelope(space, bytes, { verify: false, id }), bytes.length); // stored under its id: verified on ingest
     }
 
     /** Current (indexed) pointers of one path, in HLC order. */
@@ -119,7 +133,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
     let fields = null;
     let fieldsLoading = null;
     const loadFields = () =>
-      (fieldsLoading ??= import('./fields.js').then(({ fieldIndexes }) => (fields = fieldIndexes({ read: (space, id) => read(space, id), current, maxIndexes }))));
+      (fieldsLoading ??= import('./fields.js').then(({ fieldIndexes }) => (fields = fieldIndexes({ read: (space, id) => read(space, id), current, maxIndexes, maxEntries: maxIndexEntries }))));
 
     /*
      * The index helpers below never write directly: they read the committed
@@ -143,7 +157,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
       ws.remove(`loc/${sid}/${id}`);
       ws.remove(`defer/${sid}/${id}`);
       ws.after(() => {
-        cache.delete(id);
+        uncache(id);
         fields?.removed(sid, id);
       });
       return Boolean(loc?.idx || isHead);
@@ -200,7 +214,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
     async function admit(space, id, bytes, { from, local = false }, ws) {
       let record;
       try {
-        record = await openEnvelope(space, bytes, { verify: false });
+        record = await openEnvelope(space, bytes, { verify: false, id });
       } catch (error) {
         if (/unknown epoch/.test(error.message)) return defer(space, id, ws);
         if (/no key to read/.test(error.message)) return 'blind';
@@ -223,7 +237,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
         ws.status = current ? 'stored' : 'superseded';
       });
       ws.after(async () => {
-        remember(record);
+        remember(record, bytes.length);
         if (current) fields?.added(space.id, record);
         if (current) await bus.notify(`qu.record.${space.id}`, { ...record, space: space.id, local: Boolean(local) });
         else await bus.notify('qu.record.superseded', { from, space: space.id, id, author: record.author });
@@ -440,7 +454,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
         } catch {
           valid = false;
         }
-        cache.delete(id);
+        uncache(id);
         if (!valid) {
           await step(space.id, async (ws) => {
             ws.remove(key); // can't trust its header to find the sx entry
@@ -504,6 +518,7 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
       }
       await env.exclusive(sid, () => ws.flush());
       cache.clear();
+      cachedBytes = 0;
       fields?.dropSpace(sid);
       if (spaces.has(sid)) leave(sid);
       await bus.notify('qu.space.forgotten', { space: sid, keys: count });
@@ -532,7 +547,13 @@ export function records({ author: defaultAuthor = 'alias', cacheSize = 1000, pad
     /** @returns {string[]} sids of the joined spaces */
     const joined = () => [...spaces.keys()];
 
-    const api = { join, leave, write, get, query, scrub, announce, reindex, forget, dropList, spaceOf, read, authorOf, headOf, joined };
+    /** @returns {{cache: {records: number, bytes: number, maxRecords: number, maxBytes: number}, fields: {indexes: number, entries: number, maxEntries: number}}} memory held */
+    const memory = () => ({
+      cache: { records: cache.size, bytes: cachedBytes, maxRecords: cacheSize, maxBytes: cacheBytes },
+      fields: { ...(fields?.size() ?? { indexes: 0, entries: 0 }), maxEntries: maxIndexEntries },
+    });
+
+    const api = { join, leave, write, get, query, scrub, announce, reindex, forget, dropList, spaceOf, read, authorOf, headOf, joined, memory };
     qu.records = api;
     return api;
   };

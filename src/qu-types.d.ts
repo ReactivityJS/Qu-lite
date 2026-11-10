@@ -185,6 +185,8 @@ export interface DevTools {
   get(key: string): Promise<unknown>;
   dump(prefix?: string, limit?: number): Promise<Record<string, unknown>>;
   stats(): Promise<unknown>;
+  /** what the caches hold (RAM only) */
+  memory(): { records: object | null; sync: object | null; heap: number | null };
   traffic(): { since: number; seconds: number; bytes: number; frames: number; wireEstimate: number; byType: Record<string, { framesIn: number; bytesIn: number; framesOut: number; bytesOut: number }> };
   watchTraffic(seconds?: number): () => void;
   resetTraffic(): void;

@@ -321,15 +321,17 @@ with `members()` installed, such a peer cannot write.
 
 ## records
 
-`qu.use(records({ author?, cacheSize?, padding?, maxIndexes? }))` – read and write records of joined spaces.
+`qu.use(records({ author?, cacheSize?, cacheBytes?, padding?, maxIndexes?, maxIndexEntries? }))` – read and write records of joined spaces.
 This plugin installs the blind envelope layer.
 
 | Option | Default | |
 |---|---|---|
 | `author` | `'alias'` | default signing key for group spaces (`'identity'` signs with the identity; user nodes always use the identity) |
-| `cacheSize` | `1000` | decrypted records kept in memory |
+| `cacheSize` | `1000` | decrypted records kept in memory (count) ... |
+| `cacheBytes` | `4194304` | ... and by size (4 MiB of envelopes). Records over 1/8 of it (large file chunks) are not cached |
 | `padding` | `'quarter'` | private inners padded to size steps: `'quarter'`, `'small'`, `'pow2'` or `'none'` |
 | `maxIndexes` | `64` | in-memory field indexes kept for `where`/`orderBy` queries (least recently used leave) |
+| `maxIndexEntries` | `200000` | ... and their entries in all (~200 bytes each, ~40 MB at most) |
 
 | Method | |
 |---|---|
@@ -981,6 +983,27 @@ Low-level hooks used by the blind layer are `qu.envelope.accept`, `qu.envelope.s
 `qu.grant.offer` and `qu.route`.
 
 ---
+
+## Caches and memory
+
+Every cache is **RAM only**: nothing of it is written to storage or sent, so caching costs no
+storage and no data volume. Each cache has a hard bound.
+
+| Cache | Where | Bound (default) | Typical use | Saves |
+|---|---|---|---|---|
+| decrypted records | client | 1000 records **and** 4 MiB | < 1 MB in a chat | decrypting again on every read |
+| field indexes (`where`/`orderBy`) | client, only after the first such query | 64 indexes, 200,000 entries (~200 B each) | 3,000 events: ~0.6 MB | scanning and decrypting the path per query |
+| path and shard tags | per space | 4,096 each | a few KB | one HMAC with key import per read/write |
+| sync index (Negentropy vectors) | client and relay | client 50,000 / relay 250,000 items (~300 B each) | relay with 10,000 records: ~3 MB | rebuilding the index for every reconcile and every client |
+| outbox sizes (`background`) | client | outbox size | - | reading every queued record per update |
+| moderation, push subscriptions, rate buckets | relay | per space / per subscription / 50,000 buckets | small | a storage read per incoming record |
+
+`qu.dev.memory()` shows what they hold right now (`qu.records.memory()`, `qu.sync.memory()` in
+code). On a phone, lower the bounds if needed:
+
+```js
+createClient({ plugins: [['records', { cacheBytes: 1 << 20, maxIndexEntries: 50_000 }], ...CLIENT_PLUGINS.slice(1)] });
+```
 
 ## Low-level building blocks
 

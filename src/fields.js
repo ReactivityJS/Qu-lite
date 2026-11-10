@@ -22,8 +22,10 @@
  * use (one pass over the path's records) and kept up to date by records.js
  * as records arrive, are superseded or deleted. Nothing readable goes to
  * disk - the store keeps only sealed envelopes and opaque pointers, also
- * with an identity lock. At most `maxIndexes` indexes are kept (least
- * recently used leaves; it is rebuilt when needed again).
+ * with an identity lock. Memory: about 200 bytes per record and indexed
+ * field (plus the value itself for long strings). At most `maxIndexes`
+ * indexes and `maxEntries` entries in all are kept; the least recently used
+ * leaves and is rebuilt when needed again.
  */
 
 const BUILD_BATCH = 64;
@@ -110,15 +112,16 @@ class SortedIndex {
     }
     return lo;
   }
-  /** Many at once (building): append, then one sort - not n sorted inserts. */
-  addAll(records) {
-    for (const record of records) {
-      if (this.ids.has(record.id)) continue;
-      const values = [...new Set(valuesOf(record, this.field))];
-      if (!values.length) continue;
-      for (const v of values) this.entries.push({ v, hlc: record.hlc, id: record.id });
-      this.ids.set(record.id, values);
-    }
+  /** Building: append without order (keeps only the field's values, not the records) ... */
+  collect(record) {
+    if (this.ids.has(record.id)) return;
+    const values = [...new Set(valuesOf(record, this.field))];
+    if (!values.length) return;
+    for (const v of values) this.entries.push({ v, hlc: record.hlc, id: record.id });
+    this.ids.set(record.id, values);
+  }
+  /** ... then one sort - not n sorted inserts. */
+  finish() {
     this.entries.sort(SortedIndex.order);
   }
   add(record) {
@@ -174,9 +177,9 @@ class SortedIndex {
 /**
  * @param {{read: (space: object, id: string) => Promise<object|null>,
  *          current: (space: object, path: string) => Promise<Array<{id: string}>>,
- *          maxIndexes?: number}} deps
+ *          maxIndexes?: number, maxEntries?: number}} deps
  */
-export function fieldIndexes({ read, current, maxIndexes = 64 }) {
+export function fieldIndexes({ read, current, maxIndexes = 64, maxEntries = 200_000 }) {
   /** key -> {index: SortedIndex, ready: Promise, pending: Array|null, sid, path} */
   const indexes = new Map();
   const keyOf = (sid, path, field) => `${sid}\u0000${path}\u0000${field}`;
@@ -192,13 +195,12 @@ export function fieldIndexes({ read, current, maxIndexes = 64 }) {
     slot = { index: new SortedIndex(field), pending: [], sid: space.id, path };
     slot.ready = (async () => {
       const ids = (await current(space, path)).map((p) => p.id);
-      // decrypt in parallel batches (WebCrypto overlaps them), keep only what the index needs
-      const found = [];
+      // decrypt in parallel batches (WebCrypto overlaps them), keep only the field's values
       for (let i = 0; i < ids.length; i += BUILD_BATCH) {
         const batch = await Promise.all(ids.slice(i, i + BUILD_BATCH).map((id) => read(space, id)));
-        for (const r of batch) if (r && !r.deleted) found.push({ id: r.id, hlc: r.hlc, key: r.key, author: r.author, value: r.value });
+        for (const r of batch) if (r && !r.deleted) slot.index.collect(r);
       }
-      slot.index.addAll(found);
+      slot.index.finish();
       // what changed while the index was built
       for (const op of slot.pending) op(slot.index);
       slot.pending = null;
@@ -206,7 +208,22 @@ export function fieldIndexes({ read, current, maxIndexes = 64 }) {
     slot.ready.catch(() => indexes.delete(key));
     indexes.set(key, slot);
     if (indexes.size > maxIndexes) indexes.delete(indexes.keys().next().value);
-    return slot.ready.then(() => slot.index);
+    return slot.ready.then(() => {
+      trim(key);
+      return slot.index;
+    });
+  }
+
+  /** Total entries over `maxEntries` (~200 bytes each): the least recently used indexes leave (never `keep`). */
+  function trim(keep) {
+    let total = 0;
+    for (const slot of indexes.values()) total += slot.index.entries.length;
+    for (const [key, slot] of indexes) {
+      if (total <= maxEntries) break;
+      if (key === keep || slot.pending) continue;
+      total -= slot.index.entries.length;
+      indexes.delete(key);
+    }
   }
 
   const each = (sid, path, op) => {
@@ -230,8 +247,8 @@ export function fieldIndexes({ read, current, maxIndexes = 64 }) {
     dropSpace(sid) {
       for (const [key, slot] of indexes) if (slot.sid === sid) indexes.delete(key);
     },
-    /** @returns {number} indexes held */
-    size: () => indexes.size,
+    /** @returns {{indexes: number, entries: number}} what is held in memory */
+    size: () => ({ indexes: indexes.size, entries: [...indexes.values()].reduce((n, s) => n + s.index.entries.length, 0) }),
 
     /**
      * @param {object} space
