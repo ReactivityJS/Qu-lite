@@ -26,7 +26,8 @@
  *
  *   hello         {role, subs, only?}             'peer' | 'mirror', current subscriptions;
  *                                                 `only`: the list is exhaustive (even if empty)
- *   ack           {sid, ids}                      receiver stored these records
+ *   ack           {sid, ids, w?}                  receiver stored these records; `w: 8` = 8-byte id
+ *                                                 prefixes (feature 'ack8'), matched against the outbox
  *   nack          {sid, id, reason}               receiver refused it (e.g. a mirror's quota)
  *   negerr        {session, reason}               responder declined a session (busy)
  *   digest        {id, items: [{sid, shard?, n, fp}]}   "is your set of this scope the same as mine?"
@@ -90,6 +91,11 @@
  *     by a reconcile on the same link (the receiver's set was loaded before
  *     they arrived). They stay in the outbox until acked, so nothing relies
  *     on that push having worked.
+ *   - SHORT ACKS: to a peer offering `ack8`, an ack carries the first 8 bytes
+ *     of each id instead of 32 - the receiver only needs to find the entry in
+ *     its own outbox, where 64 bits never collide in practice (and a relay
+ *     could already ack any id it knows). Acks for records that are not in
+ *     the receiver's outbox carry no information for it and are dropped.
  *   - BATCHED ACKS, NONE TO MIRRORS: acks are collected for `ackDelayMs` (one
  *     frame instead of one per record); a mirror never writes, has no outbox
  *     to clear, and gets no acks.
@@ -893,7 +899,7 @@ export function sync({
       const scoped = qu.net?.scopes.get(peer);
       for (const sid of scoped ?? []) if (!subs.some((sub) => sub.sid === sid && !sub.shard)) subs.push({ sid });
       const only = Boolean(scoped || qu.net?.exclusive);
-      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : []), ...(batch ? ['recs'] : []), ...(qu.net?.features ?? [])] });
+      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : []), ...(batch ? ['recs'] : []), 'ack8', ...(qu.net?.features ?? [])] });
     });
     bus.on('net.peer.down', ({ peer }) => {
       peers.delete(peer);
@@ -1021,13 +1027,33 @@ export function sync({
       const bySid = queue?.bySid;
       if (!bySid || !peers.has(peer)) return;
       for (const [sid, list] of bySid) {
-        for (const chunk of idChunks(list)) await send(peer, 'ack', { sid, ids: packIds(chunk) });
+        const short = features.get(peer)?.has('ack8');
+        for (const chunk of idChunks(list)) {
+          if (!short) await send(peer, 'ack', { sid, ids: packIds(chunk) });
+          else {
+            const ids = new Uint8Array(chunk.length * 8);
+            chunk.forEach((id, i) => ids.set(crypto.fromHex(id.slice(0, 16)), i * 8));
+            await send(peer, 'ack', { sid, ids, w: 8 });
+          }
+        }
       }
     }
 
-    bus.on('net.in.*.ack', async ({ sid, ids }, ctx) => {
+    bus.on('net.in.*.ack', async ({ sid, ids, w }, ctx) => {
       const peer = ctx.topic.split('.')[2];
+      if (typeof sid !== 'string' || !(ids instanceof Uint8Array)) return;
       const durable = ackFrom === 'any' || roles.get(peer) === 'mirror';
+      if (w === 8) {
+        // prefixes: the full id comes from the own outbox
+        for (let i = 0; i + 8 <= ids.length; i += 8) {
+          for (const key of await storage.keys(`sync/out/${sid}/${crypto.toHex(ids.subarray(i, i + 8))}`)) {
+            const id = key.slice(key.lastIndexOf('/') + 1);
+            if (durable) await storage.remove(key);
+            await bus.notify('qu.record.acked', { sid, id, peer, role: roles.get(peer) ?? 'peer' });
+          }
+        }
+        return;
+      }
       for (let i = 0; i < ids.length; i += 32) {
         const id = crypto.toHex(ids.subarray(i, i + 32));
         if (durable && (await storage.has(`sync/out/${sid}/${id}`))) await storage.remove(`sync/out/${sid}/${id}`);

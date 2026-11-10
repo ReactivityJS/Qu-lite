@@ -87,6 +87,9 @@ Stability, scalability and one base for client and relay.
   grant fingerprint, `grantFingerprint()`); the mirror answers `grantneed` with the spaces it lacks or holds
   differently, and only those grants are sent. Older mirrors get all grants. Plugins can offer hello
   features via `netOf(qu).features`. Reconnect without changes (20 spaces): 6.6 -> 3.6 KiB, 24 -> 5 frames.
+- **Short acks** (feature `ack8`): acks carry 8-byte id prefixes, matched against the receiver's outbox
+  (acks for records not in the outbox are dropped - they carried no information). Ack volume -74 %,
+  first upload of 4,000 records 1,609 -> 1,512 KiB (-6 %).
 
 ## [Unreleased]
 

@@ -472,3 +472,28 @@ test('grants on reconnect: a key rotation made offline changes the fingerprint -
   await link.disconnect();
   await Promise.all([client.close(), mirror.close()]);
 });
+
+test('short acks: 8-byte prefixes clear the outbox; a peer without ack8 gets full ids', async () => {
+  for (const offer of [true, false]) {
+    const mirror = await peer({ role: 'mirror' });
+    const client = await peer({ ackFrom: 'mirror' });
+    const [ms, cs] = await spaces(1, mirror, client);
+    await mirror.watch({ space: ms[0] });
+    for (let i = 0; i < 30; i++) await client.write(cs[0], 'chat', i);
+    await client.watch({ space: cs[0] });
+    const widths = [];
+    mirror.bus.on('net.out.*.ack', ({ ids, w }) => widths.push(w === 8 ? ids.length / 8 : -ids.length / 32));
+    const acked = new Set();
+    client.bus.on('qu.record.acked', ({ id }) => acked.add(id));
+    // an older client: its hello does not offer ack8
+    if (!offer) client.bus.on('net.out.*.hello', (p) => void (p.features = p.features.filter((f) => f !== 'ack8')), { order: -1e9 });
+    const link = connectInProcess(client, mirror);
+    await link.ready;
+    await until(async () => (await client.syncStatus()).outbox === 0, 5000, 'outbox cleared');
+    assert.equal(acked.size, 30, 'every record reported acked with its full id');
+    assert.ok([...acked].every((id) => /^[0-9a-f]{64}$/.test(id)));
+    assert.ok(widths.length > 0 && widths.every((n) => (offer ? n > 0 : n < 0)), `${offer ? 'short' : 'full'} acks: ${widths}`);
+    await link.disconnect();
+    await Promise.all([client.close(), mirror.close()]);
+  }
+});
