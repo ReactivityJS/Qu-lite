@@ -38,6 +38,16 @@
  *     the link instead of being dropped - and instead of the remote closing
  *     the link after too many drops, which made a big outbox re-upload
  *     itself on every reconnect. Without an announcement nothing changes.
+ *   - INBOUND BACKPRESSURE: at most `maxInflight` (64) frames of one link
+ *     are processed at a time; the rest wait in arrival order, still raw
+ *     (decoded when their turn comes). Above 4 MiB waiting, the link asks
+ *     its transport to stop reading (`pause()`: WebSocket on Node pauses
+ *     the TCP socket, the SSE server holds back its POST answer) and
+ *     resumes below 1 MiB - the sender's buffer fills and its pacing makes
+ *     it wait. So one busy peer can neither start unbounded work nor make
+ *     this side buffer without bound. Rate limits still apply on arrival,
+ *     before anything is queued. Frames that arrived before a link closed
+ *     are still processed. Events: `net.paused` / `net.resumed`.
  *   - PACING: a transport that can tell how much it still has to send
  *     (`buffered()`, e.g. a WebSocket's bufferedAmount) lets bulk senders wait
  *     with `whenWritable(qu, peer)` instead of filling memory - and instead
@@ -55,6 +65,10 @@ import { encodeFrame, decodeFrame, peekFrameType } from './frame.js';
 export const PROTOCOL_VERSION = 1;
 /** Frame types are bus topic segments: no dots, no wildcards. */
 const FRAME_TYPE = /^[a-z][a-z0-9_-]{0,31}$/;
+/** Inbound frames processed at once per link (the rest queue in order). */
+export const MAX_INFLIGHT = 64;
+const INBOUND_HIGH = 4 * 1024 * 1024;
+const INBOUND_LOW = 1024 * 1024;
 /** Frames a remote may send before its `hi` (they are ignored) before the link is closed. */
 const MAX_EARLY_FRAMES = 8;
 
@@ -91,7 +105,7 @@ const xorHex = (a, b) => Array.from({ length: a.length }, (_, i) => (parseInt(a[
  * @param {{send: (bytes: Uint8Array) => void, close?: () => void, via?: string, onUp?: (peer: string) => void, onDown?: () => void, localId?: string, scope?: Iterable<string>}} transport
  * @returns {{receive: (bytes: Uint8Array) => void, closed: () => void, close: () => void, stats: {sent: number, received: number, framesOut: number, framesIn: number}, readonly peer: string|null}}
  */
-export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onDown, localId, scope, buffered = null, maxBuffered = 0 }) {
+export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onDown, localId, scope, buffered = null, maxBuffered = 0, pause = null, resume = null, maxInflight = netOf(qu).maxInflight ?? MAX_INFLIGHT }) {
   const net = netOf(qu);
   const stats = { sent: 0, received: 0, framesOut: 0, framesIn: 0 };
   let remote = null;
@@ -99,6 +113,34 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
   let open = true;
 
   let early = 0;
+  // inbound: frames waiting for a processing slot, still raw
+  const inbox = [];
+  let inboxBytes = 0;
+  let inflight = 0;
+  let paused = false;
+  const pump = () => {
+    while (inflight < maxInflight && inbox.length) {
+      const { bytes, peer } = inbox.shift();
+      inboxBytes -= bytes.length;
+      let frame;
+      try {
+        frame = decodeFrame(bytes);
+      } catch {
+        qu.bus.notify('net.error', { via, reason: 'bad frame', peer });
+        continue;
+      }
+      inflight++;
+      qu.bus.emit(`net.in.${peer}.${frame.type}`, frame.payload).finally(() => {
+        inflight--;
+        pump();
+      });
+    }
+    if (paused && inboxBytes <= INBOUND_LOW) {
+      paused = false;
+      resume?.();
+      qu.bus.notify('net.resumed', { peer: remote, via });
+    }
+  };
   const transmit = (frame) => {
     stats.sent += frame.length;
     stats.framesOut++;
@@ -185,6 +227,16 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
         if (verdict === false) return;
       }
       if (!FRAME_TYPE.test(type)) return qu.bus.notify('net.error', { via, reason: 'bad type', peer: remote });
+      if (type !== 'hi' && remote) {
+        inbox.push({ bytes, peer: remote });
+        inboxBytes += bytes.length;
+        if (!paused && inboxBytes > INBOUND_HIGH && pause) {
+          paused = true;
+          pause();
+          qu.bus.notify('net.paused', { peer: remote, via, queued: inbox.length, bytes: inboxBytes });
+        }
+        return pump();
+      }
       let frame;
       try {
         frame = decodeFrame(bytes);
@@ -215,6 +267,8 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
           backlog: () => queue.length,
           backlogLimit: bucket ? Math.max(8, Math.floor(bucket.rateFrames / 2)) : Infinity,
           budget: bucket ? { frames: bucket.rateFrames, bytes: bucket.rateBytes } : null,
+          /** inbound processing: frames running, waiting (count, bytes), reading paused */
+          inbound: () => ({ inflight, queued: inbox.length, bytes: inboxBytes, paused }),
           drop: () => (link.closed(), close()),
         });
         off = qu.bus.on(`net.out.${remote}.*`, (payload, ctx) => sendFrame(ctx.topic.split('.')[3], payload));
@@ -222,7 +276,6 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
         qu.bus.notify('net.peer.up', { peer: remote, via });
         return;
       }
-      qu.bus.emit(`net.in.${remote}.${frame.type}`, frame.payload);
     },
     closed() {
       if (!open) return;
@@ -231,6 +284,10 @@ export function createLink(qu, { send, close = () => {}, via = 'link', onUp, onD
       clearTimeout(drainTimer);
       queue.length = 0;
       queuedBytes = 0;
+      if (paused) {
+        paused = false;
+        resume?.(); // frames already queued are still processed (they arrived before the close)
+      }
       off?.();
       if (remote) {
         if (scope) net.scopes.delete(remote);

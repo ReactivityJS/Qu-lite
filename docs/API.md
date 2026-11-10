@@ -690,7 +690,13 @@ version is refused (`net.error {reason: 'protocol'}`); a remote that sends no va
 `[a-z][a-z0-9_-]{0,31}`; the rate guard (`limits`) sees type and size before the frame is parsed; frames
 are decoded strictly. **Backpressure**: a WebSocket or SSE stream whose send buffer exceeds `maxBufferedBytes`
 (16 MiB) is closed (`net.slow`) - the peer reconnects and resumes. `qu.close()` drops every link.
-**Send budget**: a remote's `hi` may carry its inbound `limits`; the link then queues frames to stay
+**Inbound backpressure**: at most `netOf(qu).maxInflight` (64) frames per link are processed at once;
+the rest wait raw and in order (`links.get(peer).inbound() → {inflight, queued, bytes, paused}`).
+Above 4 MiB waiting the transport stops reading (`pause`/`resume` options of `createLink`; Node `ws`
+pauses the TCP socket, the SSE server holds back its POST answer) until below 1 MiB: `net.paused` /
+`net.resumed`. Frames that arrived before a link closed are still processed. `bench/inbound-load.mjs`:
+6,000 small records from one fast client against a slow relay ran 2,335 frames at once and +109 MiB
+heap before, 64 and +22 MiB now. **Send budget**: a remote's `hi` may carry its inbound `limits`; the link then queues frames to stay
 at 80 % of them (see [limits](#limits)). **Pacing**: a transport passes `buffered()` and `maxBuffered` to `createLink`; `whenWritable(qu, peer)` (from
 `src/net/link.js`) resolves once there is room (waits above `maxBuffered / 4`, at most 4 MiB, until below a
 quarter of that) and returns `false` when the link went away. WebSocket, SSE server and WebRTC report their buffer.

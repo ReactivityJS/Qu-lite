@@ -48,7 +48,10 @@ export function attachSocket(qu, socket, { via = 'ws', onUp, onDown, localId, sc
     socket.send(bytes);
   };
   const start = () => {
-    link = createLink(qu, { send, close: () => socket.close(), via, onUp, onDown, localId, scope, buffered: () => socket.bufferedAmount ?? 0, maxBuffered: maxBufferedBytes });
+    link = createLink(qu, { send, close: () => socket.close(), via, onUp, onDown, localId, scope, buffered: () => socket.bufferedAmount ?? 0, maxBuffered: maxBufferedBytes,
+      // Node's ws can stop reading (TCP backpressure to the sender); a browser WebSocket cannot
+      pause: typeof socket.pause === 'function' ? () => socket.pause() : null,
+      resume: typeof socket.resume === 'function' ? () => socket.resume() : null });
   };
   if (socket.readyState === OPEN) start();
   else socket.addEventListener('open', start);

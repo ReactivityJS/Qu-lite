@@ -313,6 +313,7 @@ docker compose up --build        # oder: docs/INSTALL.md
 | Schutz | Option / Flag | Verhalten |
 |---|---|---|
 | Max. Verbindungen | `maxConnections` / `--max-connections` (10 000) | WebSocket: Close 1013, SSE: 503 – Clients versuchen später erneut |
+| Schnelle Clients | 64 Frames gleichzeitig pro Verbindung | darüber wird gewartet; über 4 MiB Rückstand hört der Relay auf zu lesen, der Client wartet über seine Taktung |
 | Langsame Clients | `maxBufferedBytes` (16 MiB) | Verbindung wird geschlossen statt unbegrenzt zu puffern (`net.slow`); Client resynchronisiert |
 | Rate-Limit | `--rate` (200 Frames/s) | Token-Bucket pro Verbindung, vor dem Parsen; wird im Handshake angekündigt, Clients takten sich auf 80 % davon (kein Verwerfen, keine Abbrüche bei großen Uploads) |
 | Frame-Größe | `maxFrameBytes` (8 MiB) | größere WebSocket-Nachrichten → Close 1009 |

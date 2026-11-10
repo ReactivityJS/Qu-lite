@@ -144,6 +144,8 @@ export function devtools({ global = typeof window !== 'undefined' ? 'qu' : false
             framesOut: l.stats.framesOut,
             framesIn: l.stats.framesIn,
             scope: netOf(qu).scopes.get(peer)?.size ?? 'shared',
+            inQueue: l.inbound?.().queued ?? 0,
+            outQueue: l.backlog?.() ?? 0,
           }))
         );
       },

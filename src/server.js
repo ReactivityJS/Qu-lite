@@ -26,6 +26,7 @@ const LOGGED = {
   'net.peer.down': ({ peer, via, stats }) => ({ peer, via, sent: stats?.sent, received: stats?.received }),
   'net.refused': ({ via, reason }) => ({ via, reason }),
   'net.slow': ({ via, peer, buffered }) => ({ via, peer, buffered }),
+  'net.paused': ({ via, peer, bytes }) => ({ via, peer, bytes }),
   'net.limited': ({ peer, closed }) => (closed ? { peer, closed } : null),
   'net.error': ({ via, reason, peer }) => ({ via, reason, peer }),
   'mirror.grant': ({ sid, changed }) => ({ sid, changed: changed?.join(',') }),

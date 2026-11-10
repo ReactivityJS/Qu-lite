@@ -109,6 +109,7 @@ await navigator.storage.estimate()      // Browser-Quote
 qu.dev.trace('bus.error')              // geworfene Handler, Fehler in Timern/Flushes
 qu.dev.trace('net.error')              // kaputte Frames, falsches Protokoll, Handshake-Timeout
 qu.dev.trace('net.slow')               // Verbindung wegen Rückstau geschlossen
+qu.dev.trace('net.paused')             // Relay liest vorübergehend nicht (zu viel Rückstand)
 ```
 
 ## Tracing: Bus-Ereignisse mitlesen

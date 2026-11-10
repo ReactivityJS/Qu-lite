@@ -353,3 +353,74 @@ test('send budget: frames queue in order; no or invalid announcement means no bu
     await open.qu.close();
   }
 });
+
+test('inbound backpressure: at most maxInflight frames run at once, in order; a large backlog pauses the transport', async () => {
+  const qu = await createQu();
+  const { netOf } = await import('../src/net/link.js');
+  netOf(qu).maxInflight = 2;
+  const calls = { pause: 0, resume: 0 };
+  const link = createLink(qu, { send: () => {}, via: 'test', pause: () => calls.pause++, resume: () => calls.resume++ });
+  link.receive(encodeFrame('hi', { peer: '0123456789abcdef', v: 1 }));
+  let running = 0;
+  let most = 0;
+  const started = [];
+  const gates = [];
+  qu.bus.on('net.in.*.work', async ({ i }) => {
+    started.push(i);
+    running++;
+    most = Math.max(most, running);
+    await new Promise((resolve) => gates.push(resolve));
+    running--;
+  });
+  const events = [];
+  qu.bus.on('net.paused', () => events.push('paused'));
+  qu.bus.on('net.resumed', () => events.push('resumed'));
+  const big = new Uint8Array(1024 * 1024);
+  for (let i = 0; i < 7; i++) link.receive(encodeFrame('work', { i, big }));
+  await settle();
+  assert.deepEqual(started, [0, 1], 'two at a time');
+  assert.equal(qu.net.links.get('0123456789abcdef').inbound().queued, 5);
+  assert.equal(calls.pause, 1, 'more than 4 MiB waiting: reading paused');
+  while (started.length < 7 || gates.length) {
+    gates.shift()?.();
+    await settle(5);
+  }
+  assert.deepEqual(started, [0, 1, 2, 3, 4, 5, 6], 'in arrival order');
+  assert.equal(most, 2);
+  assert.equal(calls.resume, 1, 'resumed once drained');
+  assert.deepEqual(events, ['paused', 'resumed']);
+  await qu.close();
+});
+
+test('a relay that processes slowly pauses a fast uploader over a real WebSocket - bounded memory, nothing lost', async () => {
+  // the relay's ingest is slowed down on purpose: 2 ms per record
+  const slowIngest = (qu) => {
+    qu.bus.on('net.in.*.rec', () => new Promise((r) => setTimeout(r, 2)), { order: -1 });
+  };
+  const relay = await createRelay({ port: 0, host: '127.0.0.1', log: () => {}, rate: 0, extra: [slowIngest] });
+  let peak = 0;
+  let paused = 0;
+  relay.qu.bus.on('net.paused', () => paused++);
+  const watch = setInterval(() => {
+    for (const l of relay.qu.net?.links.values() ?? []) peak = Math.max(peak, l.inbound?.().bytes ?? 0);
+  }, 5);
+  const client = await createClient({ devtools: false, transports: [['relay', { WebSocketImpl: WebSocket, minDelayMs: 50 }]] });
+  let downs = 0;
+  client.bus.on('net.peer.down', () => downs++);
+  try {
+    const space = client.join(await Space.create(client.identity));
+    await client.watch({ space });
+    const text = 'x'.repeat(8000);
+    for (let i = 0; i < 1200; i++) await client.write(space, 'chat', { i, text }); // ~10 MB to upload at once
+    client.transports.relay.connect(`http://127.0.0.1:${relay.port}`);
+    await until(async () => (await client.syncStatus()).outbox === 0, 90_000, 'uploaded');
+    assert.ok(paused >= 1, 'the relay paused reading at least once');
+    assert.ok(peak < 6 * 1024 * 1024, `relay backlog stayed bounded (${(peak / 1048576).toFixed(1)} MiB)`);
+    assert.equal(downs, 0, 'never disconnected');
+    assert.equal(await relay.qu.mirror.count(space.id), 1200);
+  } finally {
+    clearInterval(watch);
+    await client.close();
+    await relay.close();
+  }
+});

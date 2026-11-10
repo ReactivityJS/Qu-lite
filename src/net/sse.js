@@ -45,8 +45,10 @@ export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs 
     let link = null;
     let queue = [];
     let sending = Promise.resolve();
+    let pendingBytes = 0; // queued + posted but not yet answered: what whenWritable sees
     const flush = () => {
       if (!queue.length) return;
+      const size = queue.reduce((n, b) => n + b.length, 0);
       const batch = packFrames(queue);
       queue = [];
       sending = sending
@@ -54,7 +56,8 @@ export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs 
         .then((res) => {
           if (!res.ok) throw new Error(`sse post ${res.status}`);
         })
-        .catch(() => controller.abort());
+        .catch(() => controller.abort())
+        .finally(() => (pendingBytes -= size));
     };
     try {
       qu.bus.notify('net.connecting', { url: base, attempt, via: 'sse' });
@@ -64,7 +67,10 @@ export function connectSse(qu, base, { fetchImpl = globalThis.fetch, minDelayMs 
         send: (bytes) => {
           if (!queue.length) queueMicrotask(flush);
           queue.push(bytes);
+          pendingBytes += bytes.length;
         },
+        buffered: () => pendingBytes,
+        maxBuffered: 16 * 1024 * 1024,
         close: () => controller.abort(),
         via: 'sse',
         localId,

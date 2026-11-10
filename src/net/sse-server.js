@@ -49,8 +49,24 @@ export function createSseHandler(qu, { path = '/sse', keepAliveMs = 15_000, maxB
       }
       res.write(`data:${toBase64(bytes)}\n\n`);
     };
-    const link = createLink(qu, { send, close: () => res.end(), via: 'sse', buffered: () => res.writableLength ?? 0, maxBuffered: maxBufferedBytes });
-    const entry = { link, res };
+    // backpressure: while the link is paused, POSTs are answered only once it resumes (the client posts one at a time)
+    let gate = null;
+    const link = createLink(qu, {
+      send,
+      close: () => res.end(),
+      via: 'sse',
+      buffered: () => res.writableLength ?? 0,
+      maxBuffered: maxBufferedBytes,
+      pause: () => {
+        let open;
+        gate = { promise: new Promise((r) => (open = r)), open };
+      },
+      resume: () => {
+        gate?.open();
+        gate = null;
+      },
+    });
+    const entry = { link, res, gate: () => gate?.promise };
     sessions.set(session, entry);
     const keepAlive = setInterval(() => res.write(':\n\n'), keepAliveMs);
     keepAlive.unref?.();
@@ -75,14 +91,15 @@ export function createSseHandler(qu, { path = '/sse', keepAliveMs = 15_000, maxB
         req.destroy();
       } else chunks.push(chunk);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       if (res.writableEnded) return;
       try {
         for (const frame of unpackFrames(new Uint8Array(Buffer.concat(chunks)))) entry.link.receive(frame);
-        res.writeHead(204, headers).end();
       } catch {
-        res.writeHead(400, headers).end('bad frames');
+        return res.writeHead(400, headers).end('bad frames');
       }
+      await entry.gate(); // paused: the client's next POST waits for this answer
+      if (!res.writableEnded) res.writeHead(204, headers).end();
     });
   }
 
