@@ -55,6 +55,12 @@ Stability, scalability and one base for client and relay.
   back) and resumes below 1 MiB (`net.paused`/`net.resumed`, logged by the relay). One fast client
   against a slow relay (6,000 records): 2,335 -> 64 frames in progress, +109 -> +22 MiB heap.
   The SSE client reports its unanswered POSTs as its send buffer. `bench/inbound-load.mjs`.
+- **Device backup and restore** (`device` plugin, in `createClient`): `qu.device.exportBackup(passphrase)`
+  seals the device-only keys (identity, group secrets, epoch keys) with PBKDF2-SHA256 (600,000 rounds)
+  + AES-256-GCM; `createClient({ restore: {backup, passphrase} })` + `restoreGroups()` brings a user back
+  completely on a new device (content comes from the relay). Refuses to overwrite another identity
+  that has groups unless `force`. `qu.device.persist()` / `status()` for the browser's storage grant;
+  `createClient({ persist: true })`.
 
 ## [Unreleased]
 

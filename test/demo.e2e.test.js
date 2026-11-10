@@ -75,12 +75,29 @@ test('three browsers through the relay: invite by link and by inbox, offline, re
       const group = await qu.createGroup();
       await qu.write(group, 'chat', 'hallo');
       for (let i = 0; i < 200 && (await qu.syncStatus()).outbox; i++) await new Promise((r) => setTimeout(r, 50));
-      const result = { outbox: (await qu.syncStatus()).outbox, global: globalThis.snippetQu === qu, plugins: qu.dev.info().plugins };
+      const status = await qu.device.status();
+      const t0 = performance.now();
+      const backup = await qu.device.exportBackup('correct horse battery staple');
+      const backupMs = performance.now() - t0;
+      const result = {
+        outbox: (await qu.syncStatus()).outbox,
+        global: globalThis.snippetQu === qu,
+        plugins: qu.dev.info().plugins,
+        persistedKnown: typeof status.persisted === 'boolean',
+        quota: status.quota > 0,
+        backup: backup.startsWith('qu-backup.'),
+        backupAt: (await qu.device.status()).backupAt > 0,
+        backupMs,
+      };
       await qu.close();
       return result;
     }, base);
     assert.equal(roundTrip.outbox, 0, 'acked by the relay');
     assert.ok(roundTrip.global && roundTrip.plugins.includes('devtools'));
+    // device plugin in a real browser: storage status from navigator.storage, a full-strength backup
+    assert.ok(roundTrip.persistedKnown && roundTrip.quota, 'navigator.storage answers');
+    assert.ok(roundTrip.backup && roundTrip.backupAt, 'backup exported and remembered');
+    t.diagnostic(`backup with 600k PBKDF2 rounds in Chromium: ${roundTrip.backupMs.toFixed(0)} ms`);
     await start.click('#storeTest');
     await start.waitForFunction(() => document.getElementById('store').dataset.ok === 'true', null, { timeout: 15_000 });
     await start.close();

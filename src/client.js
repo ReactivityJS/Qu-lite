@@ -15,7 +15,7 @@
 import { createPeer, defaultRegistry } from './peer.js';
 
 /** The plugin set `createClient()` installs unless `plugins` is given. */
-export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror' }], 'status', 'compaction']);
+export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror' }], 'status', 'compaction', 'device']);
 
 /**
  * @param {{
@@ -27,12 +27,18 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   relay?: object,
  *   transports?: Array<string|[string, object]|Function>,
  *   devtools?: boolean|object,
+ *   persist?: boolean,
+ *   restore?: {backup: string, passphrase: string, force?: boolean},
  *   registry?: import('./registry.js').Registry,
  *   identity?: object|'persisted',
  * }} [options]
  *   `url`: relay origin (http(s):// or ws(s)://). `name`: IndexedDB database name (one per app).
  *   `extra`: plugins added to the defaults (e.g. ['text', 'blobs']). `relay`: options for the relay
  *   transport (e.g. {isolate: true}). `transports`: replaces the relay transport entirely.
+ *   `persist`: ask the browser right away to keep this origin's storage (may
+ *   prompt; default false - call `qu.device.persist()` at a better moment).
+ *   `restore`: start from a device backup (`qu.device.exportBackup()` on the
+ *   old device); then `await qu.restoreGroups()`.
  */
 export async function createClient({
   url,
@@ -45,9 +51,13 @@ export async function createClient({
   devtools = typeof window !== 'undefined',
   registry = defaultRegistry(),
   identity = 'persisted',
+  persist = false,
+  restore,
 } = {}) {
   store ??= globalThis.indexedDB ? ['indexeddb', { name }] : 'memory';
   transports ??= url ? [['relay', { url, ...relay }]] : [];
   const tools = devtools ? [['devtools', devtools === true ? {} : devtools]] : [];
-  return createPeer({ registry, store, identity, plugins: [...plugins, ...extra, ...tools], transports });
+  const qu = await createPeer({ registry, store, identity, restore, plugins: [...plugins, ...extra, ...tools], transports });
+  if (persist && qu.device) await qu.device.persist().catch((error) => qu.bus.error(error, 'device.persist'));
+  return qu;
 }

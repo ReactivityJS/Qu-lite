@@ -1,0 +1,193 @@
+/**
+ * DEVICE - what keeps a user's access alive beyond this one browser profile:
+ * an encrypted device backup and the browser's persistent-storage grant.
+ *
+ * Everything that is ONLY on this device is small: the identity
+ * (`qu/identity`), how to reopen each group (`members/groups/<sid>`) and the
+ * epoch keys this device holds (`members/keys/<sid>/<epoch>`). Everything
+ * else - records, profiles, member lists - is on the relay and comes back
+ * by sync. So a backup of those keys restores a user completely on a new
+ * device: `createClient({ restore: {backup, passphrase} })`, then
+ * `qu.restoreGroups()` as after every reload.
+ *
+ *   qu.use(device())
+ *   const text = await qu.device.exportBackup('correct horse battery staple');
+ *   await qu.device.downloadBackup(passphrase)       // browser: saves qu-backup.txt
+ *   await qu.device.status()   // {persisted, usage, quota, backupAt, groups}
+ *   await qu.device.persist()  // asks the browser not to evict this origin's storage
+ *
+ * Backup format (a single line of text, safe to paste or save):
+ *   `qu-backup.` + base64url(JSON {h: header, d: sealed})
+ *   header = JSON {v: 1, kdf: 'PBKDF2-SHA256', iterations, salt}
+ *   sealed = AES-256-GCM(key, payload, additionalData = header) - iv first
+ *   key    = PBKDF2-SHA256(passphrase, salt, iterations) (600 000 by default)
+ * A wrong passphrase and a damaged backup fail the same way (GCM tag).
+ * The header is authenticated, so iterations cannot be lowered unnoticed.
+ *
+ * Why the browser grant matters: without `navigator.storage.persist()` a
+ * browser may evict the origin's IndexedDB under storage pressure - and with
+ * it the identity. Requesting it can show a prompt (Firefox), so it is up to
+ * the app when: `createClient({ persist: true })` asks at start,
+ * `qu.device.persist()` whenever the app chooses (e.g. after the first group).
+ */
+import * as crypto from './crypto.js';
+
+const PREFIX = 'qu-backup.';
+/** Keys that exist only on this device and make up a backup. */
+const DEVICE_KEYS = ['members/groups/', 'members/keys/'];
+export const BACKUP_ITERATIONS = 600_000;
+const MIN_PASSPHRASE = 8;
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const b64url = (bytes) => crypto.toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64url = (text) => crypto.fromBase64(text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (text.length % 4)) % 4));
+
+/** JSON with Uint8Array support ({"$u8": base64}). */
+const toJson = (value) => JSON.stringify(value, (_k, v) => (v instanceof Uint8Array ? { $u8: crypto.toBase64(v) } : v));
+const fromJson = (text) => JSON.parse(text, (_k, v) => (v && typeof v === 'object' && typeof v.$u8 === 'string' && Object.keys(v).length === 1 ? crypto.fromBase64(v.$u8) : v));
+
+async function keyFrom(passphrase, salt, iterations) {
+  const base = await globalThis.crypto.subtle.importKey('raw', enc.encode(passphrase.normalize('NFKC')), 'PBKDF2', false, ['deriveBits']);
+  const bits = await globalThis.crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, base, 256);
+  return crypto.aesKey(new Uint8Array(bits));
+}
+
+function checkPassphrase(passphrase) {
+  if (typeof passphrase !== 'string' || [...passphrase.normalize('NFKC')].length < MIN_PASSPHRASE) {
+    throw new Error(`backup: the passphrase needs at least ${MIN_PASSPHRASE} characters`);
+  }
+}
+
+/**
+ * Seals `{identity, entries}` with a passphrase.
+ * @param {{identity: object, entries: Array<[string, *]>}} payload
+ * @param {string} passphrase
+ * @param {{iterations?: number}} [options]
+ * @returns {Promise<string>}
+ */
+export async function sealBackup(payload, passphrase, { iterations = BACKUP_ITERATIONS } = {}) {
+  checkPassphrase(passphrase);
+  if (!Number.isInteger(iterations) || iterations < 1) throw new Error('backup: bad iteration count');
+  const salt = crypto.randomBytes(16);
+  const header = JSON.stringify({ v: 1, kdf: 'PBKDF2-SHA256', iterations, salt: crypto.toBase64(salt) });
+  const sealed = await crypto.aesEncrypt(await keyFrom(passphrase, salt, iterations), enc.encode(toJson({ ...payload, created: Date.now() })), enc.encode(header));
+  return PREFIX + b64url(enc.encode(JSON.stringify({ h: header, d: crypto.toBase64(sealed) })));
+}
+
+/**
+ * Opens a backup.
+ * @param {string} text - as produced by `exportBackup()` (surrounding whitespace is ignored)
+ * @param {string} passphrase
+ * @returns {Promise<{identity: object, entries: Array<[string, *]>, created: number}>}
+ * @throws {Error} 'backup: wrong passphrase or damaged backup' - deliberately the same for both
+ */
+export async function readBackup(text, passphrase) {
+  const fail = () => {
+    throw new Error('backup: wrong passphrase or damaged backup');
+  };
+  if (typeof text !== 'string' || !text.trim().startsWith(PREFIX)) throw new Error('backup: not a qu-lite backup');
+  let outer, header;
+  try {
+    outer = JSON.parse(dec.decode(unb64url(text.trim().slice(PREFIX.length))));
+    header = JSON.parse(outer.h);
+  } catch {
+    return fail();
+  }
+  if (header?.v !== 1 || header.kdf !== 'PBKDF2-SHA256') throw new Error(`backup: unsupported format (${header?.v}/${header?.kdf})`);
+  if (!Number.isInteger(header.iterations) || header.iterations < 1 || header.iterations > 10_000_000) return fail();
+  let plain;
+  try {
+    const key = await keyFrom(String(passphrase ?? ''), crypto.fromBase64(header.salt), header.iterations);
+    plain = await crypto.aesDecrypt(key, crypto.fromBase64(outer.d), enc.encode(outer.h));
+  } catch {
+    return fail();
+  }
+  const payload = fromJson(dec.decode(plain));
+  const id = payload?.identity;
+  if (!(id?.publicKey instanceof Uint8Array && id.privateKey instanceof Uint8Array && id.xPublicKey instanceof Uint8Array && id.xPrivateKey instanceof Uint8Array)) return fail();
+  if (!Array.isArray(payload.entries) || !payload.entries.every(([k]) => typeof k === 'string' && DEVICE_KEYS.some((p) => k.startsWith(p)))) return fail();
+  return payload;
+}
+
+const sameIdentity = (a, b) => Boolean(a && b) && crypto.toHex(a.publicKey) === crypto.toHex(b.publicKey);
+
+/**
+ * Writes a backup into a store before a peer is built on it (createPeer's `restore`).
+ * A store that already belongs to ANOTHER identity is refused if that identity has
+ * groups here (their keys would be lost) - unless `force`.
+ * @param {object} store - a driver (get/set/remove/keys)
+ * @param {{backup: string, passphrase: string, force?: boolean}} options
+ * @returns {Promise<{identity: object, groups: number, replaced: boolean}>}
+ */
+export async function restoreInto(store, { backup, passphrase, force = false }) {
+  const payload = await readBackup(backup, passphrase);
+  const current = await store.get('qu/identity');
+  let replaced = false;
+  if (current && !sameIdentity(current, payload.identity)) {
+    const groups = (await store.keys('members/groups/')).length;
+    if (groups && !force) {
+      throw new Error(`restore: this storage belongs to another identity with ${groups} group(s) - use another database name, or force: true to drop them`);
+    }
+    for (const prefix of DEVICE_KEYS) for (const key of await store.keys(prefix)) await store.remove(key);
+    replaced = true;
+  }
+  await store.set('qu/identity', payload.identity);
+  for (const [key, value] of payload.entries) await store.set(key, value);
+  return { identity: payload.identity, groups: payload.entries.filter(([k]) => k.startsWith('members/groups/')).length, replaced };
+}
+
+/**
+ * @param {{iterations?: number, navigator?: object}} [options] - `iterations` for exports (default 600 000)
+ */
+export function device({ iterations = BACKUP_ITERATIONS, navigator: nav = globalThis.navigator } = {}) {
+  const plugin = (qu) => {
+    const storage = qu.storage;
+    const api = {
+      /** @returns {Promise<string>} the encrypted backup of this device's keys */
+      async exportBackup(passphrase) {
+        const entries = [];
+        for (const prefix of DEVICE_KEYS) for (const { key, value } of await storage.range(prefix)) entries.push([key, value]);
+        const text = await sealBackup({ identity: qu.identity, entries }, passphrase, { iterations });
+        await storage.set('qu/backup-at', Date.now());
+        await qu.bus.notify('qu.device.backup', { groups: entries.filter(([k]) => k.startsWith('members/groups/')).length });
+        return text;
+      },
+      /** Browser: offers the backup as a file download. @returns {Promise<string>} the backup text */
+      async downloadBackup(passphrase, filename = 'qu-backup.txt') {
+        const text = await api.exportBackup(passphrase);
+        if (typeof document === 'undefined' || typeof URL?.createObjectURL !== 'function') throw new Error('downloadBackup: only in a browser - use exportBackup()');
+        const url = URL.createObjectURL(new Blob([text + '\n'], { type: 'text/plain' }));
+        const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        return text;
+      },
+      /** Asks the browser to keep this origin's storage (may prompt). @returns {Promise<boolean|null>} null: not supported here */
+      async persist() {
+        if (typeof nav?.storage?.persist !== 'function') return null;
+        const granted = await nav.storage.persist();
+        await qu.bus.notify('qu.device.persist', { granted });
+        return granted;
+      },
+      /** @returns {Promise<{persisted: boolean|null, usage: number|null, quota: number|null, backupAt: number|null, groups: number}>} */
+      async status() {
+        const persisted = typeof nav?.storage?.persisted === 'function' ? await nav.storage.persisted() : null;
+        const estimate = typeof nav?.storage?.estimate === 'function' ? await nav.storage.estimate() : {};
+        return {
+          persisted,
+          usage: estimate.usage ?? null,
+          quota: estimate.quota ?? null,
+          backupAt: (await storage.get('qu/backup-at')) ?? null,
+          groups: (await storage.keys('members/groups/')).length,
+        };
+      },
+    };
+    qu.device = api;
+    return api;
+  };
+  plugin.pluginName = 'device';
+  return plugin;
+}

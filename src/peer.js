@@ -48,6 +48,7 @@ export function defaultRegistry() {
     .register('plugin', 'blobs', lazy(() => import('./blobs.js'), 'blobs'))
     .register('plugin', 'stats', lazy(() => import('./stats.js'), 'stats'))
     .register('plugin', 'devtools', lazy(() => import('./devtools.js'), 'devtools'))
+    .register('plugin', 'device', lazy(() => import('./device.js'), 'device'))
     .register('plugin', 'topology', lazy(() => import('./net/topology.js'), 'topology'))
     .register('transport', 'webrtc', lazy(() => import('./net/webrtc.js'), 'rtc'))
     .register('transport', 'ws', lazy(() => import('./net/ws.js'), 'wsTransport'))
@@ -65,18 +66,26 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  *   plugins?: Array<string|[string, object]|Function>,
  *   transports?: Array<string|[string, object]|Function>,
  *   netId?: string,
+ *   restore?: {backup: string, passphrase: string, force?: boolean},
  * }} [options]
  *   `identity: 'persisted'` (default) loads the identity from the store or
  *   creates and saves one - so a reload keeps who you are.
+ *   `restore`: writes a device backup (device.js) into the store first and
+ *   uses its identity; refused if the store belongs to another identity
+ *   that has groups here, unless `force`. Then call `qu.restoreGroups()`.
  *   A transport whose API has a `ready` promise (a server binding its port)
  *   is awaited, so a failure surfaces here and not later.
  */
-export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId } = {}) {
+export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId, restore } = {}) {
   const [storeName, storeOptions] = typeof store === 'object' && !Array.isArray(store) ? [null, store] : entry(store);
   const root = storeName ? await registry.create('store', storeName, storeOptions) : storeOptions;
 
   let qu = null;
   try {
+    if (restore) {
+      await (await import('./device.js')).restoreInto(root, restore);
+      identity = 'persisted';
+    }
     if (identity === 'persisted') {
       identity = await root.get('qu/identity');
       if (!identity) {

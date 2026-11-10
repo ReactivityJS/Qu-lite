@@ -38,3 +38,4 @@ export { createClient, CLIENT_PLUGINS } from './client.js';
 export { devtools } from './devtools.js';
 export { PROTOCOL_VERSION } from './net/link.js';
 export { peekFrameType } from './net/frame.js';
+export { device, readBackup, BACKUP_ITERATIONS } from './device.js';

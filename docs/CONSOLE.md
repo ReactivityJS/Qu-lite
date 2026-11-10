@@ -149,6 +149,16 @@ qu.transports.relay.connect(location.origin) // … und zurück
 await qu.close()                            // Peer sauber beenden
 ```
 
+## Geräte-Backup und Speicher
+
+```js
+await qu.device.status()                    // {persisted, usage, quota, backupAt, groups}
+await qu.device.persist()                   // Browser bitten, den Speicher nicht zu räumen
+await qu.device.downloadBackup('lange passphrase hier')   // Backup als Datei
+```
+
+Ein Backup enthält die privaten Schlüssel (verschlüsselt). Nie in Bug-Reports oder Chats einfügen.
+
 ## Relay-REPL
 
 Dieselbe API am laufenden Relay:

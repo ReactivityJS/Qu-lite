@@ -14,6 +14,7 @@ Methoden) und die [Dev-Console-Anleitung](CONSOLE.md) (Untersuchen eines laufend
 - [8. Lebenszyklus und Aufräumen](#8-lebenszyklus-und-aufräumen)
 - [9. Relay betreiben](#9-relay-betreiben)
 - [10. Robustheit: was das System für dich erledigt – und was nicht](#10-robustheit)
+- [10a. Identität absichern: Backup, Wiederherstellung, Speicherschutz](#10a-identität-absichern)
 - [11. Testen](#11-testen)
 - [12. Checkliste für produktive Apps](#12-checkliste-für-produktive-apps)
 
@@ -347,13 +348,45 @@ und der Review-Bericht.
 
 **Musst du selbst entscheiden:**
 
-- **Speicherdruck im Browser:** `navigator.storage.persist()` anfragen, sonst darf der Browser
-  IndexedDB räumen (Identität weg!).
-- **Identitäts-Backup:** Die Schlüssel liegen unverschlüsselt im lokalen Speicher. Für Mehrgeräte-Nutzung
-  oder Wiederherstellung einen Export-/Import-Weg anbieten.
+- **Speicherdruck im Browser:** `qu.device.persist()` zu einem passenden Zeitpunkt aufrufen, sonst darf
+  der Browser IndexedDB räumen (Identität weg!) – siehe [10a](#10a-identität-absichern).
+- **Backup anbieten:** `qu.device.exportBackup(passphrase)` / `downloadBackup()` in der UI anbieten und an
+  fehlende Backups erinnern (`qu.device.status().backupAt`).
 - **UI für Zustände:** `net.peer.up/down`, `qu.transports.relay.status()`, `qu.syncStatus()` und
   `qu.staleSpaces()` anzeigen (z. B. „offline – 3 Nachrichten warten“).
 - **Validierung** fremder Records in `qu.accept`-Hooks.
+
+## 10a. Identität absichern
+
+Nur drei Dinge existieren ausschließlich auf dem Gerät: die **Identität**, die **Gruppenschlüssel**
+(`members/groups/`) und die **Epochenschlüssel** (`members/keys/`). Alles andere – Nachrichten, Profile,
+Mitgliederlisten – liegt verschlüsselt am Relay und kommt per Sync zurück. Ein Backup dieser Schlüssel
+stellt einen Nutzer daher vollständig auf einem neuen Gerät wieder her.
+
+```js
+// altes Gerät: Backup erzeugen (eine Zeile Text, mit Passphrase verschlüsselt)
+const backup = await qu.device.exportBackup(passphrase);   // oder: await qu.device.downloadBackup(passphrase)
+
+// neues Gerät
+const qu = await createClient({ url, restore: { backup, passphrase } });
+await qu.restoreGroups();                                   // Gruppen öffnen, Inhalte kommen vom Relay
+```
+
+- **Verschlüsselung:** PBKDF2-SHA256 mit 600 000 Runden (≈ 0,1 s am Desktop, bis ≈ 1 s auf schwachen
+  Handys) und AES-256-GCM. Falsche Passphrase und beschädigtes Backup ergeben denselben Fehler.
+  Passphrasen unter 8 Zeichen werden abgelehnt – in der UI lieber eine lange Passphrase (mehrere
+  Wörter) empfehlen, denn wer das Backup hat, kann offline raten.
+- **Gleiche Identität auf zwei Geräten** funktioniert: Beide schreiben, beide lesen.
+- **Schutz vor Überschreiben:** Gehört der Speicher schon einer anderen Identität, die hier Gruppen hat,
+  verweigert `restore` – andere Datenbank wählen (`name`) oder bewusst `force: true`. Eine beim ersten
+  Start automatisch erzeugte Identität ohne Gruppen wird einfach ersetzt (typischer Ablauf: App startet,
+  Nutzer wählt „Aus Backup wiederherstellen“).
+- **Speicherschutz:** `qu.device.persist()` bittet den Browser, IndexedDB nicht zu räumen. Firefox fragt
+  den Nutzer dabei, Chrome entscheidet selbst (z. B. für installierte PWAs). Deshalb nicht automatisch
+  beim ersten Laden, sondern an einem verständlichen Punkt – etwa nach dem Anlegen der ersten Gruppe.
+  `createClient({ persist: true })` fragt sofort.
+- **Status für die UI:** `await qu.device.status()` → `{persisted, usage, quota, backupAt, groups}` – z. B.
+  „Kein Backup seit 30 Tagen“ oder „Speicher nicht geschützt“ anzeigen.
 
 ## 11. Testen
 
@@ -375,7 +408,9 @@ await Promise.all([a.close(), b.close()]);
 ## 12. Checkliste für produktive Apps
 
 - [ ] `createClient({ name })` mit eigenem DB-Namen pro App
-- [ ] `navigator.storage.persist()` beim ersten Start
+- [ ] `qu.device.persist()` an einem passenden Punkt (z. B. nach der ersten Gruppe)
+- [ ] Backup in der UI anbieten (`downloadBackup`), Erinnerung über `device.status().backupAt`
+- [ ] Wiederherstellung anbieten: `createClient({ restore })` + `restoreGroups()`
 - [ ] `qu.close()` bei Logout / HMR / Unmount
 - [ ] Verbindungs- und Outbox-Status in der UI
 - [ ] `qu.staleSpaces()` beim Start prüfen (Gerät > 90 Tage offline)

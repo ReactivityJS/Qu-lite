@@ -112,11 +112,13 @@ const qu = await createClient({ url: 'https://relay.example', name: 'my-app', ex
 | `url` | – | relay origin; installs `relay` transport (WebSocket, SSE fallback) |
 | `name` | `'qu-lite'` | IndexedDB database name |
 | `store` | `['indexeddb', {name}]` if IndexedDB exists, else `'memory'` | any `createPeer` store spec |
-| `plugins` | `CLIENT_PLUGINS`: `records, user, members, inbox, sync({ackFrom:'mirror'}), status, compaction` | replaces the defaults |
+| `plugins` | `CLIENT_PLUGINS`: `records, user, members, inbox, sync({ackFrom:'mirror'}), status, compaction, device` | replaces the defaults |
 | `extra` | `[]` | added after the defaults, e.g. `['text', 'blobs']` |
 | `relay` | `{}` | options for the relay transport (`isolate`, `prefer`, …) |
 | `transports` | relay from `url` | replaces the relay transport |
 | `devtools` | `true` in browsers | `true`, `false` or options for [`devtools`](#devtools) |
+| `persist` | `false` | ask the browser at start to keep the storage ([device](#device)) |
+| `restore` | – | `{backup, passphrase, force?}`: start from a device backup ([device](#device)) |
 | `registry`, `identity` | as `createPeer` | `nodeRegistry()` for `sqlite` on Node |
 
 ### `createRelay(options?) → Promise<{qu, port, spaces, close()}>` (Node)
@@ -186,7 +188,7 @@ await registry.create('store', 'memory');
 
 - stores: `memory`, `indexeddb`
 - plugins: `records`, `sync`, `mirror`, `user`, `members`, `inbox`, `signals`, `status`,
-  `compaction`, `limits`, `text`, `blobs`, `stats`, `topology`, `devtools`
+  `compaction`, `limits`, `text`, `blobs`, `stats`, `topology`, `devtools`, `device`
 - transports: `ws`, `sse`, `relay`, `webrtc`
 
 `nodeRegistry()` adds the store `sqlite` and the transports `http-server` and `ws-server`.
@@ -619,6 +621,25 @@ envelopes), any other peer counts envelopes per known space. `driverBytes` is th
 size, or in a browser `navigator.storage.estimate()` (with `quota`). Results are cached for
 `storageCacheMs`. Peers are named by network id only. The figures contain no space ids or
 identities. Example: [09-stats.mjs](../examples/09-stats.mjs).
+
+## device
+
+`qu.use(device({ iterations = 600000, navigator? }))` – device backup and browser storage
+persistence. `createClient()` installs it.
+
+| Method | |
+|---|---|
+| `qu.device.exportBackup(passphrase) → string` | the device-only keys (`qu/identity`, `members/groups/`, `members/keys/`), sealed: PBKDF2-SHA256 (`iterations`) + AES-256-GCM, header authenticated; one line `qu-backup.…`. Passphrase ≥ 8 characters. Records `qu/backup-at`, notifies `qu.device.backup {groups}` |
+| `qu.device.downloadBackup(passphrase, filename = 'qu-backup.txt')` | browser: the same, offered as a file |
+| `qu.device.persist() → boolean \| null` | `navigator.storage.persist()` (may prompt); `null` where unsupported; `qu.device.persist {granted}` |
+| `qu.device.status() → {persisted, usage, quota, backupAt, groups}` | `null` for what the runtime cannot tell |
+
+`readBackup(text, passphrase) → {identity, entries, created}` checks a backup without using it (wrong
+passphrase and damage both throw `backup: wrong passphrase or damaged backup`).
+Restore: `createClient({ restore: {backup, passphrase, force?} })` (or `createPeer`) writes the backup
+into the store first; a store whose identity differs and has groups is refused unless `force` (then its
+group and epoch keys are dropped). Then `await qu.restoreGroups()`. `createClient({ persist: true })`
+calls `qu.device.persist()` at start.
 
 ## devtools
 
