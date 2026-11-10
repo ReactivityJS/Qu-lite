@@ -15,6 +15,14 @@
  * A throwing handler never breaks the others; it is reported on
  * `bus.error` (and the console if nobody listens). `run()` is the
  * exception: a throw aborts the chain (that is how a hook vetoes a write).
+ * Plugins report their own background failures (a timer, a deferred flush)
+ * the same way with `bus.error(error, where)`.
+ *
+ * Dispatch is cached: the sorted handler list of a topic is computed once
+ * and reused until a listener is added or removed (`net.in.<peer>.<type>`
+ * on a busy relay hits the same few hundred topics all the time). The cache
+ * is bounded - topics carry peer ids, so it is cleared when it grows past
+ * `cacheSize` entries.
  */
 
 class Node {
@@ -48,6 +56,14 @@ const split = (topic) => {
 export class Bus {
   #root = new Node();
   #seq = 0;
+  /** @type {Map<string, Array>} topic -> sorted handler entries, valid until the next on/off */
+  #cache = new Map();
+  #cacheSize;
+
+  /** @param {{cacheSize?: number}} [options] */
+  constructor({ cacheSize = 2048 } = {}) {
+    this.#cacheSize = cacheSize;
+  }
 
   /**
    * @param {string} pattern
@@ -70,9 +86,13 @@ export class Bus {
     list ??= node.handlers;
     const entry = { handler, order, seq: this.#seq++ };
     list.push(entry);
+    this.#cache.clear();
     return () => {
       const at = list.indexOf(entry);
-      if (at !== -1) list.splice(at, 1);
+      if (at !== -1) {
+        list.splice(at, 1);
+        this.#cache.clear();
+      }
     };
   }
 
@@ -82,15 +102,30 @@ export class Bus {
     return off;
   }
 
+  /** Sorted handler entries for a topic. The returned array is shared - callers must not mutate it. */
   #match(topic) {
-    const out = [];
+    let out = this.#cache.get(topic);
+    if (out) return out;
+    out = [];
     this.#root.collect(split(topic), 0, out);
-    return out.sort((a, b) => a.order - b.order || a.seq - b.seq);
+    out.sort((a, b) => a.order - b.order || a.seq - b.seq);
+    if (this.#cache.size >= this.#cacheSize) this.#cache.clear();
+    this.#cache.set(topic, out);
+    return out;
   }
 
   #fail(topic, error) {
     if (topic !== 'bus.error' && this.#match('bus.error').length) this.notify('bus.error', { topic, error });
     else console.error(`[bus] handler for "${topic}" threw:`, error);
+  }
+
+  /**
+   * Reports a failure that happened outside a handler (a timer, a deferred
+   * flush) like a throwing handler: on `bus.error`, or the console.
+   * @param {*} error @param {string} [where] - shown as `topic`
+   */
+  error(error, where = 'plugin') {
+    this.#fail(where, error);
   }
 
   /** @returns {Promise<object>} the context (`stopped`, plus whatever handlers set on it) */

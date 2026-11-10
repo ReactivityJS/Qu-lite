@@ -10,54 +10,49 @@
  * Every entry is a registry name, `[name, options]`, or a ready plugin
  * function. Node-only adapters (sqlite, ws-server) are added by
  * `nodeRegistry()` from `@qu/lite/node`, so browser bundles never see them.
+ *
+ * The default registry LOADS LAZILY: each factory imports its module only
+ * when that name is used (`import()`), so a peer built from names carries
+ * just what it asked for - a client without `text`, `blobs`, `rtc` or
+ * `stats` never loads them, and a bundler puts each optional plugin into
+ * its own chunk.
+ *
+ * If building fails half-way (a plugin throws, a port is taken), everything
+ * installed so far is closed again and the error is rethrown - no open
+ * store, socket or timer is left behind.
  */
 import * as crypto from './crypto.js';
 import { createQu } from './qu.js';
 import { Registry } from './registry.js';
 import { memoryDriver } from './drivers/memory.js';
-import { indexedDbDriver } from './drivers/indexeddb.js';
-import { records } from './records.js';
-import { sync } from './sync/sync.js';
-import { mirror } from './mirror.js';
-import { user } from './user.js';
-import { members } from './members.js';
-import { inbox } from './inbox.js';
-import { signals } from './signals.js';
-import { status } from './status.js';
-import { compaction } from './compaction.js';
-import { limits } from './limits.js';
-import { text } from './text.js';
-import { blobs } from './blobs.js';
-import { stats } from './stats.js';
-import { rtc } from './net/webrtc.js';
-import { topology } from './net/topology.js';
-import { wsTransport } from './net/ws.js';
-import { sseTransport } from './net/sse.js';
-import { relayTransport } from './net/relay.js';
+
+/** A factory that imports its module on first use. */
+const lazy = (load, pick) => async (options) => (await load())[pick](options);
 
 /** @returns {Registry} stores, plugins and transports usable in any environment. */
 export function defaultRegistry() {
   return new Registry()
     .register('store', 'memory', () => memoryDriver())
-    .register('store', 'indexeddb', (options) => indexedDbDriver(options))
-    .register('plugin', 'records', (options) => records(options))
-    .register('plugin', 'sync', (options) => sync(options))
-    .register('plugin', 'mirror', (options) => mirror(options))
-    .register('plugin', 'user', (options) => user(options))
-    .register('plugin', 'members', (options) => members(options))
-    .register('plugin', 'inbox', (options) => inbox(options))
-    .register('plugin', 'signals', (options) => signals(options))
-    .register('plugin', 'status', (options) => status(options))
-    .register('plugin', 'compaction', (options) => compaction(options))
-    .register('plugin', 'limits', (options) => limits(options))
-    .register('plugin', 'text', (options) => text(options))
-    .register('plugin', 'blobs', (options) => blobs(options))
-    .register('plugin', 'stats', (options) => stats(options))
-    .register('transport', 'webrtc', (options) => rtc(options))
-    .register('plugin', 'topology', (options) => topology(options))
-    .register('transport', 'ws', (options) => wsTransport(options))
-    .register('transport', 'sse', (options) => sseTransport(options))
-    .register('transport', 'relay', (options) => relayTransport(options));
+    .register('store', 'indexeddb', lazy(() => import('./drivers/indexeddb.js'), 'indexedDbDriver'))
+    .register('plugin', 'records', lazy(() => import('./records.js'), 'records'))
+    .register('plugin', 'sync', lazy(() => import('./sync/sync.js'), 'sync'))
+    .register('plugin', 'mirror', lazy(() => import('./mirror.js'), 'mirror'))
+    .register('plugin', 'user', lazy(() => import('./user.js'), 'user'))
+    .register('plugin', 'members', lazy(() => import('./members.js'), 'members'))
+    .register('plugin', 'inbox', lazy(() => import('./inbox.js'), 'inbox'))
+    .register('plugin', 'signals', lazy(() => import('./signals.js'), 'signals'))
+    .register('plugin', 'status', lazy(() => import('./status.js'), 'status'))
+    .register('plugin', 'compaction', lazy(() => import('./compaction.js'), 'compaction'))
+    .register('plugin', 'limits', lazy(() => import('./limits.js'), 'limits'))
+    .register('plugin', 'text', lazy(() => import('./text.js'), 'text'))
+    .register('plugin', 'blobs', lazy(() => import('./blobs.js'), 'blobs'))
+    .register('plugin', 'stats', lazy(() => import('./stats.js'), 'stats'))
+    .register('plugin', 'devtools', lazy(() => import('./devtools.js'), 'devtools'))
+    .register('plugin', 'topology', lazy(() => import('./net/topology.js'), 'topology'))
+    .register('transport', 'webrtc', lazy(() => import('./net/webrtc.js'), 'rtc'))
+    .register('transport', 'ws', lazy(() => import('./net/ws.js'), 'wsTransport'))
+    .register('transport', 'sse', lazy(() => import('./net/sse.js'), 'sseTransport'))
+    .register('transport', 'relay', lazy(() => import('./net/relay.js'), 'relayTransport'));
 }
 
 const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ? [spec, {}] : [null, spec]);
@@ -73,26 +68,37 @@ const entry = (spec) => (Array.isArray(spec) ? spec : typeof spec === 'string' ?
  * }} [options]
  *   `identity: 'persisted'` (default) loads the identity from the store or
  *   creates and saves one - so a reload keeps who you are.
+ *   A transport whose API has a `ready` promise (a server binding its port)
+ *   is awaited, so a failure surfaces here and not later.
  */
 export async function createPeer({ registry = defaultRegistry(), store = 'memory', identity = 'persisted', plugins = ['records', 'sync'], transports = [], netId } = {}) {
   const [storeName, storeOptions] = typeof store === 'object' && !Array.isArray(store) ? [null, store] : entry(store);
   const root = storeName ? await registry.create('store', storeName, storeOptions) : storeOptions;
 
-  if (identity === 'persisted') {
-    identity = await root.get('qu/identity');
-    if (!identity) {
-      identity = await crypto.generateIdentity();
-      await root.set('qu/identity', identity);
+  let qu = null;
+  try {
+    if (identity === 'persisted') {
+      identity = await root.get('qu/identity');
+      if (!identity) {
+        identity = await crypto.generateIdentity();
+        await root.set('qu/identity', identity);
+      }
     }
-  }
-  const qu = await createQu({ root, identity, registry, netId });
-  qu.root = root;
+    qu = await createQu({ root, identity, registry, netId });
+    qu.root = root;
 
-  for (const [slot, list] of [['plugin', plugins], ['transport', transports]]) {
-    for (const spec of list) {
-      const [name, options] = entry(spec);
-      qu.use(name ? await registry.create(slot, name, options) : options);
+    for (const [slot, list] of [['plugin', plugins], ['transport', transports]]) {
+      for (const spec of list) {
+        const [name, options] = entry(spec);
+        const plugin = name ? await registry.create(slot, name, options) : options;
+        const api = qu.use(plugin, name ?? plugin?.pluginName);
+        if (slot === 'transport' && typeof api?.ready?.then === 'function') await api.ready;
+      }
     }
+    return qu;
+  } catch (error) {
+    if (qu) await qu.close();
+    else await root?.close?.();
+    throw error;
   }
-  return qu;
 }

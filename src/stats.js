@@ -78,8 +78,7 @@ export function stats({ windowMs = 10_000, sampleMs = 1000, emitMs = 0, storageC
       while (samples.length > keep) samples.shift();
     }
     sample();
-    const sampler = setInterval(sample, sampleMs);
-    sampler.unref?.();
+    qu.timers.interval(sample, sampleMs);
 
     /** Bytes per second between the oldest sample in the window and now. */
     const rate = (now, value, oldest) => (oldest && now > oldest.t ? Math.max(0, Math.round(((value - oldest.value) * 1000) / (now - oldest.t))) : 0);
@@ -197,8 +196,7 @@ export function stats({ windowMs = 10_000, sampleMs = 1000, emitMs = 0, storageC
     }
 
     if (emitMs > 0) {
-      const emitter = setInterval(() => bus.notify('qu.stats', snapshot()), emitMs);
-      emitter.unref?.();
+      qu.timers.interval(() => bus.notify('qu.stats', snapshot()), emitMs);
     }
 
     const api = { snapshot, storage: storageReport, report, prometheus };

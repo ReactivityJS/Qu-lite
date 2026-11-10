@@ -153,8 +153,7 @@ export function compaction({ auto = true, delayMs = 60_000, expireEveryMs = 6 * 
       return expired;
     }
     if (expireEveryMs > 0) {
-      const timer = setInterval(() => expireAll().catch(() => {}), expireEveryMs);
-      timer.unref?.();
+      qu.timers.interval(() => expireAll().catch((error) => bus.error(error, 'compaction.expire')), expireEveryMs);
     }
 
     const api = { del, compact, flush, expireAll };

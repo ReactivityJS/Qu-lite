@@ -136,8 +136,7 @@ export function mirror({ allow = null, expireEveryMs = 6 * 60 * 60 * 1000, quota
       return count;
     }
     if (expireEveryMs > 0) {
-      const timer = setInterval(() => expire().catch(() => {}), expireEveryMs);
-      timer.unref?.();
+      qu.timers.interval(() => expire().catch((error) => bus.error(error, 'mirror.expire')), expireEveryMs);
     }
 
     const api = {

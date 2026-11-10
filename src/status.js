@@ -46,10 +46,9 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
     /** After a clean leave nothing announces "online" by itself (heartbeat, replies) until we come back. */
     let away = false;
 
-    const heartbeat = setInterval(() => {
+    qu.timers.interval(() => {
       if (connected > 0) for (const t of trackers.values()) t.then((s) => s.announce('online', { auto: true })).catch(() => {});
     }, interval);
-    heartbeat.unref?.();
 
     bus.on('net.peer.up', () => {
       connected++;

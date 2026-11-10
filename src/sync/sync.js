@@ -509,10 +509,9 @@ export function sync({
     });
 
     if (retryMs > 0) {
-      const timer = setInterval(() => {
+      qu.timers.interval(() => {
         for (const peer of peers) resumePending(peer);
       }, retryMs);
-      timer.unref?.();
     }
 
     // --- responder ----------------------------------------------------------
