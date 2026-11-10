@@ -506,7 +506,8 @@ qu.bus.on(`qu.signal.${space.id}.wave`, ({ author, value, at }) => …);
 
 | Option | Default | |
 |---|---|---|
-| `interval` | `20000` | presence heartbeat; online = heartbeat younger than 2.5 × interval |
+| `interval` | `20000` | presence heartbeat while the app is visible; online = heartbeat younger than 2.5 × the interval the sender announced (`every`, at most 30 min) |
+| `hiddenInterval` | `300000` | heartbeat while the page is hidden (`document.visibilityState`, or `qu.status.setHidden(true)`); `0` = announce "offline" while hidden. 10 groups: ~1.3 MiB/hour visible, ~90 KiB/hour hidden |
 | `presence` | `true` | `false`: never announce yourself (you still see others) |
 | `readReceipts` | `true` | `false`: only "delivered" is sent |
 | `typingThrottleMs` / `typingTtlMs` | `3000` / `5000` | |
@@ -519,9 +520,10 @@ await st.sendTyping('chat'); st.typing('chat'); // aliases typing in 'chat'
 await st.markRead('chat');                     // my read cursor (default: newest record)
 await st.of(record);                           // {sent, delivered: [alias], read: [alias], members}
 await qu.leave();                              // clean leave: "offline" in every tracked space
+qu.status.setHidden(true);                     // app in the background (runtimes without visibilityState)
 ```
 
-Events: `qu.status.presence {space, alias, online}`, `qu.status.typing {space, path, typing}` and
+Events: `qu.status.hidden {hidden}`, `qu.status.presence {space, alias, online}`, `qu.status.typing {space, path, typing}` and
 `qu.status.receipts {space, path, alias}`. Example: [05-status.mjs](../examples/05-status.mjs).
 
 ## compaction

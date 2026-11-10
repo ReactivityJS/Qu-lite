@@ -101,3 +101,38 @@ test('a newcomer whose first heartbeat arrives before its member entry still bec
   const bobAlias = (await bob.members(joined)).me;
   await until(() => stAlice.isOnline(bobAlias) && stBob.isOnline(aliceAlias), 3000, 'mutual presence without waiting an interval');
 });
+
+test('hidden app: the heartbeat slows down, the others keep it online by the announced interval', async () => {
+  // visible every 300 ms, hidden every 1500 ms
+  const { peers, st, alias } = await setup(['alice', 'bob'], { alice: { hiddenInterval: 1500 } });
+  await until(() => st.bob.isOnline(alias.alice), 3000, 'online');
+  const beats = [];
+  peers.alice.bus.on('net.out.*.sig', () => beats.push(Date.now()));
+  peers.alice.status.setHidden(true);
+  assert.equal(peers.alice.status.isHidden(), true);
+  await settle(100);
+  const atHide = beats.length;
+  assert.ok(atHide >= 1, 'announces the slower interval at once');
+  beats.length = 0;
+  await settle(1400);
+  assert.ok(beats.length <= 1, `slower while hidden (${beats.length} beats in 1.4 s, visible would be ~4)`);
+  assert.ok(st.bob.isOnline(alias.alice), 'still online for bob: he honours the announced interval');
+  assert.equal(st.bob.online().get(alias.alice).every, 1500);
+
+  peers.alice.status.setHidden(false);
+  await settle(100);
+  assert.equal(st.bob.online().get(alias.alice).every, 300, 'visible again: back to the fast interval');
+});
+
+test('hidden app with hiddenInterval 0: offline while hidden, online again when visible', async () => {
+  const { peers, st, alias } = await setup(['alice', 'bob'], { alice: { hiddenInterval: 0 } });
+  await until(() => st.bob.isOnline(alias.alice), 3000, 'online');
+  peers.alice.status.setHidden(true);
+  await until(() => !st.bob.isOnline(alias.alice), 1000, 'offline at once');
+  const beats = [];
+  peers.alice.bus.on('net.out.*.sig', () => beats.push(1));
+  await settle(800);
+  assert.equal(beats.length, 0, 'no heartbeats while hidden');
+  peers.alice.status.setHidden(false);
+  await until(() => st.bob.isOnline(alias.alice), 1000, 'back');
+});

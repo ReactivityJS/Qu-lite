@@ -79,6 +79,10 @@ Stability, scalability and one base for client and relay.
   (`netOf(qu).traffic`); `qu.dev.traffic()`, `watchTraffic(seconds)`, `resetTraffic()` in the console;
   `traffic.byType` and `qu_lite_traffic_bytes_total{direction,type}` in stats and `/metrics`.
   `bench/idle-traffic.mjs` measures an idle client: presence heartbeats cost ~1.3 MiB/hour for 10 groups.
+- **Presence in the background**: while the page is hidden (or `qu.status.setHidden(true)`) the
+  heartbeat slows to `hiddenInterval` (5 min, `0` = offline while hidden); every heartbeat carries its
+  interval (`every`) and receivers keep the sender online for 2.5 x that. 10 groups idle: 1.3 MiB/hour
+  -> ~90 KiB/hour in the background (-93 %).
 
 ## [Unreleased]
 

@@ -179,8 +179,9 @@ TCP hinzu (`traffic()` zeigt die Schätzung). WebSocket-Pings des Relays (alle 2
 
 **Bekannter Posten:** Präsenz kostet pro Gruppe und anwesendem Mitglied alle 20 s einen `sig` von etwa
 380 Byte – in 10 Gruppen mit einem weiteren Mitglied rund 1,3 MiB pro Stunde, solange die App
-verbunden ist (`bench/idle-traffic.mjs`). Wer das nicht braucht: `status({ presence: false })` oder
-`status(group)` nur für sichtbare Gruppen öffnen.
+verbunden und sichtbar ist (`bench/idle-traffic.mjs`). Im Hintergrund schlägt das Herz nur alle 5 min
+(~90 KiB pro Stunde). Weniger: `status({ presence: false })`, `status({ hiddenInterval: 0 })` (im
+Hintergrund offline) oder `status(group)` nur für sichtbare Gruppen öffnen.
 
 Am Relay stehen dieselben Zahlen in `/metrics` (`qu_lite_traffic_bytes_total{direction, type}`) und in
 `/stats` (`traffic.byType`).

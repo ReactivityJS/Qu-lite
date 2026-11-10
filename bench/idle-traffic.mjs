@@ -6,7 +6,8 @@
  * real WebSocket relay and extrapolates per hour and per 30 days (mobile).
  *
  *   node bench/idle-traffic.mjs [groups] [seconds]
- *   INTERVAL=<ms> status heartbeat (default 20000)
+ *   INTERVAL=<ms> status heartbeat (default 20000), HIDDEN_INTERVAL=<ms> (default 15x)
+ *   HIDDEN=1: both apps in the background (qu.status.setHidden(true))
  */
 import { createRelay } from '../src/node.js';
 import { createClient } from '../src/index.js';
@@ -14,9 +15,10 @@ import { createClient } from '../src/index.js';
 const GROUPS = Number(process.argv[2] ?? 10);
 const SECONDS = Number(process.argv[3] ?? 60);
 const interval = Number(process.env.INTERVAL ?? 20_000);
+const hiddenInterval = Number(process.env.HIDDEN_INTERVAL ?? interval * 15);
 const relay = await createRelay({ port: 0, host: '127.0.0.1', log: () => {} });
 const url = `http://127.0.0.1:${relay.port}`;
-const plugins = ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror' }], ['status', { interval }], 'compaction'];
+const plugins = ['records', 'user', 'members', 'inbox', ['sync', { ackFrom: 'mirror' }], ['status', { interval, hiddenInterval }], 'compaction'];
 const make = () => createClient({ url, devtools: false, plugins, relay: { WebSocketImpl: WebSocket } });
 const anna = await make();
 const ben = await make();
@@ -27,6 +29,7 @@ for (let g = 0; g < GROUPS; g++) {
   await anna.status(group);
   await ben.status(theirs);
 }
+if (process.env.HIDDEN) for (const qu of [anna, ben]) qu.status.setHidden(true);
 await new Promise((r) => setTimeout(r, 3000)); // setup traffic settles
 
 // anna's outgoing frames by type (encoded size), incoming by the link counters
@@ -52,7 +55,7 @@ const end = link();
 const sent = end.sent - start.sent;
 const received = end.received - start.received;
 const perHour = ((sent + received) * 3600) / SECONDS;
-console.log(`# anna: ${GROUPS} groups with presence, idle ${SECONDS} s, heartbeat ${interval / 1000} s`);
+console.log(`# anna: ${GROUPS} groups with presence, idle ${SECONDS} s, heartbeat ${interval / 1000} s${process.env.HIDDEN ? `, app hidden (${hiddenInterval / 1000} s)` : ''}`);
 console.log(`sent ${sent} B, received ${received} B -> ${(perHour / 1024).toFixed(0)} KiB/hour, ${((perHour * 24 * 30) / 1048576).toFixed(0)} MiB per 30 days (always on)`);
 const rows = {};
 for (const [t, v] of Object.entries(out)) rows[`out ${t}`] = v;

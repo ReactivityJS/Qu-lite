@@ -19,6 +19,16 @@
  *              `delivered` follows incoming records automatically (throttled),
  *              `read` is set by the app (`markRead`).
  *
+ * HIDDEN APP: while the page is not visible (document.visibilityState, or
+ * `qu.status.setHidden(true)` in other runtimes) the heartbeat slows to
+ * `hiddenInterval` (5 min) - a backgrounded app costs ~1/15 of the data and
+ * radio wake-ups. Every heartbeat carries its interval (`every`), receivers
+ * keep someone online for 2.5 x that, so the slower beat does not flip them
+ * offline. Becoming hidden announces at once (with the new interval),
+ * becoming visible too. `hiddenInterval: 0` announces "offline" while
+ * hidden instead. (Peers older than this treat a hidden peer as offline
+ * after 2.5 x their own interval.)
+ *
  * Privacy switches: `presence: false` (never announce yourself; still see
  * others), `readReceipts: false` (only "delivered" is sent).
  *
@@ -35,7 +45,10 @@ const RECEIPTS = '_receipts/';
 /**
  * @param {{interval?: number, presence?: boolean, readReceipts?: boolean, typingThrottleMs?: number, typingTtlMs?: number, receiptThrottleMs?: number}} [options]
  */
-export function status({ interval = 20_000, presence = true, readReceipts = true, typingThrottleMs = 3000, typingTtlMs = 5000, receiptThrottleMs = 2000 } = {}) {
+/** A remote's announced heartbeat interval is honoured up to this (a longer one could keep a vanished peer "online"). */
+const MAX_EVERY = 30 * 60_000;
+
+export function status({ interval = 20_000, hiddenInterval = 300_000, presence = true, readReceipts = true, typingThrottleMs = 3000, typingTtlMs = 5000, receiptThrottleMs = 2000 } = {}) {
   return (qu) => {
     if (typeof qu.members !== 'function') throw new Error('status(): install records() and members() first');
     const { bus } = qu;
@@ -45,10 +58,28 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
     let connected = 0;
     /** After a clean leave nothing announces "online" by itself (heartbeat, replies) until we come back. */
     let away = false;
+    const doc = globalThis.document;
+    let hidden = doc?.visibilityState === 'hidden';
+    /** The heartbeat interval right now (hidden: slower). */
+    const every = () => (hidden ? hiddenInterval : interval);
 
+    // ticks at the visible rate; each tracker beats when its current interval is due
     qu.timers.interval(() => {
-      if (connected > 0) for (const t of trackers.values()) t.then((s) => s.announce('online', { auto: true })).catch(() => {});
+      if (connected === 0 || (hidden && hiddenInterval === 0)) return;
+      for (const t of trackers.values()) t.then((s) => s.beat()).catch(() => {});
     }, interval);
+
+    /** Visible <-> hidden: announce at once, so the others learn the new interval (or that we left). */
+    function setHidden(value) {
+      if (Boolean(value) === hidden) return;
+      hidden = Boolean(value);
+      for (const t of trackers.values()) {
+        // hidden: tell the slower interval (or leave); visible again: back, even after a leave
+        const step = (s) => (!hidden ? s.announce('online') : hiddenInterval === 0 ? s.announce('offline') : s.announce('online', { auto: true }));
+        t.then(step).catch(() => {});
+      }
+      bus.notify('qu.status.hidden', { hidden });
+    }
 
     bus.on('net.peer.up', () => {
       connected++;
@@ -58,9 +89,7 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
       connected = Math.max(0, connected - 1);
     });
     globalThis.addEventListener?.('pagehide', () => leave());
-    globalThis.document?.addEventListener?.('visibilitychange', () => {
-      if (globalThis.document.visibilityState === 'visible') for (const t of trackers.values()) t.then((s) => s.announce()).catch(() => {});
-    });
+    doc?.addEventListener?.('visibilitychange', () => setHidden(doc.visibilityState === 'hidden'));
 
     function tracker(space) {
       if (!trackers.has(space.id)) trackers.set(space.id, createTracker(space));
@@ -92,7 +121,12 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
         else if (auto && away) return;
         else away = false;
         lastAnnounce = Date.now();
-        await signal('presence', { state });
+        await signal('presence', state === 'online' ? { state, every: every() } : { state });
+      }
+
+      /** Heartbeat: announce if the current interval is due (a little early is fine). */
+      function beat() {
+        if (Date.now() - lastAnnounce >= every() - Math.min(1000, interval / 4)) return announce('online', { auto: true });
       }
 
       bus.on(`qu.signal.${sid}.presence`, async ({ author, value, at }) => {
@@ -100,7 +134,8 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
         // signals are verified concurrently: an older heartbeat may finish after a newer "offline"
         if (at < (seen.get(author)?.lastSeen ?? 0)) return;
         const wasOnline = isOnline(author);
-        seen.set(author, { lastSeen: at, state: value?.state === 'offline' ? 'offline' : 'online' });
+        const announced = Number.isFinite(value?.every) ? Math.min(MAX_EVERY, Math.max(1, value.every)) : interval;
+        seen.set(author, { lastSeen: at, state: value?.state === 'offline' ? 'offline' : 'online', every: announced });
         await bus.notify('qu.status.presence', { space: sid, alias: author, online: isOnline(author) });
         // a newcomer (or someone back) learns about us right away; the exchange
         // stops by itself once both sides see each other online
@@ -180,7 +215,7 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
 
       function isOnline(alias) {
         const entry = seen.get(alias);
-        return Boolean(entry && entry.state === 'online' && Date.now() - entry.lastSeen < interval * 2.5);
+        return Boolean(entry && entry.state === 'online' && Date.now() - entry.lastSeen < (entry.every ?? interval) * 2.5);
       }
 
       function typing(path) {
@@ -230,6 +265,7 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
         announce,
         /** Clean leave: tell the others I am gone. */
         leave: () => announce('offline'),
+        beat,
       };
 
       await announce();
@@ -240,8 +276,11 @@ export function status({ interval = 20_000, presence = true, readReceipts = true
       for (const t of trackers.values()) await t.then((s) => s.leave()).catch(() => {});
     }
 
-    const api = { tracker, leave };
+    const api = { tracker, leave, setHidden };
     qu.status = tracker;
+    /** For runtimes without document.visibilityState (React Native, Electron, Node): the app says when it is in the background. */
+    qu.status.setHidden = setHidden;
+    qu.status.isHidden = () => hidden;
     qu.leave = leave;
     return api;
   };
