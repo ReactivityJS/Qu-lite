@@ -94,6 +94,8 @@ export const FRAME_TYPES = Object.freeze({
   pull: 'direct download request (empty scope)',
   pullend: 'direct download finished',
   sig: 'ephemeral signal: presence heartbeat, typing, WebRTC signaling',
+  grantsum: 'fingerprints of the grants a peer holds (asks which a mirror lacks)',
+  grantneed: 'spaces whose grants the mirror lacks',
   other: 'any other type',
 });
 const countType = (net, type, dir, bytes) => {
@@ -130,6 +132,8 @@ export function netOf(qu) {
       scopes,
       isolated,
       links,
+      /** @type {Set<string>} protocol features plugins offer in the sync `hello` (besides sync's own) */
+      features: new Set(),
       /** @type {Map<string, {framesIn: number, bytesIn: number, framesOut: number, bytesOut: number}>} per frame type, all links */
       traffic: new Map(),
       trafficSince: Date.now(),

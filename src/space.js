@@ -68,6 +68,21 @@ export const emptyGrantState = () => ({ owner: null, admins: { seq: -1, list: []
 const same = (a, b) => a && b && crypto.toHex(a) === crypto.toHex(b);
 
 /**
+ * 8-byte fingerprint of a grant state (owner, admin list, epoch keys) - equal
+ * on two peers exactly when they hold the same verified grants. Lets a peer
+ * ask a mirror "do you have these?" without sending the grants (envelopes.js).
+ * @param {GrantState|null|undefined} state
+ * @returns {Promise<Uint8Array>}
+ */
+export async function grantFingerprint(state) {
+  if (!state) return new Uint8Array(8);
+  const parts = [enc.encode(`qu-lite/grants\n${state.owner ? crypto.toHex(state.owner) : '-'}\n${state.admins?.seq ?? -1}\n`)];
+  for (const admin of state.admins?.list ?? []) parts.push(admin);
+  for (const [epoch, pub] of [...(state.epochs ?? new Map())].sort((a, b) => a[0] - b[0])) parts.push(enc.encode(`\n${epoch}:`), pub);
+  return (await crypto.sha256(crypto.concat(...parts))).slice(0, 8);
+}
+
+/**
  * Verifies offered grants against what is already known and returns the
  * new, merged state plus what changed. Pure: does not mutate `state`.
  * Order inside the offer does not matter (epoch 0, then admins, then epochs).

@@ -396,6 +396,10 @@ Example: [01-records.mjs](../examples/01-records.mjs).
 
 `members()`, `user()` and `inbox()` call `watch()` for their spaces themselves.
 
+**Grants on reconnect**: a client sends a mirror that offers `grantsum` only fingerprints of its grants
+(24 bytes per space); the mirror asks (`grantneed`) for those it lacks or holds differently. Reconnect of
+20 unchanged spaces: 6.6 KiB before, 3.6 KiB now. Plugins add hello features to `netOf(qu).features`.
+
 **Relay load** (`bench/relay-load.mjs`, 20 devices reconnecting at once, 20,000 records, SQLite): 20 index loads and a
 1,081 ms event-loop stall before, 1 load and 67 ms now; after one new record 40 loads / 1,778 ms before,
 1 load / 15 ms now. The index is read in pages of 5,000 keys with the event loop running in between.

@@ -893,7 +893,7 @@ export function sync({
       const scoped = qu.net?.scopes.get(peer);
       for (const sid of scoped ?? []) if (!subs.some((sub) => sub.sid === sid && !sub.shard)) subs.push({ sid });
       const only = Boolean(scoped || qu.net?.exclusive);
-      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), ...(digest || pull || batch ? { features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : []), ...(batch ? ['recs'] : [])] } : {}) });
+      await send(peer, 'hello', { role, subs, ...(only ? { only } : {}), features: [...(digest ? ['digest'] : []), ...(pull ? ['pull'] : []), ...(batch ? ['recs'] : []), ...(qu.net?.features ?? [])] });
     });
     bus.on('net.peer.down', ({ peer }) => {
       peers.delete(peer);

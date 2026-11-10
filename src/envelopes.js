@@ -48,7 +48,9 @@
  */
 import { peekEnvelope, verifyEnvelope, envelopeId, readPublic } from './envelope.js';
 import { GC_TYPE, isGcPath, decodeEntries, mayDrop, gcCutoff } from './gc.js';
-import { verifyGrants, emptyGrantState } from './space.js';
+import { verifyGrants, emptyGrantState, grantFingerprint } from './space.js';
+import * as crypto from './crypto.js';
+import { netOf } from './net/link.js';
 import { writeSet } from './writeset.js';
 
 const pad = (ms) => String(ms).padStart(13, '0');
@@ -104,10 +106,50 @@ export function envelopes({ acceptGrants = false } = {}) {
       peers.delete(peer);
       roles.delete(peer);
     });
-    bus.on('net.in.*.hello', async ({ role }, ctx) => {
+    // GRANTS ON RECONNECT: a mirror that offers `grantsum` first gets 24 bytes
+    // per space (sid + grant fingerprint) and answers with the spaces it lacks
+    // or holds differently (`grantneed`); only those grants are sent. A mirror
+    // without the feature gets all grants, as before.
+    netOf(qu).features.add('grantsum');
+    const GRANTSUM_ITEMS = 1024;
+    bus.on('net.in.*.hello', async ({ role, features }, ctx) => {
       const peer = ctx.topic.split('.')[2];
       roles.set(peer, role);
-      if (role === 'mirror') for (const [sid, entry] of registered) if (entry.mirror) await announce(sid, [peer]);
+      if (role !== 'mirror') return;
+      const mine = [...registered].filter(([sid, entry]) => entry.mirror && (!qu.net || qu.net.allows(peer, sid)));
+      if (!(Array.isArray(features) && features.includes('grantsum'))) {
+        for (const [sid] of mine) await announce(sid, [peer]);
+        return;
+      }
+      for (let i = 0; i < mine.length; i += GRANTSUM_ITEMS) {
+        const chunk = mine.slice(i, i + GRANTSUM_ITEMS);
+        const items = new Uint8Array(chunk.length * 24);
+        for (let j = 0; j < chunk.length; j++) {
+          const [sid, entry] = chunk[j];
+          keyring.set(sid, entry.space.grantState());
+          items.set(crypto.fromHex(sid), j * 24);
+          items.set(await grantFingerprint(entry.space.grantState()), j * 24 + 16);
+        }
+        await bus.emit(`net.out.${peer}.grantsum`, { items });
+      }
+    });
+    // mirror side: which of these do I lack?
+    bus.on('net.in.*.grantsum', async ({ items }, ctx) => {
+      if (!api.acceptGrants || !(items instanceof Uint8Array) || items.length % 24 !== 0 || items.length > GRANTSUM_ITEMS * 24) return;
+      const peer = ctx.topic.split('.')[2];
+      const need = [];
+      for (let o = 0; o < items.length; o += 24) {
+        const sid = crypto.toHex(items.subarray(o, o + 16));
+        const theirs = items.subarray(o + 16, o + 24);
+        const mine = keyring.has(sid) ? await grantFingerprint(keyring.get(sid)) : null;
+        if (!mine || crypto.toHex(mine) !== crypto.toHex(theirs)) need.push(sid);
+      }
+      if (need.length) await bus.emit(`net.out.${peer}.grantneed`, { sids: need });
+    });
+    bus.on('net.in.*.grantneed', async ({ sids }, ctx) => {
+      if (!Array.isArray(sids)) return;
+      const peer = ctx.topic.split('.')[2];
+      for (const sid of sids.slice(0, GRANTSUM_ITEMS)) if (typeof sid === 'string' && registered.get(sid)?.mirror) await announce(sid, [peer]);
     });
     // `pull: tag` marks a record of a direct download (sync.js) - it arrived by sync, not live
     bus.on('net.in.*.rec', ({ bytes, sync, pull }, ctx) => ingest(bytes, { from: ctx.topic.split('.')[2], sync: Boolean(sync) || Number.isInteger(pull) }));

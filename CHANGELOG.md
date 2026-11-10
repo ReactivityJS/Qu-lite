@@ -83,6 +83,10 @@ Stability, scalability and one base for client and relay.
   heartbeat slows to `hiddenInterval` (5 min, `0` = offline while hidden); every heartbeat carries its
   interval (`every`) and receivers keep the sender online for 2.5 x that. 10 groups idle: 1.3 MiB/hour
   -> ~90 KiB/hour in the background (-93 %).
+- **Grants on reconnect**: to a mirror that offers `grantsum`, a client sends 24 bytes per space (sid +
+  grant fingerprint, `grantFingerprint()`); the mirror answers `grantneed` with the spaces it lacks or holds
+  differently, and only those grants are sent. Older mirrors get all grants. Plugins can offer hello
+  features via `netOf(qu).features`. Reconnect without changes (20 spaces): 6.6 -> 3.6 KiB, 24 -> 5 frames.
 
 ## [Unreleased]
 

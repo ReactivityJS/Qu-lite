@@ -385,3 +385,90 @@ test('batched records: concurrent pulls never mix their records (each completes,
   await link.disconnect();
   await Promise.all([fresh.close(), mirror.close()]);
 });
+
+test('grants on reconnect: only fingerprints when the mirror has them, the grants it lacks, all of them to an older mirror', async () => {
+  const { createClient } = await import('../src/index.js');
+  const { sqliteDriver, nodeRegistry } = await import('../src/node.js');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'qu-grants-'));
+  const makeMirror = async (options = {}) => {
+    const { createPeer } = await import('../src/peer.js');
+    return createPeer({ registry: nodeRegistry(), store: sqliteDriver({ path: join(dir, 'm.sqlite') }), plugins: [['sync', { role: 'mirror', retryMs: 0 }], 'mirror'], ...options });
+  };
+  let mirror = await makeMirror();
+  await mirror.mirror.ready;
+  const client = await createClient({ devtools: false, transports: [] });
+  for (let i = 0; i < 4; i++) await client.createGroup();
+  let out = frames(client);
+  let link = connectInProcess(client, mirror);
+  await link.ready;
+  await until(async () => (await mirror.mirror.spaces()).length >= 4, 5000, 'mirror took the grants');
+  await link.disconnect();
+
+  // reconnect, nothing new: fingerprints only
+  out = frames(client);
+  link = connectInProcess(client, mirror);
+  await link.ready;
+  await settle(200);
+  assert.equal(out.grantsum, 1);
+  assert.equal(out.grant ?? 0, 0, 'no grants re-sent');
+  await link.disconnect();
+
+  // a new group while offline: exactly its grants are asked for
+  await client.createGroup();
+  out = frames(client);
+  link = connectInProcess(client, mirror);
+  await link.ready;
+  await until(() => (out.grant ?? 0) >= 1, 3000, 'grant sent');
+  await settle(100);
+  assert.equal(out.grant, 1, 'only the new space');
+  await link.disconnect();
+
+  // after a mirror restart (keyring rebuilt from its database) the fingerprints still match
+  await mirror.close();
+  mirror = await makeMirror();
+  await mirror.mirror.ready;
+  out = frames(client);
+  link = connectInProcess(client, mirror);
+  await link.ready;
+  await settle(200);
+  assert.equal(out.grant ?? 0, 0, 'restart: nothing re-sent');
+  await link.disconnect();
+  await mirror.close();
+
+  // an older mirror (no grantsum in its hello) gets every grant, as before
+  const old = await (await import('../src/peer.js')).createPeer({ plugins: [['sync', { role: 'mirror' }], 'mirror'] });
+  old.net.features.delete('grantsum');
+  out = frames(client);
+  link = connectInProcess(client, old);
+  await link.ready;
+  await until(() => (out.grant ?? 0) >= 5, 3000, 'all grants');
+  assert.equal(out.grantsum ?? 0, 0);
+  await link.disconnect();
+  await Promise.all([client.close(), old.close()]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('grants on reconnect: a key rotation made offline changes the fingerprint - the mirror asks for it', async () => {
+  const { createClient } = await import('../src/index.js');
+  const mirror = await (await import('../src/peer.js')).createPeer({ plugins: [['sync', { role: 'mirror' }], 'mirror'] });
+  const client = await createClient({ devtools: false, transports: [] });
+  const group = await client.createGroup();
+  let link = connectInProcess(client, mirror);
+  await link.ready;
+  await until(async () => (await mirror.mirror.spaces()).includes(group.id), 3000);
+  await link.disconnect();
+
+  await (await client.members(group)).rotate(); // new epoch while offline
+  const out = frames(client);
+  link = connectInProcess(client, mirror);
+  await link.ready;
+  await until(() => (out.grant ?? 0) >= 1, 3000, 'rotated grants sent');
+  assert.ok(mirror.keyring.epochs(group.id).has(1), 'the mirror knows epoch 1');
+  await client.write(group, 'chat', 'after rotation');
+  await until(async () => (await client.syncStatus()).outbox === 0, 3000, 'accepted by the mirror');
+  await link.disconnect();
+  await Promise.all([client.close(), mirror.close()]);
+});
