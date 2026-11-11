@@ -62,7 +62,7 @@ const relay = await createRelay({ port: 8787, db: './relay.sqlite', handleSignal
 ```js
 import { createClient } from '@qu/lite';          // im Browser ohne Bundler: '<relay>/dist/qu-client.js'
 
-const qu = await createClient({ url: 'https://relay.example' });
+const qu = await createClient({ url: 'https://relay.example' });   // vom Relay selbst ausgeliefert: createClient() ohne url
 const group = await qu.createGroup();
 qu.bus.on(`qu.record.${group.id}`, (rec) => console.log(rec.path, rec.value));
 await qu.write(group, 'chat', 'hallo');

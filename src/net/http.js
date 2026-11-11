@@ -168,9 +168,14 @@ export function unpackEnvelopes(body) {
   return out;
 }
 
-/** The HTTP(S) origin of a relay url (ws:// -> http://, path and /ws dropped). */
+/**
+ * The HTTP(S) base of a relay url: ws(s):// -> http(s)://, a trailing `/ws`
+ * or `/sse` and slashes dropped, a proxy PATH PREFIX kept
+ * (`wss://example.org/qu/ws` -> `https://example.org/qu`).
+ */
 export function httpOrigin(url) {
   const u = new URL(url);
   const protocol = u.protocol === 'wss:' ? 'https:' : u.protocol === 'ws:' ? 'http:' : u.protocol;
-  return `${protocol}//${u.host}`;
+  const path = u.pathname.replace(/\/+$/, '').replace(/\/(ws|sse)$/, '').replace(/\/[^/]*\.html?$/, '');
+  return `${protocol}//${u.host}${path}`;
 }

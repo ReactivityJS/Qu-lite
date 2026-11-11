@@ -90,8 +90,19 @@ prefix like `https://example.org/qu/`: see [DEPLOY.md](DEPLOY.md).
    has a complete checklist.
 4. With a stats token: `curl -fsS -H "Authorization: Bearer $TOKEN" https://relay.example.org/stats`.
 
-Apps connect with `transports: [['relay', { url: 'https://relay.example.org' }]]`. The start page shows the
-complete snippet.
+**Apps** served by the relay itself (from `/`, e.g. your own `index.html` in the web folder) use it without any
+configuration: `createClient()` connects to the address the page came from. Apps hosted elsewhere pass
+`createClient({ url: 'https://relay.example.org' })`. The start page shows the complete snippet.
+
+**API only, no web pages:** set `QU_STATIC=` (empty) in `.env`. It works for Compose and Swarm alike. Then
+redeploy (`docker compose up -d` / `docker stack deploy …`). `/`, the demo and `/dist/…` are gone (426: only the API is there); the API,
+`/healthz` and `/info` stay.
+
+**Your own app on the relay:** mount your build over the web folder, e.g. in `docker-compose.yml`
+`volumes: - ./my-app:/app/web/app:ro`. It is then reachable at `https://relay.example.org/app/`. The default
+address is the page's folder, so in a subfolder pass the relay's address explicitly:
+`createClient({ url: location.origin })`. Simpler: put your files into `/app/web` itself (your own
+`index.html` replaces the start page), so the page and the relay share the address.
 
 ## Operations
 

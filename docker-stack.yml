@@ -18,6 +18,10 @@ services:
       QU_MAX_ENVELOPE: "${QU_MAX_ENVELOPE:-262144}"
       QU_MAX_SPACES: "${QU_MAX_SPACES:-}"
       QU_RATE: "${QU_RATE:-200}"
+      # start page, demo and browser bundle for clients on this address; empty = API only
+      QU_STATIC: "${QU_STATIC-/app/web}"
+      # Web Push for closed apps (contact address for the push services); empty = off
+      QU_PUSH: "${QU_PUSH:-}"
       # stats token from a secret (see below); or QU_STATS_TOKEN as a plain variable
       # QU_STATS_TOKEN_FILE: /run/secrets/qu_stats_token
     volumes:

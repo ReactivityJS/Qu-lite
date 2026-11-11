@@ -22,6 +22,10 @@ services:
       QU_MAX_SPACES: "${QU_MAX_SPACES:-}"
       QU_RATE: "${QU_RATE:-200}"
       QU_STATS_TOKEN: "${QU_STATS_TOKEN:-}"
+      # start page, demo and browser bundle for clients on this address; empty = API only
+      QU_STATIC: "${QU_STATIC-/app/web}"
+      # Web Push for closed apps (contact address for the push services); empty = off
+      QU_PUSH: "${QU_PUSH:-}"
     volumes:
       - qu-lite-data:/data
     restart: unless-stopped

@@ -96,6 +96,13 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Browser clients use their own relay by default**: `createClient()` in a page without `url`
+  connects to the address the page came from (its folder; `url: null` = none). An app served by its
+  relay needs no configuration. All HTTP helpers (public reads, tresors, push, background) keep a
+  proxy path prefix (`https://example.org/qu`).
+- **Docker / Swarm**: `QU_STATIC` (start page, demo, `/dist`; empty = API only) and `QU_PUSH` are
+  passed through in `docker-compose.yml` and `docker-stack.yml` and documented in `.env.example`,
+  INSTALL.md and DEPLOY.md (route table with `/q/`, `/id/`, `/push/`, `/dist/qu-sw.js`).
 - **Optional plugins**:
   - `live`: `qu.live(query, render)`, re-run on changes, coalesced, only when the result differs.
   - `schema`: rules per path, checked on write (`QU_INVALID`) and on arrival (refused, never indexed).

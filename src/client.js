@@ -9,8 +9,10 @@
  *
  * Defaults: IndexedDB when the runtime has it (identity and data survive a
  * reload), memory otherwise (Node scripts, tests); the plugin set of a chat
- * style app; the relay transport (WebSocket, HTTPS + SSE fallback) when a
- * `url` is given; `devtools` in browsers (window.qu, qu.dev).
+ * style app; the relay transport (WebSocket, HTTPS + SSE fallback); in a
+ * browser page without `url` the relay is THE ADDRESS THE PAGE CAME FROM (its
+ * folder - an app served by its relay needs no configuration; `url: null`
+ * for none); `devtools` in browsers (window.qu, qu.dev).
  */
 import { createPeer, defaultRegistry } from './peer.js';
 
@@ -19,7 +21,7 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
 
 /**
  * @param {{
- *   url?: string|string[],
+ *   url?: string|string[]|null,
  *   name?: string,
  *   store?: string|[string, object]|object,
  *   plugins?: Array<string|[string, object]|Function>,
@@ -35,7 +37,8 @@ export const CLIENT_PLUGINS = Object.freeze(['records', 'user', 'members', 'inbo
  *   identity?: object|'persisted',
  * }} [options]
  *   `url`: relay origin (http(s):// or ws(s)://), or several for redundancy - every one is
- *   kept connected, one going down changes nothing. `name`: IndexedDB database name (one per app).
+ *   kept connected, one going down changes nothing. Default in a browser page: the page's own
+ *   address (folder); in Node: none. `null` / `[]`: no relay (local only). `name`: IndexedDB database name (one per app).
  *   `extra`: plugins added to the defaults (e.g. ['text', 'blobs']). `relay`: options for the relay
  *   transport (e.g. {isolate: true}). `transports`: replaces the relay transport entirely.
  *   `persist`: ask the browser right away to keep this origin's storage (may
@@ -65,10 +68,11 @@ export async function createClient({
   passphrase,
   unlock,
 } = {}) {
+  if (url === undefined && /^https?:$/.test(globalThis.location?.protocol ?? '')) url = new URL('.', globalThis.location.href).href;
   store ??= globalThis.indexedDB ? ['indexeddb', { name }] : 'memory';
   transports ??= url && [url].flat().length ? [['relay', { url, ...relay }]] : [];
   const tools = devtools ? [['devtools', devtools === true ? {} : devtools]] : [];
-  const unlockWith = unlock ? { ...(unlock === 'key' ? {} : unlock), relay: [url].flat()[0] } : undefined;
+  const unlockWith = unlock ? { ...(unlock === 'key' ? {} : unlock), relay: [url].flat()[0] ?? undefined } : undefined;
   const qu = await createPeer({ registry, store, identity, restore, passphrase, unlock: unlockWith, plugins: [...plugins, ...extra, ...tools], transports });
   if (persist && qu.device) await qu.device.persist().catch((error) => qu.bus.error(error, 'device.persist'));
   return qu;

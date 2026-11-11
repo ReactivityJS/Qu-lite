@@ -9,15 +9,26 @@ One process, one port (default 8787) serves everything:
 |---|---|
 | `/` | client start page (`web/index.html`): connection check from the browser, store test, how an app connects |
 | `/demo.html` | the demo app |
-| `/dist/qu-lite.js` | the library as one browser ES module, for apps: `import { createPeer } from 'https://relay.example/dist/qu-lite.js'` |
+| `/dist/qu-lite.js`, `/dist/qu-client.js` | the library as browser ES modules, for apps: `import { createClient } from 'https://relay.example/dist/qu-client.js'` |
+| `/dist/qu-sw.js` | service worker helper (Background Sync, push) |
 | `/ws` | WebSocket (any path upgrades) - the API |
 | `/sse/<session>` | HTTPS + SSE fallback for networks that block WebSocket - the same API |
+| `/q/<sid>/<path>`, `POST /q/in` | public reads without membership; offline delivery from the service worker |
+| `/id/<handle>` | tresors of users who unlock with a security key or passkey (encrypted) |
+| `/push/…` | Web Push subscriptions and wake-ups - only with `--push` (`QU_PUSH`) |
 | `/healthz` | `200 ok` for the proxy or the container (GET and HEAD) |
 | `/info` | `{name, version, transports, uptime}` - nothing about spaces |
 | `/stats`, `/metrics` | operating figures as JSON / Prometheus text - only with `--stats-token` (`QU_STATS_TOKEN`), for requests carrying the token |
 
-The web files are served only with `--static ./web` (`QU_STATIC`). The Docker image always sets it. The relay
-speaks plain HTTP. **TLS is the reverse proxy's job**: clients then use `https://` and `wss://` on the same origin.
+**Start page for browser clients.** With `--static ./web` (`QU_STATIC`) the relay serves `/`, the demo and
+`/dist/…`. The Docker image sets it by default (`QU_STATIC=/app/web`); `QU_STATIC=` (empty, in `.env` or the
+service's environment) turns the web files off and leaves only the API, e.g. when the app is hosted elsewhere.
+A browser app loaded **from** the relay needs no address: `createClient()` uses the address the page came
+from (its folder, so a path prefix like `/qu/` works too). An app hosted elsewhere passes
+`createClient({ url: 'https://relay.example.org' })`; `url: null` means no relay.
+
+The relay speaks plain HTTP. **TLS is the reverse proxy's job**: clients then use `https://` and `wss://` on the
+same origin. The proxy forwards every path (the examples below do); nothing needs to be listed one by one.
 
 ## Run
 

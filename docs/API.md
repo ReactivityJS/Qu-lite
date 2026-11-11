@@ -117,7 +117,7 @@ const qu = await createClient({ url: 'https://relay.example', name: 'my-app', ex
 
 | Option | Default | |
 |---|---|---|
-| `url` | – | relay origin, or an array of origins for redundancy (each kept connected); installs the `relay` transport (WebSocket, SSE fallback) |
+| `url` | browser page: its own address (folder); Node: – | relay origin, or an array of origins for redundancy (each kept connected); installs the `relay` transport (WebSocket, SSE fallback). An app served by its relay needs none; `null` = no relay |
 | `name` | `'qu-lite'` | IndexedDB database name |
 | `store` | `['indexeddb', {name}]` if IndexedDB exists, else `'memory'` | any `createPeer` store spec |
 | `plugins` | `CLIENT_PLUGINS`: `records, user, members, inbox, sync({ackFrom:'mirror'}), status, compaction, device` | replaces the defaults |

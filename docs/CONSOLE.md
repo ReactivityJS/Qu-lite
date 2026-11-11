@@ -148,7 +148,7 @@ führt genau diesen Text in zwei Chromium-Instanzen aus.
 
 ```js konsole-a
 const { createClient } = await import('/dist/qu-client.js');
-await createClient({ url: location.origin, name: 'konsole-a', extra: ['blobs'] });   // jetzt gibt es window.qu
+await createClient({ name: 'konsole-a', extra: ['blobs'] });   // Relay = diese Adresse; jetzt gibt es window.qu
 g = await qu.createGroup();
 copy(JSON.stringify(await (await qu.members(g)).invite()));   // Einladung liegt in der Zwischenablage
 qu.bus.on(`qu.record.${g.id}`, (r) => r.path.startsWith('_') || console.log('neu:', r.path, r.value));
@@ -158,7 +158,7 @@ qu.bus.on(`qu.record.${g.id}`, (r) => r.path.startsWith('_') || console.log('neu
 
 ```js konsole-b
 const { createClient } = await import('/dist/qu-client.js');
-await createClient({ url: location.origin, name: 'konsole-b', extra: ['blobs'] });
+await createClient({ name: 'konsole-b', extra: ['blobs'] });
 g = await qu.acceptInvite(JSON.parse(prompt('Einladung einfügen')));
 qu.bus.on(`qu.record.${g.id}`, (r) => r.path.startsWith('_') || console.log('neu:', r.path, r.value));
 await qu.write(g, 'chat', { text: 'Hallo von B' });
@@ -195,7 +195,7 @@ st.online();   // nach ein paar Sekunden: die andere Seite mit online: true
 qu.transports.relay.disconnect();
 await qu.write(g, 'chat', { text: 'offline geschrieben' });
 await qu.syncStatus();                        // {outbox: 1, …} – wartet auf den Relay
-qu.transports.relay.connect(location.origin); // A bekommt die Nachricht sofort
+qu.transports.relay.connect(location.origin); // A bekommt die Nachricht sofort (unter einem Pfad-Präfix: dessen Adresse)
 ```
 
 **A** – was übertragen wurde und was im Speicher liegt:

@@ -58,9 +58,11 @@ export async function fetchPublic(relay, sid, path, options = {}) {
   if (sid === undefined) {
     const u = new URL(relay);
     const parts = u.pathname.split('/').filter(Boolean);
-    if (parts[0] !== 'q' || parts.length < 3) throw new Error('fetchPublic: expected a link .../q/<sid>/<path>');
-    sid = parts[1];
-    path = parts.slice(2).map(decodeURIComponent).join('/');
+    const at = parts.findIndex((p, i) => p === 'q' && /^[0-9a-f]{32}$/.test(parts[i + 1] ?? ''));
+    if (at < 0 || parts.length < at + 3) throw new Error('fetchPublic: expected a link .../q/<sid>/<path>');
+    sid = parts[at + 1];
+    path = parts.slice(at + 2).map(decodeURIComponent).join('/');
+    relay = `${u.protocol}//${u.host}/${parts.slice(0, at).join('/')}`; // a proxy prefix stays
   }
   const { key, limit, before, after, fetch: fetchImpl = globalThis.fetch } = options;
   const q = new URLSearchParams();

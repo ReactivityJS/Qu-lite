@@ -18,9 +18,10 @@ $('endpoints').textContent = `${wsUrl} · ${base}/sse`;
 $('snippet').textContent = `import { createClient } from '${base}/dist/qu-client.js';
 
 // identity and data stay on the device (IndexedDB); plugins load on demand
-// relay: WebSocket, falls back to HTTPS + SSE on the same address
+// relay: the address the page came from (WebSocket, falls back to HTTPS + SSE) -
+// an app served by this relay needs no url; from elsewhere: { url: '${base}' }
 // in the dev console: qu.dev.help()
-const qu = await createClient({ url: '${base}', name: 'my-app' });
+const qu = await createClient({ name: 'my-app' });
 const group = await qu.createGroup();
 await qu.write(group, 'chat', 'hallo');`;
 
