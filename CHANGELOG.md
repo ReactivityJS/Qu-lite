@@ -96,6 +96,10 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Your app at `/`**: `QU_APP` / `--app` serves an app folder at `/` before the relay's own web files
+  (`/dist/…`, the demo); the start page moves to `/qu.html`. `QU_SPA` / `--spa` adds a fallback to the
+  app's index.html for client-side routes. Passed through in Compose and Swarm, documented with a
+  Compose volume and a Swarm image (INSTALL.md). HEAD on static files sends no body.
 - **Browser clients use their own relay by default**: `createClient()` in a page without `url`
   connects to the address the page came from (its folder; `url: null` = none). An app served by its
   relay needs no configuration. All HTTP helpers (public reads, tresors, push, background) keep a

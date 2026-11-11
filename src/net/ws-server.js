@@ -15,8 +15,9 @@
  *                                               `Authorization: Bearer <token>` or `?token=`;
  *                                               behind a proxy every request comes from
  *                                               localhost, so an address check would mean nothing
- *   anything else                            -> static files (`static`): the client start
- *                                               page, the demo, the browser bundle (web/)
+ *   anything else                            -> static files: `app` (your app at `/`, optional)
+ *                                               first, then `static` (web/: the client start page -
+ *                                               also as /qu.html -, the demo, the browser bundle)
  *
  * CAPACITY: at most `maxConnections` peers (WebSocket + SSE together); beyond
  * that a WebSocket is closed with 1013 "try again later" and an SSE stream
@@ -55,18 +56,40 @@ const TYPES = {
 /** Sent with every static file: no MIME sniffing, invite links (#fragment) never leak via Referer anyway. */
 const HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'cache-control': 'no-cache' };
 
-function staticHandler(dir) {
-  const root = resolve(dir);
+/** A file inside `root` for a URL path, or null (missing, or outside root). */
+async function fileIn(root, path) {
+  let file = normalize(join(root, path));
+  // inside root - with a separator, or `/app/web-secret` would pass as "starting with /app/web"
+  if (file !== root && !file.startsWith(root + sep)) return null;
+  try {
+    if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
+    return (await stat(file)).isFile() ? file : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Static files from one or more folders, the first that has the path wins:
+ * `[app, web]` serves the app at `/` and still the relay's `/dist/…` and
+ * demo; the relay's own start page stays reachable as `/qu.html`. `spa`:
+ * paths without a file extension that match nothing get the first folder's
+ * index.html (client-side routing). A miss costs one `stat` per folder.
+ */
+function staticHandler(dirs, { spa = false } = {}) {
+  const roots = [dirs].flat().filter(Boolean).map((d) => resolve(d));
+  const builtin = roots.at(-1);
   return async (req, res) => {
     try {
       const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-      let file = normalize(join(root, path));
-      // inside root - with a separator, or `/app/web-secret` would pass as "starting with /app/web"
-      if (file !== root && !file.startsWith(root + sep)) throw new Error('outside root');
-      if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
+      let file = null;
+      if (path === '/qu.html' && roots.length > 1) file = await fileIn(builtin, '/index.html');
+      for (const root of roots) if (!file) file = await fileIn(root, path);
+      if (!file && spa && !extname(path) && req.method === 'GET') file = await fileIn(roots[0], '/index.html');
+      if (!file) throw new Error('not found');
       const body = await readFile(file);
       res.writeHead(200, { ...HEADERS, 'content-type': TYPES[extname(file)] ?? 'application/octet-stream' });
-      res.end(body);
+      res.end(req.method === 'HEAD' ? undefined : body);
     } catch {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('not found');
@@ -76,7 +99,7 @@ function staticHandler(dir) {
 
 /**
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
- * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, ws?: boolean, sse?: boolean|object, pingMs?: number,
+ * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, app?: string, spa?: boolean, ws?: boolean, sse?: boolean|object, pingMs?: number,
  *   statsToken?: string, maxFrameBytes?: number, maxConnections?: number, maxBufferedBytes?: number, drainMs?: number, ready?: () => boolean|Promise<boolean>}} [options]
  *   `pingMs`: WebSocket heartbeat (0 = off); a client that did not answer the previous ping is closed.
  *   `statsToken`: enables /stats and /metrics (needs the stats plugin) for requests carrying this token.
@@ -86,13 +109,13 @@ function staticHandler(dir) {
  *   peer before it counts as a slow consumer and is closed (default 16 MiB). `ready`: readiness for /readyz.
  * @returns {Promise<{port: number, close: () => Promise<void>, connections: () => number, wss: import('ws').WebSocketServer|null}>}
  */
-export async function listenHttp(qu, { port = 0, host, server, static: dir, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024, maxConnections = 10_000, maxBufferedBytes, drainMs = 1000, ready = () => true } = {}) {
+export async function listenHttp(qu, { port = 0, host, server, static: dir, app, spa = false, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024, maxConnections = 10_000, maxBufferedBytes, drainMs = 1000, ready = () => true } = {}) {
   const ownServer = !server;
   let wss = null;
   let stopping = false;
   const connections = () => (wss?.clients.size ?? 0) + (sseHandler?.size() ?? 0);
   const sseHandler = sse ? createSseHandler(qu, { maxBufferedBytes, ...(typeof sse === 'object' ? sse : {}), canOpen: () => !stopping && connections() < maxConnections }) : null;
-  const files = dir ? staticHandler(dir) : null;
+  const files = dir || app ? staticHandler([app, dir], { spa }) : null;
   const started = Date.now();
   const transports = [...(ws ? ['ws'] : []), ...(sse ? ['sse'] : [])];
   const onRequest = (req, res) => {

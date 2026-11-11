@@ -21,7 +21,9 @@ One process, one port (default 8787) serves everything:
 | `/stats`, `/metrics` | operating figures as JSON / Prometheus text - only with `--stats-token` (`QU_STATS_TOKEN`), for requests carrying the token |
 
 **Start page for browser clients.** With `--static ./web` (`QU_STATIC`) the relay serves `/`, the demo and
-`/dist/…`. The Docker image sets it by default (`QU_STATIC=/app/web`); `QU_STATIC=` (empty, in `.env` or the
+`/dist/…`. With `--app ./my-app` (`QU_APP`) **your app** is served at `/` first; the relay's files follow, and
+its start page moves to `/qu.html`. `--spa` (`QU_SPA=1`) adds a fallback for client-side routes
+([INSTALL.md](INSTALL.md#your-app-at-)). The Docker image sets it by default (`QU_STATIC=/app/web`); `QU_STATIC=` (empty, in `.env` or the
 service's environment) turns the web files off and leaves only the API, e.g. when the app is hosted elsewhere.
 A browser app loaded **from** the relay needs no address: `createClient()` uses the address the page came
 from (its folder, so a path prefix like `/qu/` works too). An app hosted elsewhere passes

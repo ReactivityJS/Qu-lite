@@ -46,7 +46,7 @@ const formatJson = (event, fields) => JSON.stringify({ time: new Date().toISOStr
 
 /**
  * @param {{
- *   port?: number, host?: string, db?: string, allow?: string[]|null, static?: string,
+ *   port?: number, host?: string, db?: string, allow?: string[]|null, static?: string, app?: string, spa?: boolean,
  *   quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null,
  *   rate?: number, statsToken?: string, maxConnections?: number, maxBufferedBytes?: number,
  *   log?: (line: string) => void, logFormat?: 'text'|'json', extra?: Array<string|[string, object]|Function>,
@@ -56,6 +56,8 @@ const formatJson = (event, fields) => JSON.stringify({ time: new Date().toISOStr
  *   `statsToken`: installs the stats plugin and serves /stats + /metrics to requests carrying it.
  *   `handleSignals`: close gracefully on SIGINT/SIGTERM and exit.
  *   `push`: Web Push for closed apps (push-relay.js); `subject` is the contact push services want.
+ *   `app`: a folder served at `/` before `static` (your app; the relay's start page moves to /qu.html);
+ *   `spa`: unknown paths without extension get the app's index.html (client-side routing).
  * @returns {Promise<{qu: object, port: number, spaces: string[], close: () => Promise<void>}>}
  */
 export async function createRelay({
@@ -64,6 +66,8 @@ export async function createRelay({
   db = ':memory:',
   allow = null,
   static: dir,
+  app,
+  spa = false,
   quota = null,
   maxEnvelopeBytes,
   maxSpaces = null,
@@ -94,7 +98,7 @@ export async function createRelay({
       ...(push ? [['push-relay', push === true ? {} : push]] : []),
       ...extra,
     ],
-    transports: [['ws-server', { port, host, static: dir, statsToken, maxConnections, maxBufferedBytes, ready: () => mirrorReady }]],
+    transports: [['ws-server', { port, host, static: dir, app, spa, statsToken, maxConnections, maxBufferedBytes, ready: () => mirrorReady }]],
   });
   const spaces = await qu.mirror.ready;
   mirrorReady = true;

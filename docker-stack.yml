@@ -20,6 +20,10 @@ services:
       QU_RATE: "${QU_RATE:-200}"
       # start page, demo and browser bundle for clients on this address; empty = API only
       QU_STATIC: "${QU_STATIC-/app/web}"
+      # your app at / (a folder in the container, see docs/INSTALL.md); the start page moves to /qu.html
+      QU_APP: "${QU_APP:-}"
+      # 1 = unknown paths get the app's index.html (client-side routing)
+      QU_SPA: "${QU_SPA:-}"
       # Web Push for closed apps (contact address for the push services); empty = off
       QU_PUSH: "${QU_PUSH:-}"
       # stats token from a secret (see below); or QU_STATS_TOKEN as a plain variable

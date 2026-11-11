@@ -7,7 +7,7 @@
  * envelopes and serves them. It verifies signatures; it never reads.
  *
  *   node bin/mirror.mjs [--port 8787] [--host 0.0.0.0] [--db ./mirror.sqlite]
- *                       [--allow sid1,sid2] [--static ./web] [--quiet] [--log-format text|json]
+ *                       [--allow sid1,sid2] [--static ./web] [--app ./my-app] [--spa] [--quiet] [--log-format text|json]
  *                       [--quota-records N] [--quota-bytes N] [--max-envelope N] [--rate frames/s]
  *                       [--stats-token SECRET] [--max-spaces N] [--max-connections N] [--repl]
  *                       [--push mailto:ops@example.org]
@@ -27,8 +27,11 @@
  *
  * With `--static ./web` (Docker: always) the same port also serves the
  * client start page (/), the demo (/demo.html) and the browser bundle
- * (/dist/qu-lite.js); /healthz, /readyz and /info are always there. Put a
- * reverse proxy in front for TLS (docs/DEPLOY.md).
+ * (/dist/qu-lite.js); /healthz, /readyz and /info are always there. With
+ * `--app ./my-app` (QU_APP) your app is served at `/` first - the relay's
+ * start page moves to /qu.html, /dist/… and the demo stay; `--spa` (QU_SPA=1)
+ * sends unknown paths to the app's index.html. Put a reverse proxy in front
+ * for TLS (docs/DEPLOY.md).
  */
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
@@ -58,6 +61,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       db: { type: 'string', default: env('QU_DB') ?? './mirror.sqlite' },
       allow: { type: 'string', default: env('QU_ALLOW') ?? '' },
       static: { type: 'string', default: env('QU_STATIC') ?? '' },
+      app: { type: 'string', default: env('QU_APP') ?? '' },
+      spa: { type: 'boolean', default: /^(1|true|yes)$/i.test(env('QU_SPA') ?? '') },
       quiet: { type: 'boolean', default: false },
       'log-format': { type: 'string', default: env('QU_LOG_FORMAT') ?? 'text' },
       'quota-records': { type: 'string', default: env('QU_QUOTA_RECORDS') ?? '' },
@@ -77,6 +82,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     db: args.db,
     allow: args.allow ? args.allow.split(',') : null,
     static: args.static || undefined,
+    app: args.app || undefined,
+    spa: args.spa,
     quota:
       args['quota-records'] || args['quota-bytes']
         ? { ...(args['quota-records'] ? { records: Number(args['quota-records']) } : {}), ...(args['quota-bytes'] ? { bytes: Number(args['quota-bytes']) } : {}) }

@@ -98,11 +98,42 @@ configuration: `createClient()` connects to the address the page came from. Apps
 redeploy (`docker compose up -d` / `docker stack deploy …`). `/`, the demo and `/dist/…` are gone (426: only the API is there); the API,
 `/healthz` and `/info` stay.
 
-**Your own app on the relay:** mount your build over the web folder, e.g. in `docker-compose.yml`
-`volumes: - ./my-app:/app/web/app:ro`. It is then reachable at `https://relay.example.org/app/`. The default
-address is the page's folder, so in a subfolder pass the relay's address explicitly:
-`createClient({ url: location.origin })`. Simpler: put your files into `/app/web` itself (your own
-`index.html` replaces the start page), so the page and the relay share the address.
+### Your app at `/`
+
+The relay can serve your app at `/` and stay the backend for it. Point `QU_APP` at a folder with your built app.
+The relay looks there first and then in its own web folder:
+
+| Path | Answered by |
+|---|---|
+| `/`, `/app.js`, `/assets/…` | your app |
+| `/dist/qu-client.js`, `/dist/qu-sw.js` | the relay (if your app has no file of that name) |
+| `/qu.html` | the relay's start page (connection check), moved from `/` |
+| `/demo.html` | the demo (if your app has no file of that name) |
+| `/ws`, `/sse`, `/q/…`, `/id/…`, `/push/…`, `/healthz` | the relay, as always |
+
+Your app then needs no address: `createClient()` connects to the page's own address. With client-side routing
+(`/chat/42` handled in the browser), set `QU_SPA=1`. Paths without a file extension that match nothing then get
+your `index.html`; missing files stay 404. Cost: one extra file lookup only for paths that are not in your app.
+
+**Compose**, with your build in `./my-app` next to `docker-compose.yml`:
+
+```yaml
+    volumes:
+      - qu-lite-data:/data
+      - ./my-app:/srv/app:ro
+```
+plus `QU_APP=/srv/app` (and `QU_SPA=1` if needed) in `.env`, then `docker compose up -d`.
+
+**Swarm** (a bind mount would have to exist on the node): build an image that carries your app.
+
+```dockerfile
+FROM ghcr.io/reactivityjs/qu-lite:main
+COPY my-app/ /srv/app/
+ENV QU_APP=/srv/app
+```
+Push it and deploy with `QU_IMAGE=<your image>`. Updating the app then means a new image tag.
+
+**Without Docker**: `node bin/mirror.mjs --static ./web --app ./my-app [--spa]`.
 
 ## Operations
 

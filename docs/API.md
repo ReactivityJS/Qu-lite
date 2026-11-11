@@ -141,7 +141,7 @@ relay.qu.dev.links();
 await relay.close();   // graceful
 ```
 
-Options: `port` (8787), `host`, `db` (`':memory:'`), `allow`, `static`, `quota`, `maxEnvelopeBytes`,
+Options: `port` (8787), `host`, `db` (`':memory:'`), `allow`, `static`, `app` (a folder served at `/` before `static`; the start page moves to `/qu.html`), `spa` (unknown paths → the app's index.html), `quota`, `maxEnvelopeBytes`,
 `maxSpaces`, `rate` (200, `0` = off), `statsToken`, `maxConnections`, `maxBufferedBytes`, `log`
 (`console.log`), `logFormat` (`'text'` | `'json'`: one JSON object per line), `extra` (more plugins),
 `devtools` (`true`: `qu.dev` without a global), `handleSignals` (close on SIGINT/SIGTERM and exit).
