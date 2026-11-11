@@ -27,7 +27,10 @@ await qu.write(group, 'chat', 'hallo');`;
 
 fetch(`${base}/info`, { cache: 'no-store' })
   .then((r) => r.json())
-  .then((info) => ($('info').textContent = `${info.name} ${info.version} · ${info.transports.join(' + ')} · läuft seit ${Math.round(info.uptime / 60)} min`))
+  .then((info) => {
+    $('info').textContent = `${info.name} ${info.version} · ${info.transports.join(' + ')} · läuft seit ${Math.round(info.uptime / 60)} min`;
+    if (info.docs) $('info').append(' · ', Object.assign(document.createElement('a'), { href: `${base}${info.docs}`, textContent: 'Dokumentation' }));
+  })
   .catch(() => ($('info').textContent = 'nicht erreichbar'));
 
 const preference = (() => {

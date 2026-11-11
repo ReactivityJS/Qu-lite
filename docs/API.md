@@ -969,7 +969,8 @@ Every flag also has an environment variable: `QU_PORT`, `QU_HOST`, `QU_DB`, `QU_
 `QU_STATIC`, `QU_QUOTA_RECORDS`, `QU_QUOTA_BYTES`, `QU_MAX_ENVELOPE`, `QU_RATE` (`0` disables
 rate limiting) and `QU_STATS_TOKEN` (installs `stats`, enables `/stats` and `/metrics`). Every variable can also
 be read from a file named by `<NAME>_FILE` (Docker/Swarm secrets, e.g. `QU_STATS_TOKEN_FILE=/run/secrets/qu_stats_token`);
-the file wins. Also `QU_MAX_CONNECTIONS` and `QU_LOG_FORMAT`. The mirror keeps its identity in its database, so clients resume after a
+the file wins. Also `QU_MAX_CONNECTIONS`, `QU_LOG_FORMAT`, `QU_APP` (`--app`: your app at `/`), `QU_SPA` (`--spa`),
+`QU_DOCS` (`--docs`: the documentation at `/docs/`) and `QU_PUSH` (`--push`). The mirror keeps its identity in its database, so clients resume after a
 restart. `createRelay(options)` from `@qu/lite/node` is the same thing in code (`startMirror` in
 `bin/mirror.mjs` remains as an alias). `--repl` opens an interactive console with `qu`, `dev` and `relay`
 next to the running relay ([CONSOLE.md](CONSOLE.md#relay-repl)); SIGINT/SIGTERM shut down gracefully.

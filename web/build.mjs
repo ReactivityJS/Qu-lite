@@ -8,6 +8,8 @@
  *                     plugin, store and transport is its own chunk in dist/chunks/,
  *                     fetched only when a peer uses it
  *   dist/demo.js      the demo app (demo.html), bundled with the library
+ *   ../docs-site/     the documentation as HTML (build-docs.mjs) - served at /docs/ only
+ *                     with `--docs` / QU_DOCS=1
  *   dist/qu-sw.js     service worker helper (classic script): `importScripts(...)`, then
  *                     `quServiceWorker({...})` - Background Sync and push (sw.js)
  *
@@ -20,6 +22,7 @@ import * as esbuild from 'esbuild';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rmSync } from 'node:fs';
+import { buildDocs } from './build-docs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +34,7 @@ export async function buildWeb() {
   await esbuild.build({ ...common, entryPoints: [join(here, 'demo.js')], outfile: join(here, 'dist', 'demo.js') });
   // service worker helper as a CLASSIC script (importScripts works in every browser's worker): self.quServiceWorker
   await esbuild.build({ ...common, format: 'iife', globalName: 'quSw', footer: { js: 'self.quServiceWorker = quSw.quServiceWorker;' }, entryPoints: [join(here, '..', 'src', 'sw.js')], outfile: join(here, 'dist', 'qu-sw.js') });
+  await buildDocs();
   return join(here, 'dist');
 }
 

@@ -34,6 +34,7 @@ COPY --from=builder --chown=qu:qu /app/package.json ./
 COPY --from=builder --chown=qu:qu /app/src ./src
 COPY --from=builder --chown=qu:qu /app/bin ./bin
 COPY --from=builder --chown=qu:qu /app/web ./web
+COPY --from=builder --chown=qu:qu /app/docs-site ./docs-site
 USER qu
 VOLUME /data
 EXPOSE 8787

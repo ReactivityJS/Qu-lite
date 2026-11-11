@@ -96,6 +96,16 @@ Stability, scalability and one base for client and relay.
 - **Smaller signals**: signals are sealed with the new `'small'` padding (quarter steps from 32 bytes instead
   of 128) - a presence heartbeat 378 -> 346 bytes (-8.5 %). Padding is the sender's choice; readers of any
   version strip it. Both signatures stay: the relay needs them to refuse spam, receivers to know who it is.
+- **Documentation**:
+  - New: a user guide (`docs/BENUTZER.md`): YubiKey/passkey per platform, new device, lost key, backup,
+    offline, notifications, what the server sees, messages in plain words. Written for app developers to
+    reuse.
+  - New: an overview of who reads what (`docs/README.md`).
+  - Optional on the relay at `/docs/` (`QU_DOCS=1` / `--docs`, off by default), built to HTML at build time
+    (`web/build-docs.mjs`, `marked` as a dev dependency). GitHub-compatible anchors, navigation, dark mode,
+    phone layout; the start page links to it.
+  - A test checks every link between the pages, anchors included.
+  - The start page is always also `/qu.html`.
 - **Your app at `/`**: `QU_APP` / `--app` serves an app folder at `/` before the relay's own web files
   (`/dist/…`, the demo); the start page moves to `/qu.html`. `QU_SPA` / `--spa` adds a fallback to the
   app's index.html for client-side routes. Passed through in Compose and Swarm, documented with a

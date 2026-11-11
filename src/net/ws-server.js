@@ -15,6 +15,7 @@
  *                                               `Authorization: Bearer <token>` or `?token=`;
  *                                               behind a proxy every request comes from
  *                                               localhost, so an address check would mean nothing
+ *   /docs/...                                -> the documentation as HTML (`docs`: docs-site/, off by default)
  *   anything else                            -> static files: `app` (your app at `/`, optional)
  *                                               first, then `static` (web/: the client start page -
  *                                               also as /qu.html -, the demo, the browser bundle)
@@ -76,14 +77,20 @@ async function fileIn(root, path) {
  * paths without a file extension that match nothing get the first folder's
  * index.html (client-side routing). A miss costs one `stat` per folder.
  */
-function staticHandler(dirs, { spa = false } = {}) {
+function staticHandler(dirs, { spa = false, docs } = {}) {
   const roots = [dirs].flat().filter(Boolean).map((d) => resolve(d));
   const builtin = roots.at(-1);
+  const docsRoot = docs ? resolve(docs) : null;
   return async (req, res) => {
     try {
       const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
       let file = null;
-      if (path === '/qu.html' && roots.length > 1) file = await fileIn(builtin, '/index.html');
+      if (docsRoot && (path === '/docs' || path.startsWith('/docs/'))) {
+        if (path === '/docs') return res.writeHead(301, { location: '/docs/' }).end();
+        file = await fileIn(docsRoot, path.slice(5) || '/');
+        if (!file) throw new Error('not found');
+      }
+      if (!file && path === '/qu.html' && builtin) file = await fileIn(builtin, '/index.html');
       for (const root of roots) if (!file) file = await fileIn(root, path);
       if (!file && spa && !extname(path) && req.method === 'GET') file = await fileIn(roots[0], '/index.html');
       if (!file) throw new Error('not found');
@@ -99,7 +106,7 @@ function staticHandler(dirs, { spa = false } = {}) {
 
 /**
  * @param {{bus: import('../bus.js').Bus, peerId: string}} qu
- * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, app?: string, spa?: boolean, ws?: boolean, sse?: boolean|object, pingMs?: number,
+ * @param {{port?: number, host?: string, server?: import('node:http').Server, static?: string, app?: string, spa?: boolean, docs?: string, ws?: boolean, sse?: boolean|object, pingMs?: number,
  *   statsToken?: string, maxFrameBytes?: number, maxConnections?: number, maxBufferedBytes?: number, drainMs?: number, ready?: () => boolean|Promise<boolean>}} [options]
  *   `pingMs`: WebSocket heartbeat (0 = off); a client that did not answer the previous ping is closed.
  *   `statsToken`: enables /stats and /metrics (needs the stats plugin) for requests carrying this token.
@@ -109,13 +116,13 @@ function staticHandler(dirs, { spa = false } = {}) {
  *   peer before it counts as a slow consumer and is closed (default 16 MiB). `ready`: readiness for /readyz.
  * @returns {Promise<{port: number, close: () => Promise<void>, connections: () => number, wss: import('ws').WebSocketServer|null}>}
  */
-export async function listenHttp(qu, { port = 0, host, server, static: dir, app, spa = false, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024, maxConnections = 10_000, maxBufferedBytes, drainMs = 1000, ready = () => true } = {}) {
+export async function listenHttp(qu, { port = 0, host, server, static: dir, app, spa = false, docs, ws = true, sse = true, pingMs = 25_000, statsToken, maxFrameBytes = 8 * 1024 * 1024, maxConnections = 10_000, maxBufferedBytes, drainMs = 1000, ready = () => true } = {}) {
   const ownServer = !server;
   let wss = null;
   let stopping = false;
   const connections = () => (wss?.clients.size ?? 0) + (sseHandler?.size() ?? 0);
   const sseHandler = sse ? createSseHandler(qu, { maxBufferedBytes, ...(typeof sse === 'object' ? sse : {}), canOpen: () => !stopping && connections() < maxConnections }) : null;
-  const files = dir || app ? staticHandler([app, dir], { spa }) : null;
+  const files = dir || app || docs ? staticHandler([app, dir], { spa, docs }) : null;
   const started = Date.now();
   const transports = [...(ws ? ['ws'] : []), ...(sse ? ['sse'] : [])];
   const onRequest = (req, res) => {
@@ -130,7 +137,7 @@ export async function listenHttp(qu, { port = 0, host, server, static: dir, app,
       return;
     }
     if (req.method === 'GET' && path === '/info') {
-      const info = { name: 'qu-lite', version: VERSION, protocol: PROTOCOL_VERSION, transports, uptime: Math.round((Date.now() - started) / 1000) };
+      const info = { name: 'qu-lite', version: VERSION, protocol: PROTOCOL_VERSION, transports, uptime: Math.round((Date.now() - started) / 1000), ...(docs ? { docs: '/docs/' } : {}) };
       return res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' }).end(JSON.stringify(info));
     }
     if (req.method === 'GET' && (path === '/stats' || path === '/metrics')) return serveStats(req, res, path);

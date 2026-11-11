@@ -17,6 +17,7 @@
  * Logs: `log` gets one line per event; `logFormat: 'json'` makes every line
  * one JSON object ({time, event, ...fields}) for log collectors.
  */
+import { fileURLToPath } from 'node:url';
 import { createPeer } from './peer.js';
 import { nodeRegistry } from './node-registry.js';
 
@@ -46,7 +47,7 @@ const formatJson = (event, fields) => JSON.stringify({ time: new Date().toISOStr
 
 /**
  * @param {{
- *   port?: number, host?: string, db?: string, allow?: string[]|null, static?: string, app?: string, spa?: boolean,
+ *   port?: number, host?: string, db?: string, allow?: string[]|null, static?: string, app?: string, spa?: boolean, docs?: boolean|string,
  *   quota?: {records?: number, bytes?: number}|null, maxEnvelopeBytes?: number, maxSpaces?: number|null,
  *   rate?: number, statsToken?: string, maxConnections?: number, maxBufferedBytes?: number,
  *   log?: (line: string) => void, logFormat?: 'text'|'json', extra?: Array<string|[string, object]|Function>,
@@ -58,6 +59,7 @@ const formatJson = (event, fields) => JSON.stringify({ time: new Date().toISOStr
  *   `push`: Web Push for closed apps (push-relay.js); `subject` is the contact push services want.
  *   `app`: a folder served at `/` before `static` (your app; the relay's start page moves to /qu.html);
  *   `spa`: unknown paths without extension get the app's index.html (client-side routing).
+ *   `docs`: serve the documentation at /docs/ (`true`: docs-site/ built by web/build.mjs; or a folder).
  * @returns {Promise<{qu: object, port: number, spaces: string[], close: () => Promise<void>}>}
  */
 export async function createRelay({
@@ -68,6 +70,7 @@ export async function createRelay({
   static: dir,
   app,
   spa = false,
+  docs = false,
   quota = null,
   maxEnvelopeBytes,
   maxSpaces = null,
@@ -98,7 +101,7 @@ export async function createRelay({
       ...(push ? [['push-relay', push === true ? {} : push]] : []),
       ...extra,
     ],
-    transports: [['ws-server', { port, host, static: dir, app, spa, statsToken, maxConnections, maxBufferedBytes, ready: () => mirrorReady }]],
+    transports: [['ws-server', { port, host, static: dir, app, spa, docs: docs === true ? fileURLToPath(new URL('../docs-site', import.meta.url)) : docs || undefined, statsToken, maxConnections, maxBufferedBytes, ready: () => mirrorReady }]],
   });
   const spaces = await qu.mirror.ready;
   mirrorReady = true;

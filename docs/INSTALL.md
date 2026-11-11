@@ -98,6 +98,19 @@ configuration: `createClient()` connects to the address the page came from. Apps
 redeploy (`docker compose up -d` / `docker stack deploy …`). `/`, the demo and `/dist/…` are gone (426: only the API is there); the API,
 `/healthz` and `/info` stay.
 
+### Documentation on the relay
+
+The relay can serve this documentation at `/docs/`: the user guide (YubiKey, passkeys, new device, backup), the
+developer guide, recipes and the API reference, as plain HTML pages with navigation, light and dark mode, and
+phone-friendly. It is **off** until you turn it on:
+
+- Compose or Swarm: `QU_DOCS=1` in `.env`, then redeploy.
+- Without Docker: `node bin/mirror.mjs --static ./web --docs`.
+
+The pages are built from `docs/*.md` together with the browser bundle (`node web/build.mjs`, done in the Docker
+image). The start page (`/` or `/qu.html`) then links to them, and `/info` reports `docs: '/docs/'`. Nothing
+else changes; the relay serves files, no Markdown at runtime.
+
 ### Your app at `/`
 
 The relay can serve your app at `/` and stay the backend for it. Point `QU_APP` at a folder with your built app.

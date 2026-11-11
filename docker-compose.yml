@@ -28,6 +28,8 @@ services:
       QU_APP: "${QU_APP:-}"
       # 1 = unknown paths get the app's index.html (client-side routing)
       QU_SPA: "${QU_SPA:-}"
+      # 1 = the documentation at /docs/ (user guide, developer guide, API)
+      QU_DOCS: "${QU_DOCS:-}"
       # Web Push for closed apps (contact address for the push services); empty = off
       QU_PUSH: "${QU_PUSH:-}"
     volumes:
